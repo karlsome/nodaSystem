@@ -1,12 +1,16 @@
 // Noda System - Tablet UI for Inventory and Picking
 // Global variables
-let currentScreen = 'home';
+let currentScreen = 'login';
 let pickingRequests = [];
+let currentRequest = null;
 let currentRequestNumber = null;
 let currentFilter = 'all';
+let currentWorker = null;
+let socket = null;
 
 // API base URL - change this to your server URL
 const API_BASE_URL = 'http://localhost:3001/api';
+//const API_BASE_URL = 'https://nodasystem.onrender.com/api';
 
 // Initialize the application
 document.addEventListener('DOMContentLoaded', function() {
@@ -17,13 +21,112 @@ function initializeApp() {
     updateCurrentTime();
     setInterval(updateCurrentTime, 1000); // Update time every second
     
-    // Show home screen by default
-    showScreen('home');
+    // Check if already logged in
+    const savedWorker = localStorage.getItem('currentWorker');
+    if (savedWorker) {
+        currentWorker = savedWorker;
+        showWorkerInfo();
+        showScreen('home');
+        initializeSocket();
+    } else {
+        showScreen('login');
+    }
+}
+
+// Socket.IO initialization
+function initializeSocket() {
+    if (!socket) {
+        socket = io('http://localhost:3001');
+        
+        socket.on('connect', () => {
+            console.log('Connected to server');
+            updateConnectionStatus(true);
+            
+            // Register as tablet
+            socket.emit('device-register', {
+                type: 'tablet'
+            });
+        });
+        
+        socket.on('disconnect', () => {
+            console.log('Disconnected from server');
+            updateConnectionStatus(false);
+        });
+        
+        socket.on('item-completed', (data) => {
+            console.log('Item completed:', data);
+            showToast(`${data.deviceId} がアイテムを完了しました`, 'success');
+            
+            // Refresh current view if viewing the same request
+            if (currentRequestNumber === data.requestNumber) {
+                refreshPickingDetail();
+            }
+        });
+        
+        socket.on('error', (error) => {
+            console.error('Socket error:', error);
+            showToast('通信エラーが発生しました', 'error');
+        });
+    }
+}
+
+// Login functionality
+function handleLogin(event) {
+    event.preventDefault();
+    const workerName = document.getElementById('workerNameInput').value.trim();
+    
+    if (workerName) {
+        currentWorker = workerName;
+        localStorage.setItem('currentWorker', workerName);
+        showWorkerInfo();
+        showScreen('home');
+        initializeSocket();
+        showToast(`${workerName}さん、ようこそ！`, 'success');
+    }
+}
+
+function logout() {
+    currentWorker = null;
+    localStorage.removeItem('currentWorker');
+    if (socket) {
+        socket.disconnect();
+        socket = null;
+    }
+    hideWorkerInfo();
+    showScreen('login');
+    showToast('ログアウトしました', 'info');
+}
+
+function showWorkerInfo() {
+    document.getElementById('workerName').textContent = currentWorker;
+    document.getElementById('workerInfo').style.display = 'block';
+    document.getElementById('logoutBtn').style.display = 'block';
+}
+
+function hideWorkerInfo() {
+    document.getElementById('workerInfo').style.display = 'none';
+    document.getElementById('logoutBtn').style.display = 'none';
+}
+
+function updateConnectionStatus(connected) {
+    const statusElement = document.getElementById('connectionStatus');
+    const textElement = document.getElementById('connectionText');
+    
+    if (statusElement && textElement) {
+        if (connected) {
+            statusElement.className = 'w-3 h-3 bg-green-400 rounded-full animate-pulse';
+            textElement.textContent = '接続中';
+        } else {
+            statusElement.className = 'w-3 h-3 bg-red-400 rounded-full';
+            textElement.textContent = '切断';
+        }
+    }
 }
 
 // Screen management functions
 function showScreen(screenName) {
     // Hide all screens
+    document.getElementById('loginScreen').classList.add('hidden');
     document.getElementById('homeScreen').classList.add('hidden');
     document.getElementById('pickingScreen').classList.add('hidden');
     document.getElementById('pickingDetailScreen').classList.add('hidden');
@@ -49,6 +152,8 @@ function backToHome() {
 
 function backToPickingList() {
     showScreen('picking');
+    // Refresh the picking requests list to show latest data
+    loadPickingRequests();
 }
 
 // Time display function
@@ -151,8 +256,9 @@ async function viewPickingDetail(requestNumber) {
             throw new Error('Failed to fetch picking request details');
         }
         
-        const requestItems = await response.json();
-        displayPickingDetail(requestItems);
+        const request = await response.json();
+        currentRequest = request;
+        displayPickingDetail(request);
         showScreen('pickingDetail');
         
     } catch (error) {
@@ -161,37 +267,44 @@ async function viewPickingDetail(requestNumber) {
     }
 }
 
-function displayPickingDetail(requestItems) {
-    if (!requestItems || requestItems.length === 0) {
+function displayPickingDetail(request) {
+    if (!request) {
+        console.error('No request provided to displayPickingDetail');
         return;
     }
     
-    const firstItem = requestItems[0];
+    // Ensure lineItems exists
+    if (!request.lineItems) {
+        console.error('Request missing lineItems:', request);
+        request.lineItems = [];
+    }
     
     // Update header
-    document.getElementById('pickingDetailTitle').textContent = `ピッキング詳細: ${firstItem.requestNumber}`;
-    document.getElementById('pickingDetailSubtitle').textContent = `${requestItems.length}項目のピッキング依頼`;
+    document.getElementById('pickingDetailTitle').textContent = `ピッキング詳細: ${request.requestNumber}`;
+    document.getElementById('pickingDetailSubtitle').textContent = `${request.lineItems.length}項目のピッキング依頼`;
     
     // Update request info
     const infoContainer = document.getElementById('pickingRequestInfo');
+    const completedItems = request.lineItems.filter(item => item.status === 'completed').length;
+    
     infoContainer.innerHTML = `
         <div class="text-center">
             <p class="text-sm text-gray-500">依頼番号</p>
-            <p class="text-lg font-semibold text-gray-900">${firstItem.requestNumber}</p>
+            <p class="text-lg font-semibold text-gray-900">${request.requestNumber}</p>
         </div>
         <div class="text-center">
             <p class="text-sm text-gray-500">ステータス</p>
-            <span class="status-badge ${getStatusClass(firstItem.status)}">
-                ${getStatusText(firstItem.status)}
+            <span class="status-badge ${getStatusClass(request.status)}">
+                ${getStatusText(request.status)}
             </span>
         </div>
         <div class="text-center">
-            <p class="text-sm text-gray-500">作成日</p>
-            <p class="text-lg font-semibold text-gray-900">${new Date(firstItem.createdAt).toLocaleDateString('ja-JP')}</p>
+            <p class="text-sm text-gray-500">進捗</p>
+            <p class="text-lg font-semibold text-gray-900">${completedItems}/${request.lineItems.length}</p>
         </div>
         <div class="text-center">
             <p class="text-sm text-gray-500">作成者</p>
-            <p class="text-lg font-semibold text-gray-900">${firstItem.createdBy}</p>
+            <p class="text-lg font-semibold text-gray-900">${request.createdBy}</p>
         </div>
     `;
     
@@ -199,36 +312,186 @@ function displayPickingDetail(requestItems) {
     const itemsContainer = document.getElementById('pickingItemsList');
     itemsContainer.innerHTML = '';
     
-    requestItems.forEach((item, index) => {
+    request.lineItems.forEach((item, index) => {
         const itemElement = createPickingItemElement(item, index + 1);
         itemsContainer.appendChild(itemElement);
     });
+    
+    // Update start button state
+    const startBtn = document.getElementById('startPickingBtn');
+    if (request.status === 'pending') {
+        startBtn.disabled = false;
+        startBtn.onclick = startPickingProcess;
+        startBtn.innerHTML = '<i class="fas fa-play mr-2"></i>ピッキング開始';
+    } else if (request.status === 'in-progress') {
+        startBtn.disabled = true;
+        startBtn.onclick = null;
+        startBtn.innerHTML = '<i class="fas fa-clock mr-2"></i>進行中...';
+    } else if (request.status === 'completed') {
+        startBtn.disabled = false;
+        startBtn.onclick = completeAndBackToList;
+        startBtn.innerHTML = '<i class="fas fa-check mr-2"></i>完了';
+        startBtn.className = 'px-8 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors text-lg font-medium';
+    }
 }
 
 function createPickingItemElement(item, index) {
     const itemDiv = document.createElement('div');
-    itemDiv.className = 'picking-item';
+    itemDiv.className = 'picking-item border rounded-lg p-4 mb-3';
     
+    // Status icon and text based on item status
+    let statusIcon = '';
+    let statusText = '';
+    let statusClass = '';
+    
+    if (item.status === 'completed') {
+        statusIcon = '<i class="fas fa-check-circle text-green-500"></i>';
+        statusText = '完了';
+        statusClass = 'text-green-600';
+    } else if (item.status === 'in-progress') {
+        statusIcon = '<i class="fas fa-clock text-yellow-500"></i>';
+        statusText = '進行中';
+        statusClass = 'text-yellow-600';
+    } else {
+        statusIcon = '<i class="fas fa-clock text-gray-500"></i>';
+        statusText = '待機中';
+        statusClass = 'text-gray-600';
+    }
+    
+    const completedInfo = item.completedAt ? 
+        `<p class="text-xs text-gray-500">完了: ${new Date(item.completedAt).toLocaleString('ja-JP')}</p>
+         <p class="text-xs text-gray-500">作業者: ${item.completedBy || 'N/A'}</p>` : '';
+
     itemDiv.innerHTML = `
         <div class="flex items-center justify-between">
             <div class="flex items-center space-x-4">
                 <div class="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center">
-                    <span class="text-blue-600 font-bold">${index}</span>
+                    <span class="text-blue-600 font-bold">${item.lineNumber}</span>
                 </div>
                 <div>
                     <h4 class="text-lg font-semibold text-gray-900">品番: ${item.品番}</h4>
                     <p class="text-gray-600">背番号: ${item.背番号}</p>
                     <p class="text-sm text-gray-500">数量: ${item.quantity}</p>
+                    ${completedInfo}
                 </div>
             </div>
-            <div class="text-right">
-                <div class="text-2xl font-bold text-gray-900">${item.quantity}</div>
-                <div class="text-sm text-gray-500">個</div>
+            <div class="text-right flex items-center space-x-4">
+                <div>
+                    <div class="text-2xl font-bold text-gray-900">${item.quantity}</div>
+                    <div class="text-sm text-gray-500">個</div>
+                </div>
+                <div class="flex flex-col items-center space-y-2">
+                    <div class="text-2xl">
+                        ${statusIcon}
+                    </div>
+                    <div class="text-sm font-medium ${statusClass}">
+                        ${statusText}
+                    </div>
+                </div>
             </div>
         </div>
     `;
     
     return itemDiv;
+}
+
+// Start picking process
+async function startPickingProcess() {
+    if (!currentWorker) {
+        showToast('ログインが必要です', 'error');
+        return;
+    }
+    
+    if (!currentRequestNumber) {
+        showToast('ピッキング依頼が選択されていません', 'error');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE_URL}/picking-requests/${currentRequestNumber}/start`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                startedBy: currentWorker
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error('Failed to start picking process');
+        }
+        
+        const result = await response.json();
+        showToast('ピッキングプロセスを開始しました！', 'success');
+        
+        // Refresh the detail view
+        setTimeout(() => {
+            refreshPickingDetail();
+        }, 1000);
+        
+    } catch (error) {
+        console.error('Error starting picking process:', error);
+        showToast('ピッキング開始に失敗しました', 'error');
+    }
+}
+
+// Start individual item picking
+// Individual picking function removed - picking is now handled automatically by ESP32 devices
+/*
+async function startIndividualPicking(lineNumber, deviceId) {
+    if (!currentWorker) {
+        showToast('ログインが必要です', 'error');
+        return;
+    }
+    
+    if (!currentRequestNumber) {
+        showToast('ピッキング依頼が選択されていません', 'error');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE_URL}/picking-requests/${currentRequestNumber}/line/${lineNumber}/start`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                startedBy: currentWorker,
+                deviceId: deviceId
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error('Failed to start individual picking');
+        }
+        
+        const result = await response.json();
+        showToast(`背番号 ${deviceId} でピッキングを開始しました！`, 'success');
+        
+        // Refresh the detail view
+        setTimeout(() => {
+            refreshPickingDetail();
+        }, 1000);
+        
+    } catch (error) {
+        console.error('Error starting individual picking:', error);
+        showToast('ピッキング開始に失敗しました', 'error');
+    }
+}
+*/
+
+// Refresh picking detail
+async function refreshPickingDetail() {
+    if (currentRequestNumber) {
+        await viewPickingDetail(currentRequestNumber);
+    }
+}
+
+// Complete picking and back to list
+function completeAndBackToList() {
+    showToast('ピッキング完了！リストに戻ります', 'success');
+    backToPickingList();
 }
 
 function displayNoRequests() {
@@ -361,12 +624,18 @@ document.addEventListener('keydown', function(e) {
 });
 
 // Export functions for global access
+window.handleLogin = handleLogin;
+window.logout = logout;
 window.openInventorySystem = openInventorySystem;
 window.openPickingSystem = openPickingSystem;
 window.backToHome = backToHome;
 window.backToPickingList = backToPickingList;
 window.filterByStatus = filterByStatus;
 window.refreshPickingRequests = refreshPickingRequests;
+window.startPickingProcess = startPickingProcess;
+// window.startIndividualPicking = startIndividualPicking; // Removed - ESP32 handles picking automatically
+window.refreshPickingDetail = refreshPickingDetail;
+window.completeAndBackToList = completeAndBackToList;
 
 // Language translations
 const translations = {
@@ -1216,32 +1485,50 @@ function updateStats() {
 
 // Toast notifications
 function showToast(message, type = 'success') {
-    const toast = document.getElementById('successToast');
-    const messageElement = document.getElementById('successMessage');
+    const toast = document.getElementById('toast');
+    const messageElement = document.getElementById('toastMessage');
+    const iconElement = document.getElementById('toastIcon');
+    
+    if (!toast || !messageElement || !iconElement) {
+        console.error('Toast elements not found');
+        return;
+    }
     
     messageElement.textContent = message;
     
-    // Update toast styling based on type
-    toast.className = toast.className.replace(/bg-(green|red|yellow|blue)-500/g, '');
+    // Reset classes
+    toast.className = 'fixed top-4 right-4 text-white px-6 py-3 rounded-lg shadow-lg z-50 transform transition-all duration-300';
     
+    // Update toast styling based on type
     switch(type) {
         case 'error':
             toast.classList.add('bg-red-500');
+            iconElement.className = 'fas fa-times-circle mr-2';
             break;
         case 'warning':
             toast.classList.add('bg-yellow-500');
+            iconElement.className = 'fas fa-exclamation-triangle mr-2';
             break;
         case 'info':
             toast.classList.add('bg-blue-500');
+            iconElement.className = 'fas fa-info-circle mr-2';
             break;
-        default:
+        default: // success
             toast.classList.add('bg-green-500');
+            iconElement.className = 'fas fa-check-circle mr-2';
+            break;
     }
     
+    // Show toast
     toast.classList.remove('hidden');
+    toast.classList.add('translate-x-0');
     
+    // Hide after 3 seconds
     setTimeout(() => {
-        toast.classList.add('hidden');
+        toast.classList.add('translate-x-full');
+        setTimeout(() => {
+            toast.classList.add('hidden');
+        }, 300);
     }, 3000);
 }
 

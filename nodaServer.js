@@ -15,7 +15,7 @@ const io = new Server(httpServer, {
     }
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(cors());
@@ -249,6 +249,18 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
     const collection = db.collection(process.env.COLLECTION_NAME);
     const now = new Date();
     
+    // Get the request first to get item details for inventory update
+    const request = await collection.findOne({ requestNumber });
+    if (!request) {
+        throw new Error('Request not found');
+    }
+    
+    // Find the specific line item
+    const lineItem = request.lineItems.find(item => item.lineNumber === lineNumber);
+    if (!lineItem) {
+        throw new Error('Line item not found');
+    }
+    
     // Update the specific line item
     const updateResult = await collection.updateOne(
         { 
@@ -270,9 +282,21 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         throw new Error('Line item not found');
     }
     
+    // Create inventory transaction record to match admin backend structure
+    await createInventoryTransaction({
+        背番号: lineItem.背番号,
+        品番: lineItem.品番,
+        pickedQuantity: lineItem.quantity,
+        action: 'Picking',
+        source: `IoT Device ${lineItem.背番号} - ${completedBy}`,
+        requestNumber: requestNumber,
+        lineNumber: lineNumber,
+        completedBy: completedBy
+    });
+    
     // Check if all line items are completed
-    const request = await collection.findOne({ requestNumber });
-    const allCompleted = request.lineItems.every(item => item.status === 'completed');
+    const updatedRequest = await collection.findOne({ requestNumber });
+    const allCompleted = updatedRequest.lineItems.every(item => item.status === 'completed');
     
     if (allCompleted) {
         // Update overall request status to completed
@@ -289,8 +313,163 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         console.log(`Request ${requestNumber} fully completed!`);
     }
     
-    return { allCompleted, request };
+    return { allCompleted, request: updatedRequest };
 }
+
+// Create inventory transaction to match admin backend structure
+async function createInventoryTransaction(transactionData) {
+    try {
+        // Connect to the submittedDB database (same as admin backend)
+        const submittedDb = client.db("submittedDB");
+        const inventoryCollection = submittedDb.collection('nodaInventoryDB');
+        
+        // Get current inventory state for this item using aggregation pipeline (same as admin backend)
+        const inventoryResults = await inventoryCollection.aggregate([
+            { $match: { 背番号: transactionData.背番号 } },
+            {
+                $addFields: {
+                    timeStampDate: {
+                        $cond: {
+                            if: { $type: "$timeStamp" },
+                            then: {
+                                $cond: {
+                                    if: { $eq: [{ $type: "$timeStamp" }, "string"] },
+                                    then: { $dateFromString: { dateString: "$timeStamp" } },
+                                    else: "$timeStamp"
+                                }
+                            },
+                            else: new Date()
+                        }
+                    }
+                }
+            },
+            { $sort: { timeStampDate: -1 } },
+            { $limit: 1 }
+        ]).toArray();
+        
+        // Get current quantities (default to 0 if no previous record)
+        let currentPhysical = 0;
+        let currentReserved = 0;
+        let currentAvailable = 0;
+        
+        if (inventoryResults.length > 0) {
+            const inventoryItem = inventoryResults[0];
+            currentPhysical = inventoryItem.physicalQuantity || inventoryItem.runningQuantity || 0;
+            currentReserved = inventoryItem.reservedQuantity || 0;
+            currentAvailable = inventoryItem.availableQuantity || inventoryItem.runningQuantity || 0;
+        }
+        
+        // Calculate new quantities after picking
+        const pickedQuantity = transactionData.pickedQuantity;
+        const newPhysicalQuantity = currentPhysical - pickedQuantity;  // Reduce physical stock
+        const newReservedQuantity = currentReserved - pickedQuantity;  // Reduce reserved stock
+        const newAvailableQuantity = newPhysicalQuantity - newReservedQuantity; // Recalculate available
+        
+        // Create new transaction record (exact same structure as admin backend)
+        const transactionRecord = {
+            背番号: transactionData.背番号,
+            品番: transactionData.品番,
+            timeStamp: new Date(),
+            Date: new Date().toISOString().split('T')[0],
+            
+            // Two-stage inventory fields (same as admin backend)
+            physicalQuantity: newPhysicalQuantity,
+            reservedQuantity: newReservedQuantity,
+            availableQuantity: newAvailableQuantity,
+            
+            // Legacy field for compatibility
+            runningQuantity: newPhysicalQuantity,
+            lastQuantity: currentPhysical,
+            
+            action: `Picking (-${pickedQuantity})`,
+            source: transactionData.source,
+            
+            // Optional picking-specific fields
+            requestId: transactionData.requestNumber,
+            lineNumber: transactionData.lineNumber,
+            note: `Picked ${pickedQuantity} units for request ${transactionData.requestNumber} line ${transactionData.lineNumber} by ${transactionData.completedBy}`
+        };
+        
+        // Insert the new record
+        const result = await inventoryCollection.insertOne(transactionRecord);
+        
+        console.log(`📦 Inventory transaction created for ${transactionData.背番号}:`);
+        console.log(`   Picked: ${pickedQuantity} units`);
+        console.log(`   Physical: ${currentPhysical} → ${newPhysicalQuantity}`);
+        console.log(`   Reserved: ${currentReserved} → ${newReservedQuantity}`);
+        console.log(`   Available: ${currentAvailable} → ${newAvailableQuantity}`);
+        
+        return result;
+        
+    } catch (error) {
+        console.error('Error creating inventory transaction:', error);
+        throw error;
+    }
+}
+
+// Start individual line item picking
+app.post('/api/picking-requests/:requestNumber/line/:lineNumber/start', async (req, res) => {
+    try {
+        const { requestNumber, lineNumber } = req.params;
+        const { startedBy, deviceId } = req.body;
+        
+        const db = client.db('nodaSystem');
+        const collection = db.collection('pickingRequests');
+        
+        // Update the specific line item to in-progress
+        const updateResult = await collection.updateOne(
+            { 
+                requestNumber: requestNumber,
+                'lineItems.lineNumber': parseInt(lineNumber)
+            },
+            { 
+                $set: { 
+                    'lineItems.$.status': 'in-progress',
+                    'lineItems.$.startedAt': new Date(),
+                    'lineItems.$.startedBy': startedBy
+                }
+            }
+        );
+        
+        if (updateResult.matchedCount === 0) {
+            return res.status(404).json({ error: 'Line item not found' });
+        }
+        
+        // Send display update to specific device
+        if (deviceId) {
+            const lineItem = await collection.findOne(
+                { requestNumber: requestNumber },
+                { projection: { lineItems: { $elemMatch: { lineNumber: parseInt(lineNumber) } } } }
+            );
+            
+            if (lineItem && lineItem.lineItems && lineItem.lineItems[0]) {
+                const item = lineItem.lineItems[0];
+                io.emit('display-update', {
+                    deviceId: deviceId,
+                    color: 'green',
+                    quantity: item.quantity,
+                    message: `Pick ${item.quantity}`,
+                    requestNumber: requestNumber,
+                    lineNumber: parseInt(lineNumber),
+                    品番: item.品番
+                });
+                
+                console.log(`Picking started for ${requestNumber} line ${lineNumber} on device ${deviceId} by ${startedBy}`);
+            }
+        }
+        
+        res.json({ 
+            message: 'Individual picking started successfully',
+            requestNumber: requestNumber,
+            lineNumber: parseInt(lineNumber),
+            deviceId: deviceId
+        });
+        
+    } catch (error) {
+        console.error('Error starting individual picking:', error);
+        res.status(500).json({ error: 'Failed to start individual picking' });
+    }
+});
 
 // Update picking request status
 app.put('/api/picking-requests/:requestNumber/line/:lineNumber/status', async (req, res) => {

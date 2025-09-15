@@ -6,6 +6,7 @@
     <title>Noda System | 棚卸し・ピッキングシステム</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <link rel="stylesheet" href="styles.css">
     <script>
         tailwind.config = {
@@ -44,6 +45,13 @@
                             <p class="text-sm text-gray-600">現在時刻</p>
                             <p class="text-lg font-mono font-semibold text-gray-900" id="currentTime">--:--</p>
                         </div>
+                        <div class="text-right" id="workerInfo" style="display: none;">
+                            <p class="text-sm text-gray-600">作業者</p>
+                            <p class="text-lg font-semibold text-gray-900" id="workerName">--</p>
+                        </div>
+                        <button onclick="logout()" id="logoutBtn" style="display: none;" class="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors">
+                            <i class="fas fa-sign-out-alt mr-2"></i>ログアウト
+                        </button>
                     </div>
                 </div>
             </div>
@@ -51,8 +59,33 @@
 
         <!-- Main Content Area -->
         <main class="flex-1 p-6">
+            <!-- Login Screen -->
+            <div id="loginScreen" class="max-w-md mx-auto">
+                <div class="bg-white rounded-2xl shadow-xl p-8">
+                    <div class="text-center mb-8">
+                        <div class="w-20 h-20 bg-primary rounded-full flex items-center justify-center mx-auto mb-4">
+                            <i class="fas fa-user text-white text-3xl"></i>
+                        </div>
+                        <h2 class="text-2xl font-bold text-gray-900 mb-2">ログイン</h2>
+                        <p class="text-gray-600">作業者名を入力してください</p>
+                    </div>
+                    
+                    <form onsubmit="handleLogin(event)" class="space-y-6">
+                        <div>
+                            <label for="workerNameInput" class="block text-sm font-medium text-gray-700 mb-2">作業者名</label>
+                            <input type="text" id="workerNameInput" required 
+                                   class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-transparent text-lg"
+                                   placeholder="例: 田中太郎">
+                        </div>
+                        <button type="submit" class="w-full py-3 bg-primary text-white rounded-lg hover:bg-blue-600 transition-colors text-lg font-medium">
+                            <i class="fas fa-sign-in-alt mr-2"></i>ログイン
+                        </button>
+                    </form>
+                </div>
+            </div>
+
             <!-- Home Screen -->
-            <div id="homeScreen" class="max-w-4xl mx-auto">
+            <div id="homeScreen" class="hidden max-w-4xl mx-auto">
                 <div class="text-center mb-8">
                     <h2 class="text-3xl font-bold text-gray-900 mb-2">システム選択</h2>
                     <p class="text-lg text-gray-600">実行する作業を選択してください</p>
@@ -147,10 +180,26 @@
                             <p class="text-lg text-gray-600" id="pickingDetailSubtitle"></p>
                         </div>
                     </div>
+                    <div class="flex space-x-4">
+                        <button onclick="startPickingProcess()" id="startPickingBtn" 
+                                class="px-8 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors text-lg font-medium">
+                            <i class="fas fa-play mr-2"></i>ピッキング開始
+                        </button>
+                        <button onclick="refreshPickingDetail()" class="px-6 py-3 bg-primary text-white rounded-lg hover:bg-blue-600 transition-colors">
+                            <i class="fas fa-refresh mr-2"></i>更新
+                        </button>
+                    </div>
                 </div>
 
-                <!-- Request Info -->
+                <!-- Request Status -->
                 <div class="bg-white rounded-xl shadow-lg p-6 mb-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-xl font-bold text-gray-900">依頼ステータス</h3>
+                        <div class="flex items-center space-x-2">
+                            <div class="w-3 h-3 bg-green-400 rounded-full animate-pulse" id="connectionStatus"></div>
+                            <span class="text-sm text-gray-600" id="connectionText">接続中</span>
+                        </div>
+                    </div>
                     <div class="grid grid-cols-2 md:grid-cols-4 gap-4" id="pickingRequestInfo">
                         <!-- Request info will be populated here -->
                     </div>
