@@ -1,0 +1,32 @@
+{
+  "name": "noda-system",
+  "version": "1.0.0",
+  "description": "Tablet UI system for inventory management and picking requests",
+  "main": "nodaServer.js",
+  "scripts": {
+    "start": "node nodaServer.js",
+    "dev": "nodemon nodaServer.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "inventory",
+    "picking",
+    "warehouse",
+    "tablet",
+    "mongodb"
+  ],
+  "author": "Karl Ranile",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "mongodb": "^6.3.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

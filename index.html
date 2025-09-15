@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Noda System | 棚卸し・ピッキングシステム</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+    <link rel="stylesheet" href="styles.css">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#3b82f6',
+                        secondary: '#64748b',
+                        success: '#10b981',
+                        warning: '#f59e0b',
+                        danger: '#ef4444'
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-gray-100 font-sans">
+    <!-- Main Container -->
+    <div class="min-h-screen flex flex-col">
+        <!-- Header -->
+        <header class="bg-white shadow-sm border-b-4 border-primary">
+            <div class="max-w-7xl mx-auto px-6 py-4">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center space-x-4">
+                        <div class="w-12 h-12 bg-primary rounded-lg flex items-center justify-center">
+                            <i class="fas fa-warehouse text-white text-xl"></i>
+                        </div>
+                        <div>
+                            <h1 class="text-2xl font-bold text-gray-900">Noda System</h1>
+                            <p class="text-sm text-gray-600">棚卸し・ピッキングシステム</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center space-x-4">
+                        <div class="text-right">
+                            <p class="text-sm text-gray-600">現在時刻</p>
+                            <p class="text-lg font-mono font-semibold text-gray-900" id="currentTime">--:--</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content Area -->
+        <main class="flex-1 p-6">
+            <!-- Home Screen -->
+            <div id="homeScreen" class="max-w-4xl mx-auto">
+                <div class="text-center mb-8">
+                    <h2 class="text-3xl font-bold text-gray-900 mb-2">システム選択</h2>
+                    <p class="text-lg text-gray-600">実行する作業を選択してください</p>
+                </div>
+
+                <!-- Main Action Buttons -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-3xl mx-auto">
+                    <!-- 棚卸し Button -->
+                    <button onclick="openInventorySystem()" 
+                            class="group bg-gradient-to-br from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 
+                                   text-white rounded-2xl p-12 shadow-xl hover:shadow-2xl transform hover:scale-105 
+                                   transition-all duration-300 border-4 border-blue-400">
+                        <div class="text-center">
+                            <div class="w-24 h-24 bg-white bg-opacity-20 rounded-full flex items-center justify-center mx-auto mb-6">
+                                <i class="fas fa-clipboard-list text-5xl text-white"></i>
+                            </div>
+                            <h3 class="text-4xl font-bold mb-3">棚卸し</h3>
+                            <p class="text-xl opacity-90">在庫確認・棚卸し作業</p>
+                        </div>
+                    </button>
+
+                    <!-- Picking Request Button -->
+                    <button onclick="openPickingSystem()" 
+                            class="group bg-gradient-to-br from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 
+                                   text-white rounded-2xl p-12 shadow-xl hover:shadow-2xl transform hover:scale-105 
+                                   transition-all duration-300 border-4 border-green-400">
+                        <div class="text-center">
+                            <div class="w-24 h-24 bg-white bg-opacity-20 rounded-full flex items-center justify-center mx-auto mb-6">
+                                <i class="fas fa-hand-paper text-5xl text-white"></i>
+                            </div>
+                            <h3 class="text-4xl font-bold mb-3">ピッキング</h3>
+                            <p class="text-xl opacity-90">ピッキング依頼処理</p>
+                        </div>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Picking Request List Screen -->
+            <div id="pickingScreen" class="hidden max-w-6xl mx-auto">
+                <div class="flex items-center justify-between mb-6">
+                    <div class="flex items-center space-x-4">
+                        <button onclick="backToHome()" class="w-12 h-12 bg-gray-200 hover:bg-gray-300 rounded-lg flex items-center justify-center transition-colors">
+                            <i class="fas fa-arrow-left text-xl text-gray-700"></i>
+                        </button>
+                        <div>
+                            <h2 class="text-3xl font-bold text-gray-900">ピッキング依頼一覧</h2>
+                            <p class="text-lg text-gray-600">処理するピッキング依頼を選択してください</p>
+                        </div>
+                    </div>
+                    <button onclick="refreshPickingRequests()" class="px-6 py-3 bg-primary text-white rounded-lg hover:bg-blue-600 transition-colors">
+                        <i class="fas fa-refresh mr-2"></i>更新
+                    </button>
+                </div>
+
+                <!-- Status Filter -->
+                <div class="mb-6">
+                    <div class="flex space-x-2">
+                        <button onclick="filterByStatus('all')" class="status-filter active px-4 py-2 rounded-lg font-medium transition-colors">
+                            全て
+                        </button>
+                        <button onclick="filterByStatus('pending')" class="status-filter px-4 py-2 rounded-lg font-medium transition-colors">
+                            待機中
+                        </button>
+                        <button onclick="filterByStatus('in-progress')" class="status-filter px-4 py-2 rounded-lg font-medium transition-colors">
+                            進行中
+                        </button>
+                        <button onclick="filterByStatus('completed')" class="status-filter px-4 py-2 rounded-lg font-medium transition-colors">
+                            完了
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Picking Requests List -->
+                <div id="pickingRequestsList" class="space-y-4">
+                    <!-- Loading state -->
+                    <div id="loadingState" class="text-center py-12">
+                        <div class="animate-spin w-12 h-12 border-4 border-primary border-t-transparent rounded-full mx-auto mb-4"></div>
+                        <p class="text-gray-600">ピッキング依頼を読み込み中...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Picking Request Detail Screen -->
+            <div id="pickingDetailScreen" class="hidden max-w-4xl mx-auto">
+                <div class="flex items-center justify-between mb-6">
+                    <div class="flex items-center space-x-4">
+                        <button onclick="backToPickingList()" class="w-12 h-12 bg-gray-200 hover:bg-gray-300 rounded-lg flex items-center justify-center transition-colors">
+                            <i class="fas fa-arrow-left text-xl text-gray-700"></i>
+                        </button>
+                        <div>
+                            <h2 class="text-3xl font-bold text-gray-900" id="pickingDetailTitle">ピッキング詳細</h2>
+                            <p class="text-lg text-gray-600" id="pickingDetailSubtitle"></p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Request Info -->
+                <div class="bg-white rounded-xl shadow-lg p-6 mb-6">
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4" id="pickingRequestInfo">
+                        <!-- Request info will be populated here -->
+                    </div>
+                </div>
+
+                <!-- Items List -->
+                <div class="bg-white rounded-xl shadow-lg">
+                    <div class="p-6 border-b border-gray-200">
+                        <h3 class="text-xl font-bold text-gray-900">ピッキング項目</h3>
+                    </div>
+                    <div id="pickingItemsList" class="divide-y divide-gray-200">
+                        <!-- Items will be populated here -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Inventory Screen -->
+            <div id="inventoryScreen" class="hidden max-w-4xl mx-auto">
+                <div class="flex items-center justify-between mb-6">
+                    <div class="flex items-center space-x-4">
+                        <button onclick="backToHome()" class="w-12 h-12 bg-gray-200 hover:bg-gray-300 rounded-lg flex items-center justify-center transition-colors">
+                            <i class="fas fa-arrow-left text-xl text-gray-700"></i>
+                        </button>
+                        <div>
+                            <h2 class="text-3xl font-bold text-gray-900">棚卸しシステム</h2>
+                            <p class="text-lg text-gray-600">在庫確認・棚卸し作業</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="text-center py-12">
+                    <div class="w-24 h-24 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-6">
+                        <i class="fas fa-tools text-4xl text-blue-600"></i>
+                    </div>
+                    <h3 class="text-2xl font-bold text-gray-900 mb-4">開発中</h3>
+                    <p class="text-lg text-gray-600">棚卸しシステムは現在開発中です</p>
+                </div>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="bg-white border-t border-gray-200 py-4">
+            <div class="max-w-7xl mx-auto px-6">
+                <div class="text-center text-sm text-gray-600">
+                    <p>&copy; 2025 Noda System. All rights reserved.</p>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="hidden fixed top-4 right-4 text-white px-6 py-3 rounded-lg shadow-lg z-50 transform transition-all duration-300">
+        <div class="flex items-center">
+            <i id="toastIcon" class="fas fa-check-circle mr-2"></i>
+            <span id="toastMessage"></span>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

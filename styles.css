@@ -1,0 +1,557 @@
+/* Tablet-optimized CSS for Noda System */
+
+/* Custom animations and transitions */
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideInRight {
+    from { transform: translateX(100%); }
+    to { transform: translateX(0); }
+}
+
+@keyframes bounceIn {
+    0% { transform: scale(0.3); opacity: 0; }
+    50% { transform: scale(1.05); }
+    70% { transform: scale(0.9); }
+    100% { transform: scale(1); opacity: 1; }
+}
+
+/* Global tablet touch styles */
+body {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    -khtml-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    font-family: 'Hiragino Sans', 'Yu Gothic UI', 'Meiryo UI', sans-serif;
+}
+
+/* Enhanced button touch targets for tablet */
+button {
+    min-height: 48px;
+    min-width: 48px;
+    touch-action: manipulation;
+}
+
+/* Large touch-friendly buttons */
+.main-action-button {
+    min-height: 200px;
+    padding: 2rem;
+    touch-action: manipulation;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.main-action-button:hover {
+    transform: translateY(-4px) scale(1.02);
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+}
+
+.main-action-button:active {
+    transform: translateY(-2px) scale(0.98);
+    transition: all 0.1s ease;
+}
+
+/* Status filter buttons */
+.status-filter {
+    min-height: 48px;
+    padding: 12px 24px;
+    border: 2px solid transparent;
+    background-color: #f3f4f6;
+    color: #6b7280;
+}
+
+.status-filter.active {
+    background-color: #3b82f6;
+    color: white;
+    border-color: #2563eb;
+}
+
+.status-filter:hover:not(.active) {
+    background-color: #e5e7eb;
+    color: #374151;
+}
+
+/* Picking request cards */
+.picking-request-card {
+    background: white;
+    border: 2px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 24px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    min-height: 120px;
+}
+
+.picking-request-card:hover {
+    border-color: #3b82f6;
+    transform: translateY(-2px);
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1);
+}
+
+.picking-request-card:active {
+    transform: translateY(0);
+    transition: all 0.1s ease;
+}
+
+/* Status badges */
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 12px;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.status-pending {
+    background-color: #fef3c7;
+    color: #92400e;
+}
+
+.status-in-progress {
+    background-color: #dbeafe;
+    color: #1e40af;
+}
+
+.status-completed {
+    background-color: #d1fae5;
+    color: #065f46;
+}
+
+/* Loading animation */
+.loading-spinner {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* Toast notifications */
+.toast-success {
+    background-color: #10b981;
+}
+
+.toast-error {
+    background-color: #ef4444;
+}
+
+.toast-warning {
+    background-color: #f59e0b;
+}
+
+.toast-info {
+    background-color: #3b82f6;
+}
+
+/* Back button */
+.back-button {
+    width: 48px;
+    height: 48px;
+    border-radius: 8px;
+    background-color: #f3f4f6;
+    border: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.back-button:hover {
+    background-color: #e5e7eb;
+    transform: translateX(-2px);
+}
+
+.back-button:active {
+    background-color: #d1d5db;
+    transform: translateX(0);
+}
+
+/* Item list styles */
+.picking-item {
+    padding: 20px;
+    border-bottom: 1px solid #e5e7eb;
+    transition: background-color 0.2s ease;
+}
+
+.picking-item:hover {
+    background-color: #f9fafb;
+}
+
+.picking-item:last-child {
+    border-bottom: none;
+}
+
+/* Progress indicators */
+.progress-circle {
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-size: 1.25rem;
+}
+
+/* Responsive tablet adjustments */
+@media (min-width: 768px) and (max-width: 1024px) {
+    /* Tablet specific styles */
+    .main-container {
+        padding: 0 32px;
+    }
+    
+    .main-action-button {
+        min-height: 250px;
+        padding: 3rem;
+    }
+    
+    .picking-request-card {
+        padding: 32px;
+        min-height: 140px;
+    }
+    
+    /* Larger text for tablet readability */
+    h1 { font-size: 2rem; }
+    h2 { font-size: 1.875rem; }
+    h3 { font-size: 1.5rem; }
+    
+    /* Touch-friendly spacing */
+    .space-y-4 > * + * {
+        margin-top: 1.5rem;
+    }
+    
+    .space-y-6 > * + * {
+        margin-top: 2rem;
+    }
+}
+
+/* Large tablet and small desktop */
+@media (min-width: 1025px) {
+    .main-container {
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+}
+
+/* Portrait tablet */
+@media (max-width: 768px) and (orientation: portrait) {
+    .main-action-button {
+        min-height: 180px;
+        padding: 1.5rem;
+    }
+    
+    .grid-cols-1.md\\:grid-cols-2 {
+        grid-template-columns: 1fr;
+        gap: 1.5rem;
+    }
+    
+    .picking-request-card {
+        padding: 20px;
+        min-height: 100px;
+    }
+}
+
+/* Landscape tablet */
+@media (max-width: 1024px) and (orientation: landscape) {
+    .header {
+        padding: 12px 0;
+    }
+    
+    .main-content {
+        padding: 24px;
+    }
+}
+
+/* Touch device specific styles */
+@media (hover: none) and (pointer: coarse) {
+    /* Remove hover effects on touch devices */
+    .picking-request-card:hover {
+        transform: none;
+        border-color: #e5e7eb;
+        box-shadow: none;
+    }
+    
+    .main-action-button:hover {
+        transform: none;
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+    }
+    
+    /* Add touch feedback */
+    .picking-request-card:active {
+        background-color: #f3f4f6;
+        border-color: #3b82f6;
+        transform: scale(0.98);
+    }
+    
+    .main-action-button:active {
+        transform: scale(0.95);
+    }
+}
+
+/* Focus styles for accessibility */
+button:focus,
+.picking-request-card:focus {
+    outline: 2px solid #3b82f6;
+    outline-offset: 2px;
+}
+
+/* Smooth page transitions */
+.screen-transition {
+    animation: fadeIn 0.3s ease-out;
+}
+
+/* Custom scrollbars for better touch experience */
+::-webkit-scrollbar {
+    width: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #c1c1c1;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #a8a8a8;
+}
+
+/* Print styles */
+@media print {
+    .no-print {
+        display: none !important;
+    }
+    
+    body {
+        -webkit-print-color-adjust: exact;
+        color-adjust: exact;
+    }
+}
+
+/* Custom scrollbar for webkit browsers */
+::-webkit-scrollbar {
+    width: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #f1f5f9;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+}
+
+/* Print styles */
+@media print {
+    .no-print {
+        display: none !important;
+    }
+    
+    .print-only {
+        display: block !important;
+    }
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+    .bg-gray-50 {
+        background-color: white;
+    }
+    
+    .text-gray-600 {
+        color: #1f2937;
+    }
+    
+    .border-gray-300 {
+        border-color: #4b5563;
+    }
+}
+
+/* Reduce motion for users who prefer it */
+@media (prefers-reduced-motion: reduce) {
+    * {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+
+/* Loading spinner */
+.spinner {
+    border: 4px solid #f3f4f6;
+    border-top: 4px solid #2563eb;
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* QR Scanner simulation styles */
+.qr-scanner-frame {
+    position: relative;
+    border: 2px dashed #2563eb;
+    border-radius: 8px;
+    background: rgba(37, 99, 235, 0.05);
+}
+
+.qr-scanner-frame::before {
+    content: '';
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    right: 10px;
+    bottom: 10px;
+    border: 2px solid #2563eb;
+    border-radius: 4px;
+    animation: scanLine 2s ease-in-out infinite;
+}
+
+@keyframes scanLine {
+    0%, 100% { opacity: 0.3; }
+    50% { opacity: 1; }
+}
+
+/* Status indicators */
+.status-online {
+    position: relative;
+}
+
+.status-online::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 8px;
+    height: 8px;
+    background-color: #16a34a;
+    border-radius: 50%;
+    border: 2px solid white;
+}
+
+/* Card hover effects */
+.card-hover {
+    transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
+}
+
+.card-hover:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+}
+
+/* Gradient backgrounds */
+.gradient-primary {
+    background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+}
+
+.gradient-success {
+    background: linear-gradient(135deg, #16a34a 0%, #15803d 100%);
+}
+
+.gradient-warning {
+    background: linear-gradient(135deg, #d97706 0%, #b45309 100%);
+}
+
+/* Table styles for larger screens */
+@media (min-width: 768px) {
+    .data-table {
+        min-width: 100%;
+    }
+    
+    .data-table th,
+    .data-table td {
+        padding: 12px;
+        text-align: left;
+        border-bottom: 1px solid #e5e7eb;
+    }
+    
+    .data-table th {
+        background-color: #f9fafb;
+        font-weight: 600;
+        color: #374151;
+    }
+    
+    .data-table tr:hover {
+        background-color: #f9fafb;
+    }
+}
+
+/* Mobile-specific adjustments */
+@media (max-width: 640px) {
+    .mobile-stack {
+        flex-direction: column;
+    }
+    
+    .mobile-full {
+        width: 100%;
+    }
+    
+    .mobile-center {
+        text-align: center;
+    }
+    
+    .mobile-hidden {
+        display: none;
+    }
+}
+
+/* Tablet-specific adjustments */
+@media (min-width: 641px) and (max-width: 1024px) {
+    .tablet-grid-2 {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    
+    .tablet-text-lg {
+        font-size: 1.125rem;
+    }
+}
+
+/* Offline indicator */
+.offline-indicator {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    background-color: #ef4444;
+    color: white;
+    text-align: center;
+    padding: 8px;
+    z-index: 1000;
+    transform: translateY(-100%);
+    transition: transform 0.3s ease-in-out;
+}
+
+.offline-indicator.show {
+    transform: translateY(0);
+}
+
+/* Success states */
+.success-pulse {
+    animation: successPulse 0.6s ease-in-out;
+}
+
+@keyframes successPulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.05); }
+    100% { transform: scale(1); }
+}
