@@ -108,6 +108,14 @@ struct DeviceState {
   String currentMessage = "Connecting...";
 } deviceState;
 
+// Screen power management
+struct ScreenState {
+  bool isScreenOn = true;
+  unsigned long lastActivityTime = 0;
+  const unsigned long SCREEN_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+  bool shouldCheckTimeout = false;
+} screenState;
+
 // --- Arduino_GFX objects ---
 Arduino_DataBus *bus = new Arduino_ESP32SPI(
   EXAMPLE_PIN_NUM_LCD_DC, EXAMPLE_PIN_NUM_LCD_CS,
@@ -136,7 +144,60 @@ static void apply_relays() {
   digitalWrite(PIN_RELAY_B, displayGreen ? HIGH : LOW);   // GPIO4 - GREEN when picking
 }
 
+static void turn_screen_off() {
+  Serial.println("🌙 Turning screen off to prevent burn-in (15min timeout)");
+  gfx->fillScreen(BLACK);
+  gfx->flush();
+  
+  // Turn off LCD backlight completely for power saving
+  ledcWrite(EXAMPLE_PIN_NUM_LCD_BL, 0); // 0% backlight = completely off
+  
+  screenState.isScreenOn = false;
+  // Note: GPIO relays stay active, LCD backlight and display content are off
+}
+
+static void turn_screen_on() {
+  if (!screenState.isScreenOn) {
+    Serial.println("☀️ Turning screen back on");
+    
+    // Restore LCD backlight to 80%
+    ledcWrite(EXAMPLE_PIN_NUM_LCD_BL, (1 << LEDC_TIMER_10_BIT) * 80 / 100);
+    
+    screenState.isScreenOn = true;
+    update_screen_display(); // Refresh with current content
+  }
+}
+
+static void update_screen_activity() {
+  screenState.lastActivityTime = millis();
+  screenState.shouldCheckTimeout = !displayGreen; // Only timeout during red/standby modes
+  turn_screen_on(); // Wake up screen if it was off
+}
+
+static void check_screen_timeout() {
+  // Only check timeout during red/standby modes
+  if (!screenState.shouldCheckTimeout || displayGreen) {
+    return;
+  }
+  
+  unsigned long now = millis();
+  // Handle millis() overflow (happens every ~50 days)
+  if (now < screenState.lastActivityTime) {
+    screenState.lastActivityTime = now;
+    return;
+  }
+  
+  if (screenState.isScreenOn && (now - screenState.lastActivityTime) >= screenState.SCREEN_TIMEOUT_MS) {
+    turn_screen_off();
+  }
+}
+
 static void update_screen_display() {
+  // Don't update if screen is intentionally off for power saving
+  if (!screenState.isScreenOn) {
+    return;
+  }
+
   // Clear screen with background color
   gfx->fillScreen(displayGreen ? GREEN : RED);
 
@@ -213,6 +274,7 @@ static void complete_picking_task() {
 
   displayGreen = false;
   apply_relays();
+  update_screen_activity(); // Reset screen timeout and wake up if needed
   update_screen_display();
 
   Serial.println("Task completed - returning to standby");
@@ -234,6 +296,7 @@ void my_touchpad_read(lv_indev_drv_t * /*indev_drv*/, lv_indev_data_t *data) {
     data->point.y = ty;
     data->state = LV_INDEV_STATE_PRESSED;
     if (!was_pressed) {
+      update_screen_activity(); // Reset timeout and wake screen on touch
       if (deviceState.isPickingMode) {
         complete_picking_task();
       }
@@ -261,6 +324,7 @@ void check_bridge_button() {
     int prev = btnStable;
     btnStable = raw;
     if (prev == HIGH && btnStable == LOW) {
+      update_screen_activity(); // Reset timeout and wake screen on button press
       if (deviceState.isPickingMode) {
         complete_picking_task();
       }
@@ -274,6 +338,7 @@ void onWiFiConnected() {
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
   deviceState.currentMessage = "WiFi Connected";
+  update_screen_activity(); // Reset timeout and wake screen
   update_screen_display();
 }
 
@@ -281,6 +346,7 @@ void onWiFiDisconnected() {
   Serial.println("WiFi disconnected!");
   deviceState.isConnected = false;
   deviceState.currentMessage = "WiFi Disconnected";
+  update_screen_activity(); // Reset timeout and wake screen
   update_screen_display();
 }
 
@@ -329,6 +395,7 @@ void checkDeviceStatusViaAPI() {
         deviceState.品番 = 品番;
         deviceState.currentMessage = "Pick " + String(quantity);
         displayGreen = true;
+        update_screen_activity(); // Wake screen and reset timeout for green mode
       } else {
         Serial.println("🔴 API: Setting red screen (standby)");
         deviceState.isPickingMode = false;
@@ -338,6 +405,7 @@ void checkDeviceStatusViaAPI() {
         deviceState.品番 = "";
         deviceState.currentMessage = message;
         displayGreen = false;
+        update_screen_activity(); // Reset timeout for red mode
       }
       
       apply_relays();
@@ -359,12 +427,14 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
       Serial.println("WebSocket Disconnected");
       deviceState.isConnected = false;
       deviceState.currentMessage = "Server Disconnected";
+      update_screen_activity(); // Wake screen and reset timeout
       update_screen_display();
       break;
 
     case WStype_CONNECTED:
       Serial.printf("WebSocket Connected to: %s\n", payload);
       deviceState.currentMessage = "Connecting...";
+      update_screen_activity(); // Wake screen and reset timeout
       update_screen_display();
       break;
 
@@ -384,6 +454,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         Serial.println("Socket.IO connected successfully");
         deviceState.isConnected = true;
         deviceState.currentMessage = "Connected";
+        update_screen_activity(); // Wake screen and reset timeout
         update_screen_display();
 
         // Register device after successful connection
@@ -453,6 +524,7 @@ void handleDisplayUpdate(String jsonData) {
     deviceState.品番 = 品番;
     deviceState.currentMessage = "Pick " + String(quantity);
     displayGreen = true;
+    update_screen_activity(); // Wake screen immediately for new picking task
   } else {
     // Standby mode
     deviceState.isPickingMode = false;
@@ -462,6 +534,7 @@ void handleDisplayUpdate(String jsonData) {
     deviceState.品番 = "";
     deviceState.currentMessage = message;
     displayGreen = false;
+    update_screen_activity(); // Reset timeout for standby mode
   }
 
   apply_relays();
@@ -485,6 +558,7 @@ void connectToWiFi() {
         Serial.printf("Attempting to connect to: %s\n", ssidList[i]);
 
         deviceState.currentMessage = String("Connecting: ") + ssidList[i];
+        update_screen_activity(); // Wake screen during connection attempts
         update_screen_display();
 
         WiFi.begin(ssidList[i], passwordList[i]);
@@ -516,6 +590,7 @@ void connectToWiFi() {
   if (!connected) {
     Serial.println("Could not connect to any known network!");
     deviceState.currentMessage = "WiFi Failed!";
+    update_screen_activity(); // Wake screen for error message
     update_screen_display();
   }
 }
@@ -529,6 +604,7 @@ void connectToServer() {
 
   Serial.printf("Connecting to server %s:%d\n", websockets_server, websockets_port);
   deviceState.currentMessage = "Connecting Server...";
+  update_screen_activity(); // Wake screen during server connection
   update_screen_display();
 }
 
@@ -598,6 +674,7 @@ void setup() {
 
   // Initial screen setup
   deviceState.currentMessage = "Starting...";
+  screenState.lastActivityTime = millis(); // Initialize activity timer
   update_screen_display();
 
   // Connect to WiFi and server
@@ -611,6 +688,7 @@ void setup() {
 void loop() {
   lv_timer_handler();
   check_bridge_button();
+  check_screen_timeout(); // Check if screen should timeout during red/standby modes
 
   // Socket.IO
   webSocket.loop();
