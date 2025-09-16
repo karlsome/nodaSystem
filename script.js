@@ -7,10 +7,20 @@ let currentRequestNumber = null;
 let currentFilter = 'all';
 let currentWorker = null;
 let socket = null;
+let recentActivities = []; // Initialize empty array for activities
+let todaysTasks = []; // Initialize empty array for tasks
 
 // API base URL - change this to your server URL
 const API_BASE_URL = 'http://localhost:3001/api';
 //const API_BASE_URL = 'https://nodasystem.onrender.com/api';
+
+// Debug localStorage on page load
+console.log('🔄 Page loaded, checking localStorage availability...');
+console.log('💾 localStorage supported:', typeof(Storage) !== "undefined");
+if (typeof(Storage) !== "undefined") {
+    const storedWorker = localStorage.getItem('currentWorker');
+    console.log('💾 Initial localStorage check:', storedWorker);
+}
 
 // Initialize the application
 document.addEventListener('DOMContentLoaded', function() {
@@ -18,17 +28,23 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 function initializeApp() {
+    console.log('🔄 Initializing app...');
     updateCurrentTime();
     setInterval(updateCurrentTime, 1000); // Update time every second
     
     // Check if already logged in
     const savedWorker = localStorage.getItem('currentWorker');
+    console.log('💾 Checking localStorage for currentWorker:', savedWorker);
+    console.log('💾 localStorage available:', typeof(Storage) !== "undefined");
+    
     if (savedWorker) {
+        console.log('✅ Found saved worker, auto-logging in:', savedWorker);
         currentWorker = savedWorker;
         showWorkerInfo();
         showScreen('home');
         initializeSocket();
     } else {
+        console.log('❌ No saved worker found, showing login screen');
         showScreen('login');
     }
 }
@@ -63,6 +79,11 @@ function initializeSocket() {
             }
         });
         
+        socket.on('lock-status-update', (lockStatus) => {
+            console.log('Lock status update:', lockStatus);
+            updateLockUI(lockStatus);
+        });
+        
         socket.on('error', (error) => {
             console.error('Socket error:', error);
             showToast('通信エラーが発生しました', 'error');
@@ -74,20 +95,35 @@ function initializeSocket() {
 function handleLogin(event) {
     event.preventDefault();
     const workerName = document.getElementById('workerNameInput').value.trim();
+    console.log('🔐 Attempting login with worker:', workerName);
     
     if (workerName) {
+        console.log('💾 Saving worker to localStorage:', workerName);
         currentWorker = workerName;
         localStorage.setItem('currentWorker', workerName);
+        
+        // Verify it was saved
+        const verified = localStorage.getItem('currentWorker');
+        console.log('✅ Verified localStorage save:', verified);
+        
         showWorkerInfo();
         showScreen('home');
         initializeSocket();
         showToast(`${workerName}さん、ようこそ！`, 'success');
+    } else {
+        console.log('❌ No worker name provided');
     }
 }
 
 function logout() {
+    console.log('🚪 Logging out, removing localStorage...');
     currentWorker = null;
     localStorage.removeItem('currentWorker');
+    
+    // Verify it was removed
+    const verified = localStorage.getItem('currentWorker');
+    console.log('✅ Verified localStorage removal:', verified);
+    
     if (socket) {
         socket.disconnect();
         socket = null;
@@ -120,6 +156,82 @@ function updateConnectionStatus(connected) {
             statusElement.className = 'w-3 h-3 bg-red-400 rounded-full';
             textElement.textContent = '切断';
         }
+    }
+}
+
+// Global lock status handling
+function updateLockUI(lockStatus) {
+    const isLocked = lockStatus.isLocked;
+    const activeRequestNumber = lockStatus.activeRequestNumber;
+    const startedBy = lockStatus.startedBy;
+    
+    // Update all start buttons
+    const startButtons = document.querySelectorAll('.start-picking-btn');
+    startButtons.forEach(button => {
+        if (isLocked) {
+            button.disabled = true;
+            button.classList.add('opacity-50', 'cursor-not-allowed');
+            button.textContent = '他の注文が処理中です';
+        } else {
+            button.disabled = false;
+            button.classList.remove('opacity-50', 'cursor-not-allowed');
+            button.textContent = 'ピッキング開始';
+        }
+    });
+    
+    // Show lock notification if system is locked
+    if (isLocked && activeRequestNumber) {
+        showLockNotification(activeRequestNumber, startedBy);
+    } else {
+        hideLockNotification();
+    }
+}
+
+function showLockNotification(activeRequestNumber, startedBy) {
+    let notification = document.getElementById('lockNotification');
+    if (!notification) {
+        // Create notification element if it doesn't exist
+        notification = document.createElement('div');
+        notification.id = 'lockNotification';
+        notification.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 p-4 rounded shadow-lg z-50';
+        document.body.appendChild(notification);
+    }
+    
+    notification.innerHTML = `
+        <div class="flex">
+            <div class="ml-3">
+                <p class="text-sm">
+                    <strong>システムロック中:</strong> 注文番号 ${activeRequestNumber} が ${startedBy} によって処理中です
+                </p>
+            </div>
+        </div>
+    `;
+    notification.style.display = 'block';
+}
+
+function hideLockNotification() {
+    const notification = document.getElementById('lockNotification');
+    if (notification) {
+        notification.style.display = 'none';
+    }
+}
+
+// Check and update lock status from server
+async function checkAndUpdateLockStatus() {
+    try {
+        const response = await fetch(`${API_BASE_URL}/picking-lock-status`);
+        if (response.ok) {
+            const lockStatus = await response.json();
+            updateLockUI(lockStatus);
+            
+            // 🚨 NEW: If there's an active request that's locked, trigger ESP32 refresh
+            if (lockStatus.isLocked && lockStatus.activeRequestNumber) {
+                console.log(`🔄 Lock detected for ${lockStatus.activeRequestNumber}, triggering ESP32 refresh`);
+                await refreshESP32Devices(lockStatus.activeRequestNumber);
+            }
+        }
+    } catch (error) {
+        console.error('Error checking lock status:', error);
     }
 }
 
@@ -170,6 +282,19 @@ function updateCurrentTime() {
     }
 }
 
+// Check and update global lock status
+async function checkAndUpdateLockStatus() {
+    try {
+        const response = await fetch(`${API_BASE_URL}/picking-lock-status`);
+        if (response.ok) {
+            const lockStatus = await response.json();
+            updateLockUI(lockStatus);
+        }
+    } catch (error) {
+        console.error('Error checking lock status:', error);
+    }
+}
+
 // Picking Requests Functions
 async function loadPickingRequests() {
     try {
@@ -182,6 +307,9 @@ async function loadPickingRequests() {
         
         pickingRequests = await response.json();
         displayPickingRequests();
+        
+        // Check lock status after loading requests
+        await checkAndUpdateLockStatus();
         
     } catch (error) {
         console.error('Error loading picking requests:', error);
@@ -319,6 +447,8 @@ function displayPickingDetail(request) {
     
     // Update start button state
     const startBtn = document.getElementById('startPickingBtn');
+    startBtn.classList.add('start-picking-btn'); // Add class for lock handling
+    
     if (request.status === 'pending') {
         startBtn.disabled = false;
         startBtn.onclick = startPickingProcess;
@@ -418,6 +548,13 @@ async function startPickingProcess() {
             })
         });
         
+        if (response.status === 423) {
+            // System is locked
+            const lockData = await response.json();
+            showToast(`他の注文が処理中です (注文番号: ${lockData.activeRequestNumber})`, 'error');
+            return;
+        }
+        
         if (!response.ok) {
             throw new Error('Failed to start picking process');
         }
@@ -425,9 +562,9 @@ async function startPickingProcess() {
         const result = await response.json();
         showToast('ピッキングプロセスを開始しました！', 'success');
         
-        // Refresh the detail view
-        setTimeout(() => {
-            refreshPickingDetail();
+        // Refresh the detail view and notify ESP32 devices
+        setTimeout(async () => {
+            await refreshPickingDetail();
         }, 1000);
         
     } catch (error) {
@@ -485,6 +622,42 @@ async function startIndividualPicking(lineNumber, deviceId) {
 async function refreshPickingDetail() {
     if (currentRequestNumber) {
         await viewPickingDetail(currentRequestNumber);
+        // Check lock status after refreshing detail
+        await checkAndUpdateLockStatus();
+        // Also refresh ESP32 devices for this request
+        await refreshESP32Devices(currentRequestNumber);
+    }
+}
+
+// Function to refresh ESP32 devices for a specific request
+async function refreshESP32Devices(requestNumber) {
+    try {
+        console.log(`🔄 Refreshing ESP32 devices for request: ${requestNumber}`);
+        
+        const response = await fetch(`${API_BASE_URL}/refresh-devices/${requestNumber}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                userName: currentWorker || 'Tablet'
+            })
+        });
+        
+        if (response.ok) {
+            const result = await response.json();
+            console.log(`✅ ESP32 refresh result:`, result);
+            
+            if (result.devicesNotified && result.devicesNotified.length > 0) {
+                showToast(`デバイス更新: ${result.devicesNotified.join(', ')}`, 'success');
+            }
+        } else {
+            console.warn('Failed to refresh ESP32 devices:', response.status);
+        }
+        
+    } catch (error) {
+        console.error('Error refreshing ESP32 devices:', error);
+        // Don't show error toast to user as this is a background operation
     }
 }
 
@@ -521,8 +694,14 @@ function filterByStatus(status) {
 }
 
 // Refresh function
-function refreshPickingRequests() {
-    loadPickingRequests();
+async function refreshPickingRequests() {
+    await loadPickingRequests();
+    
+    // If we're currently viewing a specific request, also refresh ESP32 devices
+    if (currentRequestNumber) {
+        await refreshESP32Devices(currentRequestNumber);
+    }
+    
     showToast('ピッキング依頼を更新しました', 'success');
 }
 
@@ -785,57 +964,9 @@ let messages = [
     }
 ];
 
-// Initialize the application
-document.addEventListener('DOMContentLoaded', function() {
-    initializeApp();
-    loadAvailableTasks();
-    updateLanguage();
-    
-    // Setup voice recognition if available
-    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        recognition = new SpeechRecognition();
-        recognition.continuous = false;
-        recognition.interimResults = false;
-        recognition.lang = currentLanguage === 'ja' ? 'ja-JP' : 'en-US';
-        
-        recognition.onresult = function(event) {
-            const result = event.results[0][0].transcript;
-            document.getElementById('voiceText').textContent = result;
-            document.getElementById('voiceResult').classList.remove('hidden');
-            document.getElementById('confirmVoiceButton').classList.remove('hidden');
-            isRecording = false;
-            updateRecordButton();
-        };
-        
-        recognition.onerror = function(event) {
-            showToast(currentLanguage === 'ja' ? '音声認識エラーが発生しました' : 'Voice recognition error', 'error');
-            isRecording = false;
-            updateRecordButton();
-        };
-    }
-});
+// Removed duplicate DOMContentLoaded listener that was causing conflicts
 
-function initializeApp() {
-    // Auto-focus main scanner input when modal opens
-    document.getElementById('mainScanInput').addEventListener('focus', function() {
-        // Simulate scanner input for demo
-        setTimeout(() => {
-            if (this.value === '') {
-                simulateScanInput();
-            }
-        }, 1500);
-    });
-    
-    // Update message count
-    const unreadCount = messages.filter(m => m.unread).length;
-    if (unreadCount > 0) {
-        document.getElementById('messageCount').textContent = unreadCount;
-        document.getElementById('messageCount').classList.remove('hidden');
-        document.getElementById('messageNotification').textContent = unreadCount;
-        document.getElementById('messageNotification').classList.remove('hidden');
-    }
-}
+// Removed duplicate initializeApp function - DOM safety handled in main initializeApp
 
 // Language toggle function
 function toggleLanguage() {
@@ -1349,35 +1480,41 @@ function resetManualForm() {
     document.getElementById('itemCode').focus();
 }
 
-document.getElementById('manualForm').addEventListener('submit', function(e) {
-    e.preventDefault();
-    
-    const itemCode = document.getElementById('itemCode').value;
-    const itemName = document.getElementById('itemName').value;
-    const quantity = parseInt(document.getElementById('quantity').value);
-    const location = document.getElementById('location').value;
+document.addEventListener('DOMContentLoaded', function() {
+    // Only attach event listener if the element exists
+    const manualForm = document.getElementById('manualForm');
+    if (manualForm) {
+        manualForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const itemCode = document.getElementById('itemCode').value;
+            const itemName = document.getElementById('itemName').value;
+            const quantity = parseInt(document.getElementById('quantity').value);
+            const location = document.getElementById('location').value;
 
-    if (!itemCode || !itemName || !quantity || !location) {
-        showToast('Please fill in all fields', 'error');
-        playSound('error');
-        return;
+            if (!itemCode || !itemName || !quantity || !location) {
+                showToast('Please fill in all fields', 'error');
+                playSound('error');
+                return;
+            }
+
+            const activity = {
+                id: Date.now(),
+                type: currentAction.includes('incoming') ? 'incoming' : 'outgoing',
+                item: `${itemName} - ${itemCode}`,
+                quantity: quantity,
+                location: location,
+                timestamp: new Date(),
+                method: 'Manual'
+            };
+
+            addActivity(activity);
+            updateStats();
+            showToast(`${activity.type === 'incoming' ? 'Incoming' : 'Outgoing'} material processed successfully!`);
+            playSound('success');
+            closeModal();
+        });
     }
-
-    const activity = {
-        id: Date.now(),
-        type: currentAction.includes('incoming') ? 'incoming' : 'outgoing',
-        item: `${itemName} - ${itemCode}`,
-        quantity: quantity,
-        location: location,
-        timestamp: new Date(),
-        method: 'Manual'
-    };
-
-    addActivity(activity);
-    updateStats();
-    showToast(`${activity.type === 'incoming' ? 'Incoming' : 'Outgoing'} material processed successfully!`);
-    playSound('success');
-    closeModal();
 });
 
 // Activity management
@@ -1472,9 +1609,14 @@ function updateStats() {
     const outgoing = todayActivities.filter(a => a.type === 'outgoing' || a.type === 'picking').length;
     const pendingTasksCount = todaysTasks.filter(t => t.status === 'pending').length;
     
-    document.getElementById('todayIncoming').textContent = incoming;
-    document.getElementById('todayOutgoing').textContent = outgoing;
-    document.getElementById('pendingTasks').textContent = pendingTasksCount;
+    // Only update elements if they exist
+    const todayIncomingEl = document.getElementById('todayIncoming');
+    const todayOutgoingEl = document.getElementById('todayOutgoing');
+    const pendingTasksEl = document.getElementById('pendingTasks');
+    
+    if (todayIncomingEl) todayIncomingEl.textContent = incoming;
+    if (todayOutgoingEl) todayOutgoingEl.textContent = outgoing;
+    if (pendingTasksEl) pendingTasksEl.textContent = pendingTasksCount;
     
     // Update last activity
     if (recentActivities.length > 0) {
@@ -1568,46 +1710,49 @@ document.addEventListener('touchstart', function(e) {
 // Auto-refresh stats every 30 seconds
 setInterval(updateStats, 30000);
 
-// Receiving form handler
-document.getElementById('receivingForm').addEventListener('submit', function(e) {
-    e.preventDefault();
-    
-    const itemScan = document.getElementById('receivingItemScan').value;
-    const receivedQty = document.getElementById('receivedQuantity').value;
-    const condition = document.getElementById('itemCondition').value;
-    const location = document.getElementById('suggestedLocation').value;
-    
-    if (!itemScan || !receivedQty) {
-        showToast('Please scan item and enter quantity', 'error');
-        playSound('error');
-        return;
-    }
-    
-    const activity = {
-        id: Date.now(),
-        type: 'receiving',
-        item: itemScan,
-        quantity: parseInt(receivedQty),
-        location: location || 'TBD',
-        timestamp: new Date(),
-        method: 'Receiving Process',
-        condition: condition
-    };
-    
-    addActivity(activity);
-    updateStats();
-    
-    if (condition === 'damaged') {
-        showToast('Item received - marked as damaged', 'warning');
-    } else if (condition === 'missing') {
-        showToast('Missing items reported', 'warning');
-    } else {
-        showToast('Item received successfully!', 'success');
-    }
-    
-    playSound(condition === 'good' ? 'success' : 'error');
-    closeModal();
-});
+// Receiving form handler - only attach if element exists
+const receivingForm = document.getElementById('receivingForm');
+if (receivingForm) {
+    receivingForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const itemScan = document.getElementById('receivingItemScan').value;
+        const receivedQty = document.getElementById('receivedQuantity').value;
+        const condition = document.getElementById('itemCondition').value;
+        const location = document.getElementById('suggestedLocation').value;
+        
+        if (!itemScan || !receivedQty) {
+            showToast('Please scan item and enter quantity', 'error');
+            playSound('error');
+            return;
+        }
+        
+        const activity = {
+            id: Date.now(),
+            type: 'receiving',
+            item: itemScan,
+            quantity: parseInt(receivedQty),
+            location: location || 'TBD',
+            timestamp: new Date(),
+            method: 'Receiving Process',
+            condition: condition
+        };
+        
+        addActivity(activity);
+        updateStats();
+        
+        if (condition === 'damaged') {
+            showToast('Item received - marked as damaged', 'warning');
+        } else if (condition === 'missing') {
+            showToast('Missing items reported', 'warning');
+        } else {
+            showToast('Item received successfully!', 'success');
+        }
+        
+        playSound(condition === 'good' ? 'success' : 'error');
+        closeModal();
+    });
+}
 
 // Print label function
 function printLabel() {
@@ -1615,35 +1760,50 @@ function printLabel() {
     playSound('success');
 }
 
-// Simulate location suggestions
-document.getElementById('receivingItemScan').addEventListener('input', function(e) {
-    const value = e.target.value;
-    if (value) {
-        // Simulate expected quantity lookup
-        document.getElementById('expectedQty').textContent = Math.floor(Math.random() * 100) + 1;
-        document.getElementById('expectedQuantityDisplay').classList.remove('hidden');
-        
-        // Simulate location suggestion
-        const locations = ['A1', 'A2', 'B1', 'B2', 'C1'];
-        const suggestedLocation = locations[Math.floor(Math.random() * locations.length)];
-        
-        const locationSelect = document.getElementById('suggestedLocation');
-        locationSelect.innerHTML = `<option value="${suggestedLocation}">Suggested: ${suggestedLocation}</option>`;
-        locationSelect.value = suggestedLocation;
-    }
-});
-
-// Auto-simulate universal scanner for demo
-document.getElementById('universalScanInput').addEventListener('focus', function() {
-    setTimeout(() => {
-        if (this.value === '') {
-            const sampleCodes = [
-                'LOC-A1-B3',
-                'ORDER-PO001-URGENT',
-                'SP001|Steel Pipes|50|A1',
-                'CB002|Concrete Blocks|25|B2'
-            ];
-            this.value = sampleCodes[Math.floor(Math.random() * sampleCodes.length)];
+// Simulate location suggestions - only attach if element exists
+const receivingItemScan = document.getElementById('receivingItemScan');
+if (receivingItemScan) {
+    receivingItemScan.addEventListener('input', function(e) {
+        const value = e.target.value;
+        if (value) {
+            // Simulate expected quantity lookup
+            const expectedQtyEl = document.getElementById('expectedQty');
+            const expectedQuantityDisplayEl = document.getElementById('expectedQuantityDisplay');
+            
+            if (expectedQtyEl) {
+                expectedQtyEl.textContent = Math.floor(Math.random() * 100) + 1;
+            }
+            if (expectedQuantityDisplayEl) {
+                expectedQuantityDisplayEl.classList.remove('hidden');
+            }
+            
+            // Simulate location suggestion
+            const locations = ['A1', 'A2', 'B1', 'B2', 'C1'];
+            const suggestedLocation = locations[Math.floor(Math.random() * locations.length)];
+            
+            const locationSelect = document.getElementById('suggestedLocation');
+            if (locationSelect) {
+                locationSelect.innerHTML = `<option value="${suggestedLocation}">Suggested: ${suggestedLocation}</option>`;
+                locationSelect.value = suggestedLocation;
+            }
         }
-    }, 1000);
-});
+    });
+}
+
+// Auto-simulate universal scanner for demo - only attach if element exists
+const universalScanInput = document.getElementById('universalScanInput');
+if (universalScanInput) {
+    universalScanInput.addEventListener('focus', function() {
+        setTimeout(() => {
+            if (this.value === '') {
+                const sampleCodes = [
+                    'LOC-A1-B3',
+                    'ORDER-PO001-URGENT',
+                    'SP001|Steel Pipes|50|A1',
+                    'CB002|Concrete Blocks|25|B2'
+                ];
+                this.value = sampleCodes[Math.floor(Math.random() * sampleCodes.length)];
+            }
+        }, 1000);
+    });
+}

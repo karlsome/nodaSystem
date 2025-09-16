@@ -12,7 +12,10 @@
 #include <WiFi.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
+#include <HTTPClient.h>
 #include "bsp_cst816.h"
+#include "FreeSans14pt7b.h"  // Small font for device ID
+#include "FreeSans50pt7b.h"  // Large font for quantity (with size multiplier)
 
 // ---------- Forward declarations ----------
 void handleDisplayUpdate(String jsonData);
@@ -134,47 +137,54 @@ static void apply_relays() {
 }
 
 static void update_screen_display() {
-  lv_color_t bgColor = displayGreen ? lv_color_hex(0x00A000) : lv_color_hex(0xCC0000);
-  lv_obj_set_style_bg_color(lv_scr_act(), bgColor, 0);
-  lv_obj_set_style_bg_opa(lv_scr_act(), LV_OPA_COVER, 0);
+  // Clear screen with background color
+  gfx->fillScreen(displayGreen ? GREEN : RED);
 
-  // Clear screen and add text
-  lv_obj_clean(lv_scr_act());
+  // Set text color to white
+  gfx->setTextColor(WHITE);
 
-  // Create main label for device info
-  lv_obj_t* deviceLabel = lv_label_create(lv_scr_act());
-  lv_label_set_text(deviceLabel, DEVICE_ID.c_str());
-  lv_obj_set_style_text_font(deviceLabel, LV_FONT_DEFAULT, 0);  // <— safe default font
-  lv_obj_set_style_text_color(deviceLabel, lv_color_white(), 0);
-  lv_obj_align(deviceLabel, LV_ALIGN_TOP_MID, 0, 20);
+  // Device ID at top (small font)
+  gfx->setFont(&FreeSans14pt7b);
+  gfx->setTextSize(1);
+  
+  // Calculate position for centered text at top
+  int16_t x1, y1;
+  uint16_t w, h;
+  gfx->getTextBounds(DEVICE_ID.c_str(), 0, 0, &x1, &y1, &w, &h);
+  int deviceX = (gfx->width() - w) / 2;
+  int deviceY = 30; // Top margin
+  
+  gfx->setCursor(deviceX, deviceY);
+  gfx->print(DEVICE_ID);
 
-  // Create message label
-  lv_obj_t* messageLabel = lv_label_create(lv_scr_act());
-  lv_label_set_text(messageLabel, deviceState.currentMessage.c_str());
-  lv_obj_set_style_text_font(messageLabel, LV_FONT_DEFAULT, 0); // <— safe default font
-  lv_obj_set_style_text_color(messageLabel, lv_color_white(), 0);
-  lv_obj_align(messageLabel, LV_ALIGN_CENTER, 0, -20);
-
-  // If picking mode, show quantity & 品番
   if (deviceState.isPickingMode && deviceState.currentQuantity > 0) {
-    lv_obj_t* quantityLabel = lv_label_create(lv_scr_act());
+    // PICKING MODE: Show huge quantity number in center
+    gfx->setFont(&FreeSans50pt7b);  // Use 50pt font with size multiplier
+    gfx->setTextSize(2);  // Double the size to make it really big!
+    
     String qtyText = String(deviceState.currentQuantity);
-    lv_label_set_text(quantityLabel, qtyText.c_str());
-    lv_obj_set_style_text_font(quantityLabel, LV_FONT_DEFAULT, 0);
-    lv_obj_set_style_text_color(quantityLabel, lv_color_white(), 0);
-    lv_obj_align(quantityLabel, LV_ALIGN_CENTER, 0, 40);
-
-    if (deviceState.品番.length() > 0) {
-      lv_obj_t* hinbanLabel = lv_label_create(lv_scr_act());
-      lv_label_set_text(hinbanLabel, deviceState.品番.c_str());
-      lv_obj_set_style_text_font(hinbanLabel, LV_FONT_DEFAULT, 0);
-      lv_obj_set_style_text_color(hinbanLabel, lv_color_white(), 0);
-      lv_obj_align(hinbanLabel, LV_ALIGN_BOTTOM_MID, 0, -20);
-    }
+    gfx->getTextBounds(qtyText.c_str(), 0, 0, &x1, &y1, &w, &h);
+    int qtyX = (gfx->width() - w) / 2;
+    int qtyY = (gfx->height() / 2) + (h / 2); // Center vertically
+    
+    gfx->setCursor(qtyX, qtyY);
+    gfx->print(qtyText);
+    
+  } else {
+    // STANDBY MODE: Show status message in center
+    gfx->setFont(&FreeSans14pt7b);
+    gfx->setTextSize(1);
+    
+    gfx->getTextBounds(deviceState.currentMessage.c_str(), 0, 0, &x1, &y1, &w, &h);
+    int msgX = (gfx->width() - w) / 2;
+    int msgY = (gfx->height() / 2) + (h / 2); // Center vertically
+    
+    gfx->setCursor(msgX, msgY);
+    gfx->print(deviceState.currentMessage);
   }
 
-  // Immediate screen fill
-  gfx->fillScreen(displayGreen ? GREEN : RED);
+  // Force the display to update immediately
+  gfx->flush();
 }
 
 static void complete_picking_task() {
@@ -274,6 +284,74 @@ void onWiFiDisconnected() {
   update_screen_display();
 }
 
+// REST API status check - backup method
+void checkDeviceStatusViaAPI() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected, skipping API check");
+    return;
+  }
+  
+  HTTPClient http;
+  String url = "http://" + String(websockets_server) + ":" + String(websockets_port) + "/api/device/" + DEVICE_ID + "/status";
+  
+  Serial.println("🌐 Checking device status via REST API: " + url);
+  
+  http.begin(url);
+  http.setTimeout(5000); // 5 second timeout
+  
+  int httpCode = http.GET();
+  
+  if (httpCode == HTTP_CODE_OK) {
+    String response = http.getString();
+    Serial.println("🌐 API Response: " + response);
+    
+    DynamicJsonDocument doc(1024);
+    DeserializationError err = deserializeJson(doc, response);
+    
+    if (!err) {
+      String status = doc["status"] | "";
+      String color = doc["color"] | "red";
+      int quantity = doc["quantity"] | 0;
+      String message = doc["message"] | "Standby";
+      String requestNumber = doc["requestNumber"] | "";
+      int lineNumber = doc["lineNumber"] | 0;
+      String 品番 = doc["品番"] | "";
+      
+      Serial.printf("🌐 API Status: %s, Color: %s, Qty: %d\n", status.c_str(), color.c_str(), quantity);
+      
+      // Apply the status update
+      if (color == "green" && quantity > 0) {
+        Serial.println("🟢 API: Restoring green screen with quantity");
+        deviceState.isPickingMode = true;
+        deviceState.currentQuantity = quantity;
+        deviceState.requestNumber = requestNumber;
+        deviceState.lineNumber = lineNumber;
+        deviceState.品番 = 品番;
+        deviceState.currentMessage = "Pick " + String(quantity);
+        displayGreen = true;
+      } else {
+        Serial.println("🔴 API: Setting red screen (standby)");
+        deviceState.isPickingMode = false;
+        deviceState.currentQuantity = 0;
+        deviceState.requestNumber = "";
+        deviceState.lineNumber = 0;
+        deviceState.品番 = "";
+        deviceState.currentMessage = message;
+        displayGreen = false;
+      }
+      
+      apply_relays();
+      update_screen_display();
+    } else {
+      Serial.println("🌐 API: JSON parse error");
+    }
+  } else {
+    Serial.printf("🌐 API: HTTP error %d\n", httpCode);
+  }
+  
+  http.end();
+}
+
 // WebSocket event handlers
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
   switch(type) {
@@ -316,6 +394,12 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         serializeJson(doc, regPayload);
         webSocket.sendTXT("42[\"device-register\"," + regPayload + "]");
         Serial.println("Device registration sent");
+        
+        // Also check status via REST API as backup after a short delay
+        delay(2000); // Wait 2 seconds for Socket.IO registration to process
+        Serial.println("🔄 Checking device status via REST API as backup...");
+        checkDeviceStatusViaAPI();
+        
         return;
       }
 
@@ -542,10 +626,14 @@ void loop() {
     }
   }
 
+  // Comment out LVGL bitmap rendering since we're using Arduino_GFX directly
+  /*
 #if (LV_COLOR_16_SWAP != 0)
   gfx->draw16bitBeRGBBitmap(0, 0, (uint16_t *)disp_draw_buf, screenWidth, screenHeight);
 #else
   gfx->draw16bitRGBBitmap(0, 0, (uint16_t *)disp_draw_buf, screenWidth, screenHeight);
 #endif
+  */
+  
   delay(10);
 }

@@ -30,6 +30,178 @@ const client = new MongoClient(process.env.MONGODB_URI);
 const connectedDevices = new Map(); // deviceId -> socket
 const connectedTablets = new Set(); // tablet sockets
 
+// Global picking lock state
+let globalPickingLock = {
+    isLocked: false,
+    activeRequestNumber: null,
+    startedBy: null,
+    startedAt: null
+};
+
+// Global lock management functions
+async function checkGlobalPickingLock() {
+    // Check database for any in-progress orders
+    const collection = db.collection(process.env.COLLECTION_NAME);
+    const inProgressOrder = await collection.findOne({ status: 'in-progress' });
+    
+    if (inProgressOrder && !globalPickingLock.isLocked) {
+        // Found an in-progress order, set the lock
+        const previousRequestNumber = globalPickingLock.activeRequestNumber;
+        
+        globalPickingLock = {
+            isLocked: true,
+            activeRequestNumber: inProgressOrder.requestNumber,
+            startedBy: inProgressOrder.startedBy,
+            startedAt: inProgressOrder.startedAt
+        };
+        
+        // 🚨 NEW: If this is a different request or newly in-progress, notify ESP32 devices
+        if (previousRequestNumber !== inProgressOrder.requestNumber) {
+            console.log(`🔄 Detected new/changed in-progress order: ${inProgressOrder.requestNumber}`);
+            await notifyESP32DevicesForRequest(inProgressOrder.requestNumber, 'System Lock Check');
+        }
+        
+    } else if (!inProgressOrder && globalPickingLock.isLocked) {
+        // No in-progress orders, release the lock
+        globalPickingLock = {
+            isLocked: false,
+            activeRequestNumber: null,
+            startedBy: null,
+            startedAt: null
+        };
+        // Notify all tablets that lock is released
+        broadcastLockStatus();
+    }
+    
+    return globalPickingLock;
+}
+
+// Function to notify ESP32 devices for a specific request
+async function notifyESP32DevicesForRequest(requestNumber, triggeredBy = 'System') {
+    try {
+        console.log(`📢 Notifying ESP32 devices for request ${requestNumber} (triggered by: ${triggeredBy})`);
+        
+        await client.connect();
+        const db = client.db("submittedDB");
+        const requestsCollection = db.collection("nodaRequestDB");
+        
+        // Find the request by requestNumber
+        const request = await requestsCollection.findOne({ requestNumber: requestNumber });
+        if (!request) {
+            console.log(`⚠️ Request ${requestNumber} not found for ESP32 notification`);
+            return;
+        }
+        
+        const notifiedDevices = [];
+        
+        // Check if request is in-progress and notify devices
+        if (request.status === 'in-progress') {
+            if (request.requestType === 'bulk' && request.lineItems) {
+                // Notify all devices in this bulk request that are in-progress
+                for (const lineItem of request.lineItems) {
+                    if (lineItem.status === 'in-progress') {
+                        await notifyDeviceStatusChange(
+                            lineItem.背番号, 
+                            request.requestNumber, 
+                            lineItem.lineNumber, 
+                            lineItem.quantity, 
+                            lineItem.品番, 
+                            'in-progress'
+                        );
+                        notifiedDevices.push(lineItem.背番号);
+                    }
+                }
+            } else {
+                // Single request
+                if (request.背番号) {
+                    await notifyDeviceStatusChange(
+                        request.背番号, 
+                        request.requestNumber, 
+                        1, 
+                        request.quantity, 
+                        request.品番, 
+                        'in-progress'
+                    );
+                    notifiedDevices.push(request.背番号);
+                }
+            }
+        }
+        
+        if (notifiedDevices.length > 0) {
+            console.log(`✅ Notified ${notifiedDevices.length} ESP32 devices: ${notifiedDevices.join(', ')}`);
+        } else {
+            console.log(`ℹ️ No ESP32 devices to notify for request ${requestNumber}`);
+        }
+        
+    } catch (error) {
+        console.error('Error notifying ESP32 devices:', error);
+    }
+}
+
+function broadcastLockStatus() {
+    const lockStatus = {
+        isLocked: globalPickingLock.isLocked,
+        activeRequestNumber: globalPickingLock.activeRequestNumber,
+        startedBy: globalPickingLock.startedBy,
+        startedAt: globalPickingLock.startedAt
+    };
+    
+    connectedTablets.forEach(tabletSocket => {
+        tabletSocket.emit('picking-lock-status', lockStatus);
+    });
+    
+    console.log(`🔒 Broadcasting lock status: ${globalPickingLock.isLocked ? 'LOCKED' : 'UNLOCKED'} - ${globalPickingLock.activeRequestNumber || 'None'}`);
+}
+
+// Check if device has active picking assignment
+async function getActivePickingForDevice(deviceId) {
+    try {
+        console.log(`🔍 getActivePickingForDevice called for: ${deviceId}`);
+        const collection = db.collection(process.env.COLLECTION_NAME);
+        console.log(`📚 Using collection: ${process.env.COLLECTION_NAME}`);
+        
+        // Find requests that are in-progress and have this device assigned
+        const query = {
+            status: 'in-progress',
+            'lineItems': {
+                $elemMatch: {
+                    背番号: deviceId,
+                    status: { $in: ['pending', 'in-progress'] }
+                }
+            }
+        };
+        console.log(`🔎 MongoDB query:`, JSON.stringify(query, null, 2));
+        
+        const activeRequest = await collection.findOne(query);
+        console.log(`📄 Found request:`, activeRequest ? `${activeRequest.requestNumber} with ${activeRequest.lineItems?.length} items` : 'null');
+        
+        if (activeRequest) {
+            // Find the specific line item for this device
+            const lineItem = activeRequest.lineItems.find(item => 
+                item.背番号 === deviceId && ['pending', 'in-progress'].includes(item.status)
+            );
+            console.log(`📋 Found line item for ${deviceId}:`, lineItem);
+            
+            if (lineItem) {
+                const result = {
+                    requestNumber: activeRequest.requestNumber,
+                    lineNumber: lineItem.lineNumber,
+                    quantity: lineItem.quantity,
+                    品番: lineItem.品番
+                };
+                console.log(`✅ Returning active picking:`, result);
+                return result;
+            }
+        }
+        
+        console.log(`❌ No active picking found for ${deviceId}`);
+        return null;
+    } catch (error) {
+        console.error('❌ Error checking active picking for device:', error);
+        return null;
+    }
+}
+
 async function connectToMongoDB() {
     try {
         await client.connect();
@@ -46,23 +218,56 @@ io.on('connection', (socket) => {
     console.log('Client connected:', socket.id);
 
     // Device registration
-    socket.on('device-register', (data) => {
+    socket.on('device-register', async (data) => {
         const { deviceId, type } = data;
         if (type === 'iot-device') {
             connectedDevices.set(deviceId, socket);
             socket.deviceId = deviceId;
-            console.log(`IoT Device registered: ${deviceId}`);
+            console.log(`🔧 IoT Device registered: ${deviceId}`);
             
-            // Send initial state (red screen)
-            socket.emit('display-update', {
-                color: 'red',
-                quantity: null,
-                message: 'Standby'
-            });
+            // Check if device has active picking assignment
+            console.log(`🔍 Checking active picking for device ${deviceId}...`);
+            const activePicking = await getActivePickingForDevice(deviceId);
+            console.log(`📊 Active picking result for ${deviceId}:`, activePicking);
+            
+            if (activePicking) {
+                // Device has active picking - restore green screen
+                console.log(`🟢 Restoring active picking for device ${deviceId}: ${activePicking.requestNumber} - ${activePicking.品番} (${activePicking.quantity})`);
+                const displayUpdate = {
+                    color: 'green',
+                    quantity: activePicking.quantity,
+                    message: `Pick ${activePicking.quantity}`,
+                    requestNumber: activePicking.requestNumber,
+                    lineNumber: activePicking.lineNumber,
+                    品番: activePicking.品番
+                };
+                console.log(`📤 Sending display update:`, displayUpdate);
+                socket.emit('display-update', displayUpdate);
+            } else {
+                // No active picking - send initial state (red screen)
+                console.log(`🔴 No active picking found for ${deviceId}, sending red screen`);
+                const displayUpdate = {
+                    color: 'red',
+                    quantity: null,
+                    message: 'Standby'
+                };
+                console.log(`📤 Sending display update:`, displayUpdate);
+                socket.emit('display-update', displayUpdate);
+            }
         } else if (type === 'tablet') {
             connectedTablets.add(socket);
             socket.isTablet = true;
             console.log('Tablet connected');
+            
+            // Send current lock status to the new tablet
+            checkGlobalPickingLock().then(() => {
+                socket.emit('picking-lock-status', {
+                    isLocked: globalPickingLock.isLocked,
+                    activeRequestNumber: globalPickingLock.activeRequestNumber,
+                    startedBy: globalPickingLock.startedBy,
+                    startedAt: globalPickingLock.startedAt
+                });
+            });
         }
     });
 
@@ -179,6 +384,19 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
         const { requestNumber } = req.params;
         const { startedBy } = req.body;
         
+        // Check global picking lock
+        await checkGlobalPickingLock();
+        
+        if (globalPickingLock.isLocked) {
+            return res.status(423).json({ 
+                error: 'System locked', 
+                message: `Another picking operation is in progress: ${globalPickingLock.activeRequestNumber}`,
+                activeRequest: globalPickingLock.activeRequestNumber,
+                startedBy: globalPickingLock.startedBy,
+                startedAt: globalPickingLock.startedAt
+            });
+        }
+        
         const collection = db.collection(process.env.COLLECTION_NAME);
         const request = await collection.findOne({ requestNumber });
         
@@ -198,6 +416,17 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
                 }
             }
         );
+        
+        // Set global lock
+        globalPickingLock = {
+            isLocked: true,
+            activeRequestNumber: requestNumber,
+            startedBy: startedBy,
+            startedAt: new Date()
+        };
+        
+        // Broadcast lock status to all tablets
+        broadcastLockStatus();
         
         // Send picking data to all connected devices
         const pickingData = {
@@ -310,7 +539,21 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
                 }
             }
         );
-        console.log(`Request ${requestNumber} fully completed!`);
+        
+        // Release global lock when request is completed
+        if (globalPickingLock.isLocked && globalPickingLock.activeRequestNumber === requestNumber) {
+            globalPickingLock = {
+                isLocked: false,
+                activeRequestNumber: null,
+                startedBy: null,
+                startedAt: null
+            };
+            
+            // Broadcast lock release to all tablets
+            broadcastLockStatus();
+        }
+        
+        console.log(`Request ${requestNumber} fully completed! Lock released.`);
     }
     
     return { allCompleted, request: updatedRequest };
@@ -471,6 +714,60 @@ app.post('/api/picking-requests/:requestNumber/line/:lineNumber/start', async (r
     }
 });
 
+// Get current lock status
+app.get('/api/picking-lock-status', async (req, res) => {
+    try {
+        await checkGlobalPickingLock();
+        
+        res.json({
+            isLocked: globalPickingLock.isLocked,
+            activeRequestNumber: globalPickingLock.activeRequestNumber,
+            startedBy: globalPickingLock.startedBy,
+            startedAt: globalPickingLock.startedAt
+        });
+    } catch (error) {
+        console.error('Error getting lock status:', error);
+        res.status(500).json({ error: 'Failed to get lock status' });
+    }
+});
+
+// Get device status - RESTful API for ESP32 to check its current assignment
+app.get('/api/device/:deviceId/status', async (req, res) => {
+    try {
+        const { deviceId } = req.params;
+        console.log(`🌐 REST API: Device status requested for ${deviceId}`);
+        
+        const activePicking = await getActivePickingForDevice(deviceId);
+        console.log(`🌐 REST API: Active picking for ${deviceId}:`, activePicking);
+        
+        if (activePicking) {
+            const response = {
+                status: 'picking',
+                color: 'green',
+                quantity: activePicking.quantity,
+                message: `Pick ${activePicking.quantity}`,
+                requestNumber: activePicking.requestNumber,
+                lineNumber: activePicking.lineNumber,
+                品番: activePicking.品番
+            };
+            console.log(`🌐 REST API: Sending response:`, response);
+            res.json(response);
+        } else {
+            const response = {
+                status: 'standby',
+                color: 'red',
+                quantity: null,
+                message: 'Standby'
+            };
+            console.log(`🌐 REST API: Sending response:`, response);
+            res.json(response);
+        }
+    } catch (error) {
+        console.error('🌐 REST API: Error getting device status:', error);
+        res.status(500).json({ error: 'Failed to get device status' });
+    }
+});
+
 // Update picking request status
 app.put('/api/picking-requests/:requestNumber/line/:lineNumber/status', async (req, res) => {
     try {
@@ -534,6 +831,552 @@ app.get('/api/request-numbers', async (req, res) => {
     }
 });
 
+// ==================== NODA WAREHOUSE MANAGEMENT API ROUTES ====================
+
+// Function to notify ESP32 devices when status changes
+async function notifyDeviceStatusChange(deviceId, requestNumber, lineNumber, quantity, 品番, newStatus) {
+    console.log(`📢 Notifying device ${deviceId} of status change: ${newStatus}`);
+    
+    const deviceSocket = connectedDevices.get(deviceId);
+    if (deviceSocket) {
+        if (newStatus === 'in-progress') {
+            // Send display-update event to restore green picking screen
+            const displayUpdate = {
+                color: 'green',
+                quantity: quantity,
+                message: `Pick ${quantity}`,
+                requestNumber: requestNumber,
+                lineNumber: lineNumber,
+                品番: 品番
+            };
+            
+            deviceSocket.emit('display-update', displayUpdate);
+            console.log(`🟢 Sent display-update to device ${deviceId}: green screen restored`);
+        } else if (newStatus === 'completed') {
+            // Send red screen update
+            const displayUpdate = {
+                color: 'red',
+                quantity: 0,
+                message: 'Completed',
+                requestNumber: '',
+                lineNumber: 0,
+                品番: ''
+            };
+            
+            deviceSocket.emit('display-update', displayUpdate);
+            console.log(`🔴 Sent display-update to device ${deviceId}: completed status`);
+        }
+    } else {
+        console.log(`⚠️ Device ${deviceId} not connected via Socket.IO`);
+    }
+}
+
+// NODA Requests API Route
+app.post("/api/noda-requests", async (req, res) => {
+  const { action, filters = {}, page = 1, limit = 10, sort = {}, requestId, data } = req.body;
+
+  try {
+    await client.connect();
+    const db = client.db("submittedDB");
+    const requestsCollection = db.collection("nodaRequestDB");
+    const inventoryCollection = db.collection("nodaInventoryDB");
+
+    switch (action) {
+      case 'updateLineItemStatus':
+        try {
+          if (!requestId || !data || !data.lineNumber || !data.status) {
+            return res.status(400).json({ error: "Request ID, line number, and status are required" });
+          }
+
+          // Find the bulk request
+          const bulkRequest = await requestsCollection.findOne({ _id: new ObjectId(requestId) });
+          if (!bulkRequest) {
+            return res.status(404).json({ error: "Bulk request not found" });
+          }
+
+          if (bulkRequest.requestType !== 'bulk') {
+            return res.status(400).json({ error: "This operation is only for bulk requests" });
+          }
+
+          // Get the specific line item before updating
+          const lineItem = bulkRequest.lineItems.find(item => item.lineNumber === data.lineNumber);
+          if (!lineItem) {
+            return res.status(404).json({ error: "Line item not found" });
+          }
+
+          const oldStatus = lineItem.status;
+          const newStatus = data.status;
+
+          // Update the specific line item status
+          const result = await requestsCollection.updateOne(
+            { 
+              _id: new ObjectId(requestId),
+              "lineItems.lineNumber": data.lineNumber
+            },
+            { 
+              $set: { 
+                "lineItems.$.status": newStatus,
+                "lineItems.$.updatedAt": new Date(),
+                updatedAt: new Date()
+              }
+            }
+          );
+
+          if (result.matchedCount === 0) {
+            return res.status(404).json({ error: "Line item not found" });
+          }
+
+          // Check if all line items are completed to update bulk request status
+          const updatedRequest = await requestsCollection.findOne({ _id: new ObjectId(requestId) });
+          const allCompleted = updatedRequest.lineItems.every(item => item.status === 'completed');
+          const anyInProgress = updatedRequest.lineItems.some(item => item.status === 'in-progress');
+
+          let newBulkStatus = updatedRequest.status;
+          if (allCompleted) {
+            newBulkStatus = 'completed';
+          } else if (anyInProgress) {
+            newBulkStatus = 'in-progress';
+          }
+
+          // Update bulk request status if needed
+          if (newBulkStatus !== updatedRequest.status) {
+            await requestsCollection.updateOne(
+              { _id: new ObjectId(requestId) },
+              { 
+                $set: { 
+                  status: newBulkStatus,
+                  updatedAt: new Date()
+                }
+              }
+            );
+          }
+
+          // 🚨 NEW: Notify ESP32 device of status change
+          if (oldStatus !== newStatus) {
+            await notifyDeviceStatusChange(
+              lineItem.背番号, 
+              bulkRequest.requestNumber, 
+              lineItem.lineNumber, 
+              lineItem.quantity, 
+              lineItem.品番, 
+              newStatus
+            );
+          }
+
+          res.json({
+            success: true,
+            message: "Line item status updated successfully",
+            bulkStatus: newBulkStatus
+          });
+
+        } catch (error) {
+          console.error("Error in updateLineItemStatus:", error);
+          res.status(500).json({ error: "Failed to update line item status", details: error.message });
+        }
+        break;
+
+      case 'changeRequestStatus':
+        try {
+          if (!requestId || !data || !data.status) {
+            return res.status(400).json({ error: "Request ID and status are required" });
+          }
+
+          const request = await requestsCollection.findOne({ _id: new ObjectId(requestId) });
+          if (!request) {
+            return res.status(404).json({ error: "Request not found" });
+          }
+
+          const userName = data.userName || 'Unknown User';
+          const oldStatus = request.status;
+          const newStatus = data.status;
+
+          // Handle inventory changes based on status transition
+          if (oldStatus !== newStatus) {
+            // For bulk requests, handle line items individually
+            if (request.requestType === 'bulk' && request.lineItems) {
+              // Update all line items to the new status
+              await requestsCollection.updateOne(
+                { _id: new ObjectId(requestId) },
+                { 
+                  $set: { 
+                    status: newStatus,
+                    updatedAt: new Date(),
+                    updatedBy: userName,
+                    "lineItems.$[].status": newStatus,
+                    "lineItems.$[].updatedAt": new Date()
+                  }
+                }
+              );
+
+              // 🚨 NEW: Notify all ESP32 devices in this bulk request
+              for (const lineItem of request.lineItems) {
+                await notifyDeviceStatusChange(
+                  lineItem.背番号, 
+                  request.requestNumber, 
+                  lineItem.lineNumber, 
+                  lineItem.quantity, 
+                  lineItem.品番, 
+                  newStatus
+                );
+              }
+            } else {
+              // Single request - existing inventory logic
+              const inventoryItem = await inventoryCollection.findOne({ 
+                背番号: request.背番号 
+              }, { 
+                sort: { timeStamp: -1 } 
+              });
+
+              if (inventoryItem) {
+                const currentPhysical = inventoryItem.physicalQuantity || inventoryItem.runningQuantity || 0;
+                const currentReserved = inventoryItem.reservedQuantity || 0;
+                const currentAvailable = inventoryItem.availableQuantity || inventoryItem.runningQuantity || 0;
+
+                let newPhysical = currentPhysical;
+                let newReserved = currentReserved;
+                let newAvailable = currentAvailable;
+                let action = '';
+                let note = '';
+
+                // Handle different status transitions
+                if (newStatus === 'complete' && (oldStatus === 'pending' || oldStatus === 'active')) {
+                  // Completing pickup: reduce physical and reserved quantities
+                  newPhysical = currentPhysical - request.quantity;
+                  newReserved = Math.max(0, currentReserved - request.quantity);
+                  action = `Picking Completed (-${request.quantity})`;
+                  note = `Physically picked ${request.quantity} units for request ${request.requestNumber}`;
+
+                } else if (newStatus === 'failed' && (oldStatus === 'pending' || oldStatus === 'active')) {
+                  // Failed pickup: restore available, reduce reserved
+                  newReserved = Math.max(0, currentReserved - request.quantity);
+                  newAvailable = currentAvailable + request.quantity;
+                  action = `Picking Failed (Restored +${request.quantity})`;
+                  note = `Failed to pick ${request.quantity} units, restored to available inventory`;
+
+                } else if (newStatus === 'active' && oldStatus === 'pending') {
+                  action = `Status Change: ${oldStatus} → ${newStatus}`;
+                  note = `Request ${request.requestNumber} status changed to active`;
+
+                } else {
+                  action = `Status Change: ${oldStatus} → ${newStatus}`;
+                  note = `Request ${request.requestNumber} status updated`;
+                }
+
+                // Create inventory transaction if there was a quantity change
+                if (newPhysical !== currentPhysical || newReserved !== currentReserved || newAvailable !== currentAvailable) {
+                  const statusTransaction = {
+                    背番号: request.背番号,
+                    品番: request.品番,
+                    timeStamp: new Date(),
+                    Date: new Date().toISOString().split('T')[0],
+                    
+                    // Two-stage inventory fields
+                    physicalQuantity: newPhysical,
+                    reservedQuantity: newReserved,
+                    availableQuantity: newAvailable,
+                    
+                    // Legacy field for compatibility
+                    runningQuantity: newAvailable,
+                    lastQuantity: currentAvailable,
+                    
+                    action: action,
+                    source: `Freya Admin - ${userName}`,
+                    requestId: requestId,
+                    note: note
+                  };
+
+                  await inventoryCollection.insertOne(statusTransaction);
+                }
+              }
+
+              // 🚨 NEW: Notify ESP32 device for single request
+              await notifyDeviceStatusChange(
+                request.背番号, 
+                request.requestNumber, 
+                1, // Single request line number
+                request.quantity, 
+                request.品番, 
+                newStatus
+              );
+            }
+          }
+
+          // Update request status
+          const updateData = {
+            status: newStatus,
+            updatedAt: new Date(),
+            updatedBy: userName
+          };
+
+          if (newStatus === 'complete') {
+            updateData.completedAt = new Date();
+          }
+
+          const result = await requestsCollection.updateOne(
+            { _id: new ObjectId(requestId) },
+            { $set: updateData }
+          );
+
+          if (result.matchedCount === 0) {
+            return res.status(404).json({ error: "Request not found" });
+          }
+
+          res.json({ 
+            success: true,
+            message: `Request status changed from ${oldStatus} to ${newStatus}`
+          });
+
+        } catch (error) {
+          console.error("Error in changeRequestStatus:", error);
+          res.status(500).json({ error: "Failed to change request status", details: error.message });
+        }
+        break;
+
+      // ... (include other NODA API cases as needed - I'm showing just the key ones for status changes)
+
+      default:
+        res.status(400).json({ error: "Invalid action" });
+    }
+
+  } catch (error) {
+    console.error("Error in NODA requests API:", error);
+    res.status(500).json({ error: "Internal server error", details: error.message });
+  }
+});
+
+// ==================== END OF NODA API ROUTES ====================
+
+// Simplified admin endpoint to change line item status with ESP32 notification
+app.put('/api/admin/request/:requestId/line/:lineNumber/status', async (req, res) => {
+    try {
+        const { requestId, lineNumber } = req.params;
+        const { status, userName = 'Admin' } = req.body;
+        
+        if (!['pending', 'in-progress', 'completed', 'cancelled'].includes(status)) {
+            return res.status(400).json({ error: 'Invalid status' });
+        }
+        
+        await client.connect();
+        const db = client.db("submittedDB");
+        const requestsCollection = db.collection("nodaRequestDB");
+        
+        // Find the request
+        const request = await requestsCollection.findOne({ _id: new ObjectId(requestId) });
+        if (!request) {
+            return res.status(404).json({ error: "Request not found" });
+        }
+        
+        // Find the specific line item
+        const lineItem = request.lineItems.find(item => item.lineNumber === parseInt(lineNumber));
+        if (!lineItem) {
+            return res.status(404).json({ error: "Line item not found" });
+        }
+        
+        const oldStatus = lineItem.status;
+        
+        // Update the line item status
+        const updateResult = await requestsCollection.updateOne(
+            { 
+                _id: new ObjectId(requestId),
+                "lineItems.lineNumber": parseInt(lineNumber)
+            },
+            { 
+                $set: { 
+                    "lineItems.$.status": status,
+                    "lineItems.$.updatedAt": new Date(),
+                    updatedAt: new Date(),
+                    updatedBy: userName
+                }
+            }
+        );
+        
+        if (updateResult.matchedCount === 0) {
+            return res.status(404).json({ error: "Failed to update line item" });
+        }
+        
+        // Notify ESP32 device of status change
+        if (oldStatus !== status) {
+            await notifyDeviceStatusChange(
+                lineItem.背番号, 
+                request.requestNumber, 
+                lineItem.lineNumber, 
+                lineItem.quantity, 
+                lineItem.品番, 
+                status
+            );
+        }
+        
+        res.json({ 
+            success: true,
+            message: `Line item ${lineNumber} status changed from ${oldStatus} to ${status}`,
+            deviceNotified: lineItem.背番号
+        });
+        
+    } catch (error) {
+        console.error('Error updating line item status:', error);
+        res.status(500).json({ error: 'Failed to update line item status' });
+    }
+});
+
+// Simplified admin endpoint to change request status with ESP32 notification
+app.put('/api/admin/request/:requestId/status', async (req, res) => {
+    try {
+        const { requestId } = req.params;
+        const { status, userName = 'Admin' } = req.body;
+        
+        if (!['pending', 'in-progress', 'completed', 'cancelled'].includes(status)) {
+            return res.status(400).json({ error: 'Invalid status' });
+        }
+        
+        await client.connect();
+        const db = client.db("submittedDB");
+        const requestsCollection = db.collection("nodaRequestDB");
+        
+        // Find the request
+        const request = await requestsCollection.findOne({ _id: new ObjectId(requestId) });
+        if (!request) {
+            return res.status(404).json({ error: "Request not found" });
+        }
+        
+        const oldStatus = request.status;
+        
+        // Update the request status
+        const updateData = {
+            status: status,
+            updatedAt: new Date(),
+            updatedBy: userName
+        };
+        
+        if (status === 'completed') {
+            updateData.completedAt = new Date();
+        }
+        
+        const updateResult = await requestsCollection.updateOne(
+            { _id: new ObjectId(requestId) },
+            { $set: updateData }
+        );
+        
+        if (updateResult.matchedCount === 0) {
+            return res.status(404).json({ error: "Failed to update request" });
+        }
+        
+        // Notify ESP32 devices
+        const notifiedDevices = [];
+        if (oldStatus !== status) {
+            if (request.requestType === 'bulk' && request.lineItems) {
+                // Update all line items to match request status
+                await requestsCollection.updateOne(
+                    { _id: new ObjectId(requestId) },
+                    { 
+                        $set: { 
+                            "lineItems.$[].status": status,
+                            "lineItems.$[].updatedAt": new Date()
+                        }
+                    }
+                );
+                
+                // Notify all devices in this bulk request
+                for (const lineItem of request.lineItems) {
+                    await notifyDeviceStatusChange(
+                        lineItem.背番号, 
+                        request.requestNumber, 
+                        lineItem.lineNumber, 
+                        lineItem.quantity, 
+                        lineItem.品番, 
+                        status
+                    );
+                    notifiedDevices.push(lineItem.背番号);
+                }
+            } else {
+                // Single request
+                await notifyDeviceStatusChange(
+                    request.背番号, 
+                    request.requestNumber, 
+                    1, 
+                    request.quantity, 
+                    request.品番, 
+                    status
+                );
+                notifiedDevices.push(request.背番号);
+            }
+        }
+        
+        res.json({ 
+            success: true,
+            message: `Request status changed from ${oldStatus} to ${status}`,
+            devicesNotified: notifiedDevices
+        });
+        
+    } catch (error) {
+        console.error('Error updating request status:', error);
+        res.status(500).json({ error: 'Failed to update request status' });
+    }
+});
+
+// API endpoint to refresh ESP32 devices for a specific request
+app.post('/api/refresh-devices/:requestNumber', async (req, res) => {
+    try {
+        const { requestNumber } = req.params;
+        const { userName = 'Tablet' } = req.body;
+        
+        console.log(`🔄 Device refresh requested for ${requestNumber} by ${userName}`);
+        
+        await client.connect();
+        const db = client.db("submittedDB");
+        const requestsCollection = db.collection("nodaRequestDB");
+        
+        // Find the request by requestNumber
+        const request = await requestsCollection.findOne({ requestNumber: requestNumber });
+        if (!request) {
+            return res.status(404).json({ error: "Request not found" });
+        }
+        
+        const notifiedDevices = [];
+        
+        // Check if request is in-progress and notify devices
+        if (request.status === 'in-progress') {
+            if (request.requestType === 'bulk' && request.lineItems) {
+                // Notify all devices in this bulk request
+                for (const lineItem of request.lineItems) {
+                    if (lineItem.status === 'in-progress') {
+                        await notifyDeviceStatusChange(
+                            lineItem.背番号, 
+                            request.requestNumber, 
+                            lineItem.lineNumber, 
+                            lineItem.quantity, 
+                            lineItem.品番, 
+                            'in-progress'
+                        );
+                        notifiedDevices.push(lineItem.背番号);
+                    }
+                }
+            } else {
+                // Single request
+                await notifyDeviceStatusChange(
+                    request.背番号, 
+                    request.requestNumber, 
+                    1, 
+                    request.quantity, 
+                    request.品番, 
+                    'in-progress'
+                );
+                notifiedDevices.push(request.背番号);
+            }
+        }
+        
+        res.json({ 
+            success: true,
+            message: `Refreshed ${notifiedDevices.length} devices for request ${requestNumber}`,
+            devicesNotified: notifiedDevices,
+            requestStatus: request.status
+        });
+        
+    } catch (error) {
+        console.error('Error refreshing devices:', error);
+        res.status(500).json({ error: 'Failed to refresh devices' });
+    }
+});
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
     res.json({ status: 'OK', timestamp: new Date().toISOString() });
@@ -552,10 +1395,76 @@ async function startServer() {
             console.log(`Noda System server running on port ${PORT}`);
             console.log(`Access the application at: http://localhost:${PORT}`);
             console.log('Socket.IO server ready for IoT devices and tablets');
+            
+            // 🚨 NEW: Start periodic ESP32 notification check
+            startPeriodicESP32Check();
         });
     } catch (error) {
         console.error('Failed to start server:', error);
         process.exit(1);
+    }
+}
+
+// Periodic check to ensure ESP32 devices are notified of status changes
+function startPeriodicESP32Check() {
+    console.log('🔄 Starting periodic ESP32 notification check (every 10 seconds)');
+    
+    setInterval(async () => {
+        try {
+            // Check global picking lock which will trigger ESP32 notifications if needed
+            await checkGlobalPickingLock();
+            
+            // Also check for any recently changed requests (last 30 seconds)
+            await checkRecentStatusChanges();
+            
+        } catch (error) {
+            console.error('Error in periodic ESP32 check:', error);
+        }
+    }, 10000); // Check every 10 seconds
+}
+
+// Check for recently changed requests that might need ESP32 notification
+async function checkRecentStatusChanges() {
+    try {
+        await client.connect();
+        const db = client.db("submittedDB");
+        const requestsCollection = db.collection("nodaRequestDB");
+        
+        // Look for requests updated in the last 30 seconds that are in-progress
+        const thirtySecondsAgo = new Date(Date.now() - 30000);
+        
+        const recentlyChangedRequests = await requestsCollection.find({
+            status: 'in-progress',
+            updatedAt: { $gte: thirtySecondsAgo }
+        }).toArray();
+        
+        for (const request of recentlyChangedRequests) {
+            // Check if any line items are in-progress and notify devices
+            if (request.requestType === 'bulk' && request.lineItems) {
+                const inProgressItems = request.lineItems.filter(item => 
+                    item.status === 'in-progress' && 
+                    item.updatedAt >= thirtySecondsAgo
+                );
+                
+                for (const lineItem of inProgressItems) {
+                    const deviceSocket = connectedDevices.get(lineItem.背番号);
+                    if (deviceSocket) {
+                        console.log(`🔄 Periodic check: Refreshing device ${lineItem.背番号} for recently changed request ${request.requestNumber}`);
+                        await notifyDeviceStatusChange(
+                            lineItem.背番号, 
+                            request.requestNumber, 
+                            lineItem.lineNumber, 
+                            lineItem.quantity, 
+                            lineItem.品番, 
+                            'in-progress'
+                        );
+                    }
+                }
+            }
+        }
+        
+    } catch (error) {
+        console.error('Error checking recent status changes:', error);
     }
 }
 
