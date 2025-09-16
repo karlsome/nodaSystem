@@ -59,9 +59,9 @@ const char* passwordList[] = {
 
 const int numNetworks = sizeof(ssidList) / sizeof(ssidList[0]);
 
-// Server configuration
-const char* websockets_server = "192.168.0.64";
-const int websockets_port = 3001;  // Local server port
+// Server configuration (production)
+const char* websockets_server = "nodasystem.onrender.com";
+const int websockets_port = 443;  // Render uses HTTPS/WSS on 443
 
 // Device configuration
 const String DEVICE_ID = "C74"; // 背番号 - Change for each device
@@ -358,7 +358,7 @@ void checkDeviceStatusViaAPI() {
   }
   
   HTTPClient http;
-  String url = "http://" + String(websockets_server) + ":" + String(websockets_port) + "/api/device/" + DEVICE_ID + "/status";
+  String url = "https://" + String(websockets_server) + "/api/device/" + DEVICE_ID + "/status";
   
   Serial.println("🌐 Checking device status via REST API: " + url);
   
@@ -596,9 +596,9 @@ void connectToWiFi() {
 }
 
 void connectToServer() {
-  // Use regular HTTP connection for local server
-  webSocket.begin(websockets_server, websockets_port,
-                  "/socket.io/?EIO=4&transport=websocket");
+  // Use secure WebSocket (WSS) for production server
+  webSocket.beginSSL(websockets_server, websockets_port,
+                     "/socket.io/?EIO=4&transport=websocket");
   webSocket.onEvent(webSocketEvent);
   webSocket.setReconnectInterval(5000);
 

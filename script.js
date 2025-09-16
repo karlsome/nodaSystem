@@ -11,8 +11,8 @@ let recentActivities = []; // Initialize empty array for activities
 let todaysTasks = []; // Initialize empty array for tasks
 
 // API base URL - change this to your server URL
-const API_BASE_URL = 'http://localhost:3001/api';
-//const API_BASE_URL = 'https://nodasystem.onrender.com/api';
+//const API_BASE_URL = 'http://localhost:3001/api';
+const API_BASE_URL = 'https://nodasystem.onrender.com/api';
 
 // Debug localStorage on page load
 console.log('🔄 Page loaded, checking localStorage availability...');
@@ -52,7 +52,7 @@ function initializeApp() {
 // Socket.IO initialization
 function initializeSocket() {
     if (!socket) {
-        socket = io('http://localhost:3001');
+    socket = io('https://nodasystem.onrender.com');
         
         socket.on('connect', () => {
             console.log('Connected to server');
