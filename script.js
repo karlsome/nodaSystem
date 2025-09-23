@@ -52,10 +52,13 @@ function initializeApp() {
 // Socket.IO initialization
 function initializeSocket() {
     if (!socket) {
-    socket = io('https://nodasystem.onrender.com');
+        // Extract the base URL from the API_BASE_URL
+        const socketUrl = API_BASE_URL.replace('/api', '');
+        console.log('🔌 Connecting to Socket.IO server:', socketUrl);
+        socket = io(socketUrl);
         
         socket.on('connect', () => {
-            console.log('Connected to server');
+            console.log('✅ Connected to Socket.IO server:', socket.id);
             updateConnectionStatus(true);
             
             // Register as tablet
@@ -70,12 +73,37 @@ function initializeSocket() {
         });
         
         socket.on('item-completed', (data) => {
-            console.log('Item completed:', data);
+            console.log('🎯 Item completed event received:', data);
             showToast(`${data.deviceId} がアイテムを完了しました`, 'success');
+            
+            // Play a sound to alert the user
+            try {
+                const audio = new Audio('/alert.mp3');
+                audio.play().catch(e => console.log('Audio play failed:', e));
+            } catch (e) {
+                console.log('Audio creation failed:', e);
+            }
             
             // Refresh current view if viewing the same request
             if (currentRequestNumber === data.requestNumber) {
+                console.log('🔄 Refreshing picking detail for request:', currentRequestNumber);
                 refreshPickingDetail();
+                
+                // Force-update the specific line item without full refresh if possible
+                updateLineItemStatus(data.requestNumber, data.lineNumber, 'completed');
+            } else {
+                console.log('ℹ️ Not refreshing - current request is:', currentRequestNumber, 'but completed request is:', data.requestNumber);
+            }
+        });
+        
+        // Add direct device status update handler
+        socket.on('device-status-update', (data) => {
+            console.log('📱 Device status update received:', data);
+            
+            // If this is a status update for our current request's device
+            if (currentRequestNumber === data.requestNumber) {
+                console.log('📊 Updating device status in UI for:', data.deviceId);
+                updateDeviceStatusInUI(data);
             }
         });
         
@@ -422,13 +450,13 @@ function displayPickingDetail(request) {
         </div>
         <div class="text-center">
             <p class="text-sm text-gray-500">ステータス</p>
-            <span class="status-badge ${getStatusClass(request.status)}">
+            <span id="requestStatusBadge" class="status-badge ${getStatusClass(request.status)}">
                 ${getStatusText(request.status)}
             </span>
         </div>
         <div class="text-center">
             <p class="text-sm text-gray-500">進捗</p>
-            <p class="text-lg font-semibold text-gray-900">${completedItems}/${request.lineItems.length}</p>
+            <p class="text-lg font-semibold text-gray-900 request-progress">${completedItems}/${request.lineItems.length}</p>
         </div>
         <div class="text-center">
             <p class="text-sm text-gray-500">作成者</p>
@@ -468,6 +496,11 @@ function displayPickingDetail(request) {
 function createPickingItemElement(item, index) {
     const itemDiv = document.createElement('div');
     itemDiv.className = 'picking-item border rounded-lg p-4 mb-3';
+    // Add data attributes for real-time updates
+    itemDiv.setAttribute('data-line', item.lineNumber);
+    itemDiv.setAttribute('data-device-id', item.背番号);
+    itemDiv.setAttribute('data-item-id', item.品番);
+    itemDiv.setAttribute('data-status', item.status);
     
     // Status icon and text based on item status
     let statusIcon = '';
@@ -500,9 +533,12 @@ function createPickingItemElement(item, index) {
                 </div>
                 <div>
                     <h4 class="text-lg font-semibold text-gray-900">品番: ${item.品番}</h4>
-                    <p class="text-gray-600">背番号: ${item.背番号}</p>
+                    <div class="flex items-center">
+                        <div class="device-status-indicator w-3 h-3 rounded-full ${item.status === 'in-progress' ? 'bg-yellow-400' : item.status === 'completed' ? 'bg-green-500' : 'bg-gray-400'} mr-2"></div>
+                        <p class="text-gray-600">背番号: <span class="font-medium">${item.背番号}</span></p>
+                    </div>
                     <p class="text-sm text-gray-500">数量: ${item.quantity}</p>
-                    ${completedInfo}
+                    <div class="completion-info mt-1">${completedInfo}</div>
                 </div>
             </div>
             <div class="text-right flex items-center space-x-4">
@@ -511,10 +547,10 @@ function createPickingItemElement(item, index) {
                     <div class="text-sm text-gray-500">個</div>
                 </div>
                 <div class="flex flex-col items-center space-y-2">
-                    <div class="text-2xl">
+                    <div class="text-2xl status-icon">
                         ${statusIcon}
                     </div>
-                    <div class="text-sm font-medium ${statusClass}">
+                    <div class="status-badge ${item.status === 'completed' ? 'bg-green-100 text-green-800' : item.status === 'in-progress' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-800'} px-2 py-1 rounded-full text-xs font-medium">
                         ${statusText}
                     </div>
                 </div>
@@ -621,11 +657,166 @@ async function startIndividualPicking(lineNumber, deviceId) {
 // Refresh picking detail
 async function refreshPickingDetail() {
     if (currentRequestNumber) {
-        await viewPickingDetail(currentRequestNumber);
-        // Check lock status after refreshing detail
-        await checkAndUpdateLockStatus();
-        // Also refresh ESP32 devices for this request
-        await refreshESP32Devices(currentRequestNumber);
+        console.log('🔄 Refreshing picking detail for request:', currentRequestNumber);
+        try {
+            // Add cache-busting parameter to ensure we get fresh data
+            const timestamp = new Date().getTime();
+            const response = await fetch(`${API_BASE_URL}/picking-requests/group/${currentRequestNumber}?_=${timestamp}`);
+            
+            if (!response.ok) {
+                throw new Error(`Failed to fetch picking request details: ${response.status}`);
+            }
+            
+            const request = await response.json();
+            console.log('📄 Refreshed data received:', request);
+            currentRequest = request;
+            displayPickingDetail(request);
+            
+            // Check lock status after refreshing detail
+            await checkAndUpdateLockStatus();
+            
+            // Also refresh ESP32 devices for this request
+            await refreshESP32Devices(currentRequestNumber);
+            
+            console.log('✅ Refresh completed successfully');
+        } catch (error) {
+            console.error('❌ Error refreshing picking detail:', error);
+            showToast('更新に失敗しました', 'error');
+        }
+    } else {
+        console.warn('⚠️ Cannot refresh - no current request number');
+    }
+}
+
+// Update line item status directly in the UI without full refresh
+function updateLineItemStatus(requestNumber, lineNumber, newStatus) {
+    if (currentRequestNumber !== requestNumber) {
+        console.log('⚠️ Not updating UI - different request is active');
+        return;
+    }
+    
+    try {
+        console.log(`🔄 Updating line item ${lineNumber} to ${newStatus} in UI`);
+        
+        // Find the line item in the DOM
+        const lineItemSelector = `.picking-item[data-line="${lineNumber}"]`;
+        const lineItemElement = document.querySelector(lineItemSelector);
+        
+        if (!lineItemElement) {
+            console.warn(`❌ Could not find line item element with selector: ${lineItemSelector}`);
+            return;
+        }
+        
+        // Update the status badge
+        const statusBadge = lineItemElement.querySelector('.status-badge');
+        if (statusBadge) {
+            // Remove old status classes
+            statusBadge.classList.remove('bg-yellow-100', 'text-yellow-800', 'bg-gray-100', 'text-gray-800', 'bg-green-100', 'text-green-800');
+            
+            // Add appropriate class for new status
+            if (newStatus === 'completed') {
+                statusBadge.classList.add('bg-green-100', 'text-green-800');
+                statusBadge.textContent = '完了';
+                
+                // Add completion timestamp and user
+                const completionInfo = document.createElement('div');
+                completionInfo.className = 'text-xs text-gray-500 mt-1';
+                const now = new Date();
+                completionInfo.innerHTML = `
+                    <p>完了: ${now.toLocaleString('ja-JP')}</p>
+                    <p>作業者: IoT Device</p>
+                `;
+                
+                // Find or create a container for this info
+                let infoContainer = lineItemElement.querySelector('.completion-info');
+                if (!infoContainer) {
+                    infoContainer = document.createElement('div');
+                    infoContainer.className = 'completion-info mt-2';
+                    lineItemElement.appendChild(infoContainer);
+                }
+                infoContainer.innerHTML = completionInfo.innerHTML;
+            }
+        }
+        
+        // Update the item's status icon
+        const statusIcon = lineItemElement.querySelector('.status-icon');
+        if (statusIcon) {
+            if (newStatus === 'completed') {
+                statusIcon.innerHTML = '<i class="fas fa-check-circle text-green-500"></i>';
+            }
+        }
+        
+        // Update progress counter at the top
+        updateProgressCounter();
+        
+    } catch (error) {
+        console.error('Error updating line item status in UI:', error);
+    }
+}
+
+// Update device status in UI
+function updateDeviceStatusInUI(deviceData) {
+    try {
+        const { deviceId, status, isPickingMode, currentQuantity } = deviceData;
+        
+        // Find all elements that show this device's status
+        const deviceElements = document.querySelectorAll(`[data-device-id="${deviceId}"]`);
+        
+        deviceElements.forEach(element => {
+            // Update status indicator if it exists
+            const statusIndicator = element.querySelector('.device-status-indicator');
+            if (statusIndicator) {
+                statusIndicator.className = 'device-status-indicator w-3 h-3 rounded-full';
+                
+                if (status === 'picking') {
+                    statusIndicator.classList.add('bg-green-500', 'animate-pulse');
+                } else if (status === 'standby') {
+                    statusIndicator.classList.add('bg-blue-400');
+                } else {
+                    statusIndicator.classList.add('bg-gray-400');
+                }
+            }
+            
+            // Update status text if it exists
+            const statusText = element.querySelector('.device-status-text');
+            if (statusText) {
+                if (status === 'picking') {
+                    statusText.textContent = 'ピッキング中';
+                    statusText.className = 'device-status-text text-green-600 font-medium';
+                } else if (status === 'standby') {
+                    statusText.textContent = 'スタンバイ';
+                    statusText.className = 'device-status-text text-blue-600';
+                } else {
+                    statusText.textContent = 'オフライン';
+                    statusText.className = 'device-status-text text-gray-600';
+                }
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error updating device status in UI:', error);
+    }
+}
+
+// Update progress counter
+function updateProgressCounter() {
+    if (!currentRequest) return;
+    
+    const completedItems = document.querySelectorAll('.picking-item .status-badge:contains("完了")').length;
+    const totalItems = currentRequest.lineItems.length;
+    
+    const progressElement = document.querySelector('.request-progress');
+    if (progressElement) {
+        progressElement.textContent = `${completedItems}/${totalItems}`;
+    }
+    
+    // If all items are completed, update the request status
+    if (completedItems === totalItems) {
+        const statusBadge = document.querySelector('#requestStatusBadge');
+        if (statusBadge) {
+            statusBadge.textContent = '完了';
+            statusBadge.className = 'status-badge bg-green-100 text-green-800 px-2 py-1 rounded-full text-xs font-medium';
+        }
     }
 }
 
