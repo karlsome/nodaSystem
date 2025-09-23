@@ -109,9 +109,10 @@ async function notifyESP32DevicesForRequest(requestNumber, triggeredBy = 'System
         // Check if request is in-progress and notify devices
         if (request.status === 'in-progress') {
             if (request.requestType === 'bulk' && request.lineItems) {
-                // Notify all devices in this bulk request that are in-progress
+                // Notify all devices in this bulk request that are in-progress or pending
                 for (const lineItem of request.lineItems) {
-                    if (lineItem.status === 'in-progress') {
+                    if (lineItem.status === 'in-progress' || lineItem.status === 'pending') {
+                        console.log(`🔔 Notifying device ${lineItem.背番号} for line item ${lineItem.lineNumber} (status: ${lineItem.status})`);
                         await notifyDeviceStatusChange(
                             lineItem.背番号, 
                             request.requestNumber, 
@@ -548,13 +549,16 @@ io.on('connection', (socket) => {
                 message: 'Completed'
             });
             
-            // Notify all tablets of the completion
+            // Notify all tablets of the completion with rich details
             connectedTablets.forEach(tabletSocket => {
                 tabletSocket.emit('item-completed', {
                     requestNumber,
                     lineNumber,
                     deviceId,
-                    completedBy
+                    completedBy,
+                    timestamp: new Date().toISOString(),
+                    status: 'completed',
+                    fromSocketIO: true
                 });
             });
             
@@ -697,6 +701,10 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
         
         // Get updated request with new status
         const updatedRequest = await collection.findOne({ requestNumber });
+        
+        // Explicitly notify ESP32 devices of the new picking order
+        console.log(`🚀 Start picking triggered for request ${requestNumber} by ${startedBy}`);
+        await notifyESP32DevicesForRequest(requestNumber, startedBy);
         
         // Send picking data to all connected devices
         const pickingData = {
