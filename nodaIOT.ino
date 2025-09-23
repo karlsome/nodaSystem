@@ -108,6 +108,17 @@ struct DeviceState {
   String currentMessage = "Connecting...";
 } deviceState;
 
+// Connection monitoring
+struct ConnectionState {
+  unsigned long lastHeartbeat = 0;
+  unsigned long lastConnectAttempt = 0;
+  unsigned long lastPingTime = 0;
+  bool isReconnecting = false;
+  const unsigned long HEARTBEAT_INTERVAL = 30000; // Send heartbeat every 30 seconds
+  const unsigned long CONNECTION_TIMEOUT = 60000; // Consider disconnected after 60 seconds
+  const unsigned long RECONNECT_DELAY = 5000; // Wait 5 seconds between reconnect attempts
+} connectionState;
+
 // Screen power management
 struct ScreenState {
   bool isScreenOn = true;
@@ -146,6 +157,7 @@ static void apply_relays() {
 
 static void turn_screen_off() {
   Serial.println("🌙 Turning screen off to prevent burn-in (15min timeout)");
+  Serial.println("📡 Note: WebSocket connection remains active during screen timeout");
   gfx->fillScreen(BLACK);
   gfx->flush();
   
@@ -154,6 +166,7 @@ static void turn_screen_off() {
   
   screenState.isScreenOn = false;
   // Note: GPIO relays stay active, LCD backlight and display content are off
+  // WebSocket connection is maintained regardless of screen state
 }
 
 static void turn_screen_on() {
@@ -277,7 +290,7 @@ static void complete_picking_task() {
   update_screen_activity(); // Reset screen timeout and wake up if needed
   update_screen_display();
 
-  Serial.println("Task completed - returning to standby");
+  Serial.println("Task completed - returning to standby (staying connected)");
 }
 
 // --- LVGL callbacks ---
@@ -420,19 +433,75 @@ void checkDeviceStatusViaAPI() {
   http.end();
 }
 
+// Connection monitoring and keep-alive functions
+void sendHeartbeat() {
+  if (deviceState.isConnected && webSocket.isConnected()) {
+    DynamicJsonDocument doc(512);
+    doc["deviceId"] = DEVICE_ID;
+    doc["timestamp"] = millis();
+    doc["status"] = deviceState.isPickingMode ? "picking" : "standby";
+    String payload;
+    serializeJson(doc, payload);
+    webSocket.sendTXT("42[\"device-heartbeat\"," + payload + "]");
+    connectionState.lastHeartbeat = millis();
+    Serial.println("💓 Heartbeat sent to server");
+  }
+}
+
+void checkConnectionHealth() {
+  unsigned long now = millis();
+  
+  // Check if we've lost connection
+  if (deviceState.isConnected && !webSocket.isConnected()) {
+    Serial.println("⚠️ WebSocket connection lost, marking as disconnected");
+    deviceState.isConnected = false;
+    deviceState.currentMessage = "Connection Lost";
+    update_screen_activity();
+    update_screen_display();
+  }
+  
+  // Send periodic heartbeat
+  if (deviceState.isConnected && (now - connectionState.lastHeartbeat) >= connectionState.HEARTBEAT_INTERVAL) {
+    sendHeartbeat();
+  }
+  
+  // Attempt reconnection if needed
+  if (!deviceState.isConnected && !connectionState.isReconnecting && 
+      (now - connectionState.lastConnectAttempt) >= connectionState.RECONNECT_DELAY) {
+    Serial.println("🔄 Attempting WebSocket reconnection...");
+    connectionState.isReconnecting = true;
+    connectionState.lastConnectAttempt = now;
+    connectToServer();
+  }
+}
+
+void ensureConnectionStability() {
+  // Make sure we maintain connection regardless of device state
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!webSocket.isConnected() && !connectionState.isReconnecting) {
+      Serial.println("📡 WebSocket not connected but WiFi is up - initiating connection");
+      checkConnectionHealth();
+    }
+  }
+}
+
 // WebSocket event handlers
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
   switch(type) {
     case WStype_DISCONNECTED:
-      Serial.println("WebSocket Disconnected");
+      Serial.println("❌ WebSocket Disconnected");
       deviceState.isConnected = false;
+      connectionState.isReconnecting = false;
       deviceState.currentMessage = "Server Disconnected";
       update_screen_activity(); // Wake screen and reset timeout
       update_screen_display();
       break;
 
     case WStype_CONNECTED:
-      Serial.printf("WebSocket Connected to: %s\n", payload);
+      Serial.printf("✅ WebSocket Connected to: %s\n", payload);
+      connectionState.isReconnecting = false;
+      connectionState.lastHeartbeat = millis();
+      connectionState.lastPingTime = millis();
       deviceState.currentMessage = "Connecting...";
       update_screen_activity(); // Wake screen and reset timeout
       update_screen_display();
@@ -440,18 +509,18 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 
     case WStype_TEXT: {
       String message = String((char*)payload, length);
-      Serial.printf("Received: %s\n", message.c_str());
+      Serial.printf("📨 Received: %s\n", message.c_str());
 
       // Handle Socket.IO handshake
       if (message.startsWith("0{")) {
-        Serial.println("Socket.IO handshake received, sending connect");
+        Serial.println("🤝 Socket.IO handshake received, sending connect");
         webSocket.sendTXT("40"); // Socket.IO connect packet
         return;
       }
       
       // Handle Socket.IO connect confirmation
       if (message.startsWith("40")) {
-        Serial.println("Socket.IO connected successfully");
+        Serial.println("🔗 Socket.IO connected successfully - maintaining persistent connection");
         deviceState.isConnected = true;
         deviceState.currentMessage = "Connected";
         update_screen_activity(); // Wake screen and reset timeout
@@ -461,10 +530,14 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         DynamicJsonDocument doc(512);
         doc["deviceId"] = DEVICE_ID;
         doc["type"] = "iot-device";
+        doc["persistent"] = true; // Indicate this is a persistent connection
         String regPayload;
         serializeJson(doc, regPayload);
         webSocket.sendTXT("42[\"device-register\"," + regPayload + "]");
-        Serial.println("Device registration sent");
+        Serial.println("📋 Device registration sent with persistent connection flag");
+        
+        // Send initial heartbeat
+        sendHeartbeat();
         
         // Also check status via REST API as backup after a short delay
         delay(2000); // Wait 2 seconds for Socket.IO registration to process
@@ -484,13 +557,28 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         }
       }
       
-      // Handle Socket.IO ping
+      // Handle Socket.IO ping - critical for maintaining connection
       if (message == "2") {
         webSocket.sendTXT("3"); // Send pong
-        Serial.println("Socket.IO ping received, pong sent");
+        connectionState.lastPingTime = millis();
+        Serial.println("💓 Socket.IO ping received, pong sent - connection alive");
       }
       
       break; }
+
+    case WStype_ERROR:
+      Serial.printf("❌ WebSocket Error: %s\n", payload);
+      deviceState.isConnected = false;
+      connectionState.isReconnecting = false;
+      break;
+
+    case WStype_PING:
+      Serial.println("📡 WebSocket PING received");
+      break;
+
+    case WStype_PONG:
+      Serial.println("📡 WebSocket PONG received");
+      break;
 
     default:
       break;
@@ -596,16 +684,25 @@ void connectToWiFi() {
 }
 
 void connectToServer() {
-  // Use secure WebSocket (WSS) for production server
+  Serial.printf("🔌 Connecting to server %s:%d (persistent connection)\n", websockets_server, websockets_port);
+  
+  // Use secure WebSocket (WSS) for production server with optimized settings
   webSocket.beginSSL(websockets_server, websockets_port,
                      "/socket.io/?EIO=4&transport=websocket");
   webSocket.onEvent(webSocketEvent);
-  webSocket.setReconnectInterval(5000);
-
-  Serial.printf("Connecting to server %s:%d\n", websockets_server, websockets_port);
+  
+  // Enhanced connection settings for stability
+  webSocket.setReconnectInterval(5000); // Try to reconnect every 5 seconds
+  webSocket.enableHeartbeat(15000, 3000, 2); // Enable WebSocket level heartbeat
+  
+  // Set longer timeout for better stability  
+  webSocket.setTimeout(30000); // 30 second timeout
+  
   deviceState.currentMessage = "Connecting Server...";
   update_screen_activity(); // Wake screen during server connection
   update_screen_display();
+  
+  Serial.println("📡 WebSocket client configured for persistent connection");
 }
 
 // --- Setup ---
@@ -675,6 +772,9 @@ void setup() {
   // Initial screen setup
   deviceState.currentMessage = "Starting...";
   screenState.lastActivityTime = millis(); // Initialize activity timer
+  connectionState.lastHeartbeat = millis(); // Initialize connection monitoring
+  connectionState.lastConnectAttempt = 0;
+  connectionState.isReconnecting = false;
   update_screen_display();
 
   // Connect to WiFi and server
@@ -690,18 +790,26 @@ void loop() {
   check_bridge_button();
   check_screen_timeout(); // Check if screen should timeout during red/standby modes
 
-  // Socket.IO
+  // Socket.IO and connection management
   webSocket.loop();
+  checkConnectionHealth(); // Monitor and maintain connection
+  ensureConnectionStability(); // Ensure we stay connected
 
-  // WiFi reconnection
+  // WiFi reconnection - enhanced to not interfere with WebSocket
   if (WiFi.status() != WL_CONNECTED) {
-    if (deviceState.isConnected) onWiFiDisconnected();
+    if (deviceState.isConnected) {
+      Serial.println("📶 WiFi disconnected - this will affect WebSocket connection");
+      onWiFiDisconnected();
+    }
     static unsigned long lastReconnectAttempt = 0;
-    if (millis() - lastReconnectAttempt > 5000) {
-      Serial.println("Attempting WiFi reconnection...");
+    if (millis() - lastReconnectAttempt > 10000) { // Try every 10 seconds, not 5
+      Serial.println("🔄 Attempting WiFi reconnection...");
       WiFi.reconnect();
       lastReconnectAttempt = millis();
     }
+  } else {
+    // WiFi is connected, ensure WebSocket connection is also up
+    ensureConnectionStability();
   }
 
   // Comment out LVGL bitmap rendering since we're using Arduino_GFX directly
