@@ -40,6 +40,7 @@ const MQTT_PASSWORD = process.env.MQTT_PASSWORD || '';
 // MQTT Client and device tracking
 let mqttClient = null;
 const mqttConnectedDevices = new Map(); // deviceId -> last seen timestamp
+const mqttDevices = new Map(); // deviceId -> device info (isOnline, lastSeen, etc.)
 
 // Global picking lock state
 let globalPickingLock = {
@@ -321,6 +322,19 @@ async function handleMQTTMessage(topic, message) {
 async function handleDeviceStatusUpdate(deviceId, data) {
     console.log(`📊 Device ${deviceId} status update:`, data);
     
+    // Track device online/offline status
+    mqttDevices.set(deviceId, {
+        isOnline: data.status !== 'offline',
+        lastSeen: new Date(),
+        deviceStatus: data
+    });
+    
+    // If device just came online (status update after being offline), check for current assignments
+    if (data.status === 'standby' && data.online === true) {
+        console.log(`🔄 Device ${deviceId} came online, checking for current assignments...`);
+        await checkDeviceAssignments(deviceId);
+    }
+    
     // Forward to Socket.IO tablets for real-time updates
     connectedTablets.forEach(tabletSocket => {
         tabletSocket.emit('device-status-update', {
@@ -332,6 +346,65 @@ async function handleDeviceStatusUpdate(deviceId, data) {
             timestamp: data.timestamp
         });
     });
+}
+
+// Check if a device has current assignments when it comes online
+async function checkDeviceAssignments(deviceId) {
+    try {
+        await client.connect();
+        const db = client.db("submittedDB");
+        const requestsCollection = db.collection("nodaRequestDB");
+        
+        // Find any in-progress requests assigned to this device
+        const inProgressRequests = await requestsCollection.find({
+            status: 'in-progress',
+            $or: [
+                { '背番号': deviceId }, // Single requests
+                { 'lineItems.背番号': deviceId, 'lineItems.status': 'in-progress' } // Bulk requests
+            ]
+        }).toArray();
+        
+        console.log(`🔍 Found ${inProgressRequests.length} in-progress requests for device ${deviceId}`);
+        
+        for (const request of inProgressRequests) {
+            if (request.requestType === 'bulk' && request.lineItems) {
+                // Check bulk request line items
+                const deviceItems = request.lineItems.filter(item => 
+                    item.背番号 === deviceId && item.status === 'in-progress'
+                );
+                
+                for (const item of deviceItems) {
+                    console.log(`🟢 Sending assignment to device ${deviceId}: ${item.quantity} units of ${item.品番}`);
+                    await notifyDeviceStatusChange(
+                        deviceId,
+                        request.requestNumber,
+                        item.lineNumber,
+                        item.quantity,
+                        item.品番,
+                        'in-progress'
+                    );
+                }
+            } else if (request.背番号 === deviceId) {
+                // Single request
+                console.log(`🟢 Sending assignment to device ${deviceId}: ${request.quantity} units of ${request.品番}`);
+                await notifyDeviceStatusChange(
+                    deviceId,
+                    request.requestNumber,
+                    1,
+                    request.quantity,
+                    request.品番,
+                    'in-progress'
+                );
+            }
+        }
+        
+        if (inProgressRequests.length === 0) {
+            console.log(`ℹ️ No current assignments for device ${deviceId} - staying in standby`);
+        }
+        
+    } catch (error) {
+        console.error(`❌ Error checking assignments for device ${deviceId}:`, error);
+    }
 }
 
 // Handle device task completion via MQTT
@@ -593,7 +666,7 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
             return res.status(404).json({ error: 'Picking request not found' });
         }
         
-        // Update request status to in-progress
+        // Update request status to in-progress and update all pending line items to in-progress
         await collection.updateOne(
             { requestNumber },
             { 
@@ -601,8 +674,13 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
                     status: 'in-progress',
                     startedBy,
                     startedAt: new Date(),
-                    updatedAt: new Date()
+                    updatedAt: new Date(),
+                    'lineItems.$[elem].status': 'in-progress',
+                    'lineItems.$[elem].startedAt': new Date()
                 }
+            },
+            {
+                arrayFilters: [{ 'elem.status': 'pending' }]
             }
         );
         
@@ -617,10 +695,13 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
         // Broadcast lock status to all tablets
         broadcastLockStatus();
         
+        // Get updated request with new status
+        const updatedRequest = await collection.findOne({ requestNumber });
+        
         // Send picking data to all connected devices
         const pickingData = {
             requestNumber,
-            lineItems: request.lineItems.map(item => ({
+            lineItems: updatedRequest.lineItems.map(item => ({
                 背番号: item.背番号,
                 品番: item.品番,
                 quantity: item.quantity,
@@ -633,10 +714,10 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
         console.log(`🚀 Broadcasting to both MQTT and Socket.IO devices`);
         
         // Send to MQTT devices (new hybrid approach)
-        request.lineItems.forEach(item => {
+        updatedRequest.lineItems.forEach(item => {
             const deviceId = item.背番号;
             
-            if (item.status === 'pending') {
+            if (item.status === 'in-progress') {
                 publishDeviceCommand(deviceId, {
                     color: 'green',
                     quantity: item.quantity,
@@ -656,9 +737,9 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
 
         // Send to Socket.IO devices (existing functionality)
         connectedDevices.forEach((deviceSocket, deviceId) => {
-            const deviceItem = request.lineItems.find(item => item.背番号 === deviceId);
+            const deviceItem = updatedRequest.lineItems.find(item => item.背番号 === deviceId);
             
-            if (deviceItem && deviceItem.status === 'pending') {
+            if (deviceItem && deviceItem.status === 'in-progress') {
                 // Device has items to pick - show green with quantity
                 deviceSocket.emit('display-update', {
                     color: 'green',

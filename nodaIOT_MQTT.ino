@@ -120,6 +120,8 @@ struct DeviceState {
   int lineNumber = 0;
   String 品番 = "";
   String currentMessage = "Connecting...";
+  unsigned long completedTime = 0; // Time when task was completed
+  bool isInCompletedMode = false; // Flag for completed state
 } deviceState;
 
 // Connection monitoring
@@ -219,6 +221,39 @@ static void check_screen_timeout() {
   }
 }
 
+// Check if device should return from completed mode to standby
+static void check_completed_timeout() {
+  if (deviceState.isInCompletedMode && deviceState.completedTime > 0) {
+    unsigned long now = millis();
+    
+    // Handle millis() overflow
+    if (now < deviceState.completedTime) {
+      deviceState.completedTime = now;
+      return;
+    }
+    
+    // Check if 5 seconds have passed since completion
+    if ((now - deviceState.completedTime) >= 5000) {
+      Serial.println("⏰ ===== 5 SECOND TIMEOUT - RETURNING TO STANDBY =====");
+      Serial.printf("⏰ Completed at: %lu, Now: %lu, Diff: %lu ms\n", 
+        deviceState.completedTime, now, now - deviceState.completedTime);
+      
+      // Return to standby mode
+      deviceState.isInCompletedMode = false;
+      deviceState.completedTime = 0;
+      deviceState.currentMessage = "Standby";
+      
+      Serial.println("💤 Device now in STANDBY mode - ready for new assignments");
+      update_screen_activity(); // Wake screen and reset timeout
+      update_screen_display();
+      
+      // Publish updated status
+      publishDeviceStatus();
+      Serial.println("⏰ ===== STANDBY MODE ACTIVATED =====");
+    }
+  }
+}
+
 static void update_screen_display() {
   // Don't update if screen is intentionally off for power saving
   if (!screenState.isScreenOn) {
@@ -276,9 +311,14 @@ static void update_screen_display() {
 }
 
 static void complete_picking_task() {
-  if (!deviceState.isPickingMode) return;
+  if (!deviceState.isPickingMode) {
+    Serial.println("⚠️ complete_picking_task() called but not in picking mode - ignoring");
+    return;
+  }
 
-  Serial.println("📦 Completing picking task...");
+  Serial.println("📦 ===== COMPLETING PICKING TASK =====");
+  Serial.printf("📋 Task Details: Request=%s, Line=%d, Qty=%d, 品番=%s\n", 
+    deviceState.requestNumber.c_str(), deviceState.lineNumber, deviceState.currentQuantity, deviceState.品番.c_str());
 
   // Send completion to server via MQTT
   DynamicJsonDocument doc(1024);
@@ -290,23 +330,29 @@ static void complete_picking_task() {
 
   String payload;
   serializeJson(doc, payload);
+  Serial.println("📤 Sending completion payload: " + payload);
   
   if (mqttClient.connected()) {
     bool success = mqttClient.publish(TOPIC_COMPLETION.c_str(), payload.c_str(), true); // Retained message
     if (success) {
-      Serial.println("📤 Task completion sent via MQTT");
+      Serial.println("✅ Task completion sent via MQTT successfully");
     } else {
       Serial.println("❌ Failed to send completion via MQTT");
     }
+  } else {
+    Serial.println("❌ MQTT not connected - completion not sent");
   }
 
-  // Reset to standby mode
+  // Reset to completed mode (red background for 5 seconds)
+  Serial.println("🔴 Switching to COMPLETED mode (red background for 5 seconds)");
   deviceState.isPickingMode = false;
   deviceState.currentQuantity = 0;
   deviceState.requestNumber = "";
   deviceState.lineNumber = 0;
   deviceState.品番 = "";
   deviceState.currentMessage = "Completed";
+  deviceState.completedTime = millis(); // Record completion time
+  deviceState.isInCompletedMode = true; // Set completed flag
 
   displayGreen = false;
   apply_relays();
@@ -316,7 +362,8 @@ static void complete_picking_task() {
   // Publish status update
   publishDeviceStatus();
 
-  Serial.println("✅ Task completed - returning to standby (MQTT connection maintained)");
+  Serial.println("✅ Task completed - will return to standby in 5 seconds");
+  Serial.println("📦 ===== COMPLETION PROCESS FINISHED =====");
 }
 
 // --- LVGL callbacks ---
@@ -335,9 +382,17 @@ void my_touchpad_read(lv_indev_drv_t * /*indev_drv*/, lv_indev_data_t *data) {
     data->point.y = ty;
     data->state = LV_INDEV_STATE_PRESSED;
     if (!was_pressed) {
+      Serial.printf("👆 TOUCH DETECTED at coordinates (%d, %d)\n", tx, ty);
+      Serial.printf("👆 Current state: picking=%s, completed=%s\n", 
+        deviceState.isPickingMode ? "true" : "false",
+        deviceState.isInCompletedMode ? "true" : "false");
+      
       update_screen_activity(); // Reset timeout and wake screen on touch
       if (deviceState.isPickingMode) {
+        Serial.println("👆 Touch triggered task completion");
         complete_picking_task();
+      } else {
+        Serial.println("👆 Touch registered but no picking task active");
       }
     }
     was_pressed = true;
@@ -363,9 +418,17 @@ void check_bridge_button() {
     int prev = btnStable;
     btnStable = raw;
     if (prev == HIGH && btnStable == LOW) {
+      Serial.println("🔘 BUTTON PRESSED detected");
+      Serial.printf("🔘 Current state: picking=%s, completed=%s\n", 
+        deviceState.isPickingMode ? "true" : "false",
+        deviceState.isInCompletedMode ? "true" : "false");
+      
       update_screen_activity(); // Reset timeout and wake screen on button press
       if (deviceState.isPickingMode) {
+        Serial.println("🔘 Button triggered task completion");
         complete_picking_task();
+      } else {
+        Serial.println("🔘 Button pressed but no picking task active");
       }
     }
   }
@@ -521,6 +584,10 @@ void reconnectMQTT() {
       Serial.println("❌ Failed to subscribe to command topic");
     }
     
+    // Clear any stale retained messages by publishing empty message
+    Serial.println("🧹 Clearing any stale MQTT commands...");
+    mqttClient.publish(TOPIC_COMMAND.c_str(), "", true); // Clear retained message
+    
     // Publish online status
     publishDeviceStatus();
     
@@ -628,7 +695,9 @@ void ensureConnectionStability() {
 
 // MQTT message callback
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  Serial.printf("📨 MQTT message received on topic: %s\n", topic);
+  Serial.println("� ===== MQTT MESSAGE RECEIVED =====");
+  Serial.printf("📡 Topic: %s\n", topic);
+  Serial.printf("📡 Payload Length: %u bytes\n", length);
   
   // Convert payload to string
   String message = "";
@@ -636,20 +705,30 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     message += (char)payload[i];
   }
   
-  Serial.println("📄 Message content: " + message);
+  Serial.println("� Raw Message: " + message);
   connectionState.lastMqttMessage = millis();
   
-  // Handle command messages
-  if (String(topic) == TOPIC_COMMAND) {
+  // Handle different topic types
+  String topicStr = String(topic);
+  if (topicStr == TOPIC_COMMAND) {
+    Serial.println("📡 Processing as COMMAND message");
     handleDisplayUpdate(message);
+  } else {
+    Serial.println("📡 Unknown topic - ignoring message");
   }
+  
+  Serial.println("📡 ===== MQTT MESSAGE PROCESSING COMPLETE =====");
 }
 
 void handleDisplayUpdate(String jsonData) {
+  Serial.println("📨 ===== MQTT COMMAND RECEIVED =====");
+  Serial.println("📄 Raw JSON: " + jsonData);
+  
   DynamicJsonDocument doc(1024);
   DeserializationError err = deserializeJson(doc, jsonData);
   if (err) {
-    Serial.printf("JSON parse error: %s\n", err.c_str());
+    Serial.printf("❌ JSON parse error: %s\n", err.c_str());
+    Serial.println("📨 ===== COMMAND PROCESSING FAILED =====");
     return;
   }
 
@@ -660,31 +739,68 @@ void handleDisplayUpdate(String jsonData) {
   int lineNumber = doc["lineNumber"] | 0;
   String 品番 = doc["品番"] | "";
 
-  Serial.printf("📺 Display update: color=%s, qty=%d, msg=%s\n",
-                color.c_str(), quantity, message.c_str());
+  Serial.printf("� Parsed Command: color=%s, qty=%d, msg=%s\n", color.c_str(), quantity, message.c_str());
+  Serial.printf("📋 Request Details: reqNum=%s, lineNum=%d, 品番=%s\n", requestNumber.c_str(), lineNumber, 品番.c_str());
+  
+  // Check current device state
+  Serial.printf("🔍 Current State: isPickingMode=%s, isInCompletedMode=%s\n", 
+    deviceState.isPickingMode ? "true" : "false",
+    deviceState.isInCompletedMode ? "true" : "false");
 
   if (color == "green" && quantity > 0) {
     // Picking mode - REAL-TIME ACTIVATION!
-    Serial.println("🟢 PICKING MODE ACTIVATED - Real-time response!");
+    Serial.println("🟢 ===== SWITCHING TO PICKING MODE =====");
+    Serial.printf("🎯 Target: Pick %d units of %s\n", quantity, 品番.c_str());
+    
     deviceState.isPickingMode = true;
     deviceState.currentQuantity = quantity;
     deviceState.requestNumber = requestNumber;
     deviceState.lineNumber = lineNumber;
     deviceState.品番 = 品番;
     deviceState.currentMessage = "Pick " + String(quantity);
+    deviceState.isInCompletedMode = false; // Clear completed flag
+    deviceState.completedTime = 0; // Clear completion time
+    
     displayGreen = true;
+    Serial.println("🟢 Green screen activated with quantity: " + String(quantity));
     update_screen_activity(); // Wake screen immediately for new picking task
+  } else if (color == "red" || message == "Completed") {
+    Serial.println("🔴 ===== RED/COMPLETED COMMAND RECEIVED =====");
+    
+    // Only process red commands if we're not already in completed mode
+    if (deviceState.isInCompletedMode) {
+      Serial.println("⚠️ Already in completed mode - ignoring red command");
+    } else {
+      Serial.println("🔴 Processing red/completed command");
+      deviceState.isPickingMode = false;
+      deviceState.currentQuantity = 0;
+      deviceState.requestNumber = "";
+      deviceState.lineNumber = 0;
+      deviceState.品番 = "";
+      deviceState.currentMessage = message;
+      deviceState.completedTime = millis(); // Set completion time
+      deviceState.isInCompletedMode = true; // Set completed flag
+      
+      displayGreen = false;
+      Serial.println("🔴 Red screen activated with message: " + message);
+      update_screen_activity(); // Reset timeout for completed mode
+    }
   } else {
-    // Standby mode
-    Serial.println("🔴 STANDBY MODE - Device ready");
+    // Unknown command
+    Serial.println("❓ ===== UNKNOWN COMMAND =====");
+    Serial.printf("❓ Unrecognized command: color=%s, qty=%d, msg=%s\n", color.c_str(), quantity, message.c_str());
+    
     deviceState.isPickingMode = false;
     deviceState.currentQuantity = 0;
     deviceState.requestNumber = "";
     deviceState.lineNumber = 0;
     deviceState.品番 = "";
     deviceState.currentMessage = message;
+    deviceState.isInCompletedMode = false;
+    deviceState.completedTime = 0;
+    
     displayGreen = false;
-    update_screen_activity(); // Reset timeout for standby mode
+    update_screen_activity();
   }
 
   apply_relays();
@@ -692,6 +808,13 @@ void handleDisplayUpdate(String jsonData) {
   
   // Publish status update to confirm command received
   publishDeviceStatus();
+  
+  Serial.printf("📊 New State: picking=%s, completed=%s, qty=%d, msg=%s\n", 
+    deviceState.isPickingMode ? "true" : "false",
+    deviceState.isInCompletedMode ? "true" : "false",
+    deviceState.currentQuantity, 
+    deviceState.currentMessage.c_str());
+  Serial.println("📨 ===== COMMAND PROCESSING COMPLETE =====");
 }
 
 void connectToWiFi() {
@@ -832,6 +955,7 @@ void loop() {
   lv_timer_handler();
   check_bridge_button();
   check_screen_timeout(); // Check if screen should timeout during red/standby modes
+  check_completed_timeout(); // Check if device should return from completed to standby
 
   // MQTT and connection management
   if (mqttClient.connected()) {
