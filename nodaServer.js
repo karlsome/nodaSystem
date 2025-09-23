@@ -4,6 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
+const mqtt = require('mqtt');
 require('dotenv').config();
 
 const app = express();
@@ -29,6 +30,16 @@ const client = new MongoClient(process.env.MONGODB_URI);
 // Connected devices storage
 const connectedDevices = new Map(); // deviceId -> socket
 const connectedTablets = new Set(); // tablet sockets
+
+// MQTT Configuration
+const MQTT_ENABLED = process.env.MQTT_ENABLED === 'true';
+const MQTT_BROKER_URL = process.env.MQTT_BROKER_URL || 'mqtt://test.mosquitto.org:1883';
+const MQTT_USERNAME = process.env.MQTT_USERNAME || '';
+const MQTT_PASSWORD = process.env.MQTT_PASSWORD || '';
+
+// MQTT Client and device tracking
+let mqttClient = null;
+const mqttConnectedDevices = new Map(); // deviceId -> last seen timestamp
 
 // Global picking lock state
 let globalPickingLock = {
@@ -212,6 +223,184 @@ async function connectToMongoDB() {
         process.exit(1);
     }
 }
+
+// ==================== MQTT INTEGRATION ====================
+
+// Initialize MQTT Client
+function initializeMQTT() {
+    console.log('🔌 Initializing MQTT client...');
+    
+    // Don't send credentials if they're empty (for test brokers)
+    const mqttOptions = {
+        clientId: `NodaServer_${Math.random().toString(16).substr(2, 8)}`,
+        keepalive: 60,
+        reconnectPeriod: 5000,
+        clean: true
+    };
+    
+    // Only add credentials if they're provided
+    if (MQTT_USERNAME && MQTT_PASSWORD) {
+        mqttOptions.username = MQTT_USERNAME;
+        mqttOptions.password = MQTT_PASSWORD;
+    }
+    
+    mqttClient = mqtt.connect(MQTT_BROKER_URL, mqttOptions);
+
+    mqttClient.on('connect', () => {
+        console.log('✅ MQTT broker connected successfully');
+        
+        // Subscribe to all device topics
+        const subscriptions = [
+            'noda/device/+/status',      // Device status updates
+            'noda/device/+/completion',  // Task completions  
+            'noda/device/+/heartbeat'    // Device heartbeats
+        ];
+        
+        subscriptions.forEach(topic => {
+            mqttClient.subscribe(topic, { qos: 1 }, (err) => {
+                if (err) {
+                    console.error(`❌ Failed to subscribe to ${topic}:`, err);
+                } else {
+                    console.log(`📥 Subscribed to MQTT topic: ${topic}`);
+                }
+            });
+        });
+    });
+
+    mqttClient.on('message', handleMQTTMessage);
+    
+    mqttClient.on('error', (error) => {
+        console.error('❌ MQTT connection error:', error);
+    });
+    
+    mqttClient.on('close', () => {
+        console.log('⚠️ MQTT connection closed');
+    });
+    
+    mqttClient.on('reconnect', () => {
+        console.log('🔄 MQTT reconnecting...');
+    });
+}
+
+// Handle incoming MQTT messages
+async function handleMQTTMessage(topic, message) {
+    try {
+        const data = JSON.parse(message.toString());
+        const topicParts = topic.split('/');
+        const deviceId = topicParts[2];
+        const messageType = topicParts[3];
+        
+        console.log(`📨 MQTT message from ${deviceId} (${messageType}):`, data);
+        
+        // Update device tracking
+        mqttConnectedDevices.set(deviceId, Date.now());
+        
+        switch (messageType) {
+            case 'status':
+                await handleDeviceStatusUpdate(deviceId, data);
+                break;
+                
+            case 'completion':
+                await handleDeviceCompletion(deviceId, data);
+                break;
+                
+            case 'heartbeat':
+                handleDeviceHeartbeat(deviceId, data);
+                break;
+                
+            default:
+                console.log(`❓ Unknown MQTT message type: ${messageType}`);
+        }
+        
+    } catch (error) {
+        console.error('❌ Error handling MQTT message:', error);
+    }
+}
+
+// Handle device status updates
+async function handleDeviceStatusUpdate(deviceId, data) {
+    console.log(`📊 Device ${deviceId} status update:`, data);
+    
+    // Forward to Socket.IO tablets for real-time updates
+    connectedTablets.forEach(tabletSocket => {
+        tabletSocket.emit('device-status-update', {
+            deviceId,
+            status: data.status,
+            isPickingMode: data.isPickingMode,
+            currentQuantity: data.currentQuantity,
+            requestNumber: data.requestNumber,
+            timestamp: data.timestamp
+        });
+    });
+}
+
+// Handle device task completion via MQTT
+async function handleDeviceCompletion(deviceId, data) {
+    console.log(`✅ Device ${deviceId} completed task:`, data);
+    
+    const { requestNumber, lineNumber, completedBy } = data;
+    
+    try {
+        // Use existing completion logic
+        await completeLineItem(requestNumber, lineNumber, completedBy);
+        
+        // Send confirmation back to device (red screen)
+        publishDeviceCommand(deviceId, {
+            color: 'red',
+            quantity: null,
+            message: 'Completed'
+        });
+        
+        // Notify tablets
+        connectedTablets.forEach(tabletSocket => {
+            tabletSocket.emit('item-completed', {
+                requestNumber,
+                lineNumber,
+                deviceId,
+                completedBy
+            });
+        });
+        
+    } catch (error) {
+        console.error('❌ Error processing device completion:', error);
+        
+        // Send error back to device
+        publishDeviceCommand(deviceId, {
+            color: 'red',
+            quantity: null,
+            message: 'Error - Try Again'
+        });
+    }
+}
+
+// Handle device heartbeat
+function handleDeviceHeartbeat(deviceId, data) {
+    console.log(`💓 Heartbeat from device ${deviceId} - RSSI: ${data.rssi || 'N/A'}`);
+    // Just update the tracking - heartbeat is for connection monitoring
+}
+
+// Publish command to specific device
+function publishDeviceCommand(deviceId, command) {
+    if (!mqttClient || !mqttClient.connected) {
+        console.error('❌ MQTT client not connected, cannot send command');
+        return false;
+    }
+    
+    const topic = `noda/device/${deviceId}/command`;
+    const message = JSON.stringify(command);
+    
+    mqttClient.publish(topic, message, { qos: 1, retain: true }, (err) => {
+        if (err) {
+            console.error(`❌ Failed to publish to ${deviceId}:`, err);
+        } else {
+            console.log(`📤 Published command to ${deviceId}:`, command);
+        }
+    });
+    
+    return true;
+}
+
+// ==================== END MQTT INTEGRATION ====================
 
 // Socket.IO connection handling
 io.on('connection', (socket) => {
@@ -440,7 +629,32 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
             }))
         };
         
-        // Broadcast to all IoT devices
+        // Broadcast to all IoT devices (MQTT + Socket.IO)
+        console.log(`🚀 Broadcasting to both MQTT and Socket.IO devices`);
+        
+        // Send to MQTT devices (new hybrid approach)
+        request.lineItems.forEach(item => {
+            const deviceId = item.背番号;
+            
+            if (item.status === 'pending') {
+                publishDeviceCommand(deviceId, {
+                    color: 'green',
+                    quantity: item.quantity,
+                    message: `Pick ${item.quantity}`,
+                    requestNumber,
+                    lineNumber: item.lineNumber,
+                    品番: item.品番
+                });
+            } else {
+                publishDeviceCommand(deviceId, {
+                    color: 'red',
+                    quantity: null,
+                    message: 'No Pick'
+                });
+            }
+        });
+
+        // Send to Socket.IO devices (existing functionality)
         connectedDevices.forEach((deviceSocket, deviceId) => {
             const deviceItem = request.lineItems.find(item => item.背番号 === deviceId);
             
@@ -833,41 +1047,106 @@ app.get('/api/request-numbers', async (req, res) => {
 
 // ==================== NODA WAREHOUSE MANAGEMENT API ROUTES ====================
 
+// ==================== MQTT DEVICE API ENDPOINTS ====================
+
+// Check if MQTT device is online
+app.get('/api/mqtt/device/:deviceId/status', (req, res) => {
+    const { deviceId } = req.params;
+    
+    // Check if device has been seen recently via MQTT
+    const isOnline = mqttDevices.has(deviceId) && mqttDevices.get(deviceId).isOnline;
+    const lastSeen = mqttDevices.has(deviceId) ? mqttDevices.get(deviceId).lastSeen : null;
+    
+    res.json({
+        deviceId,
+        protocol: 'mqtt',
+        isOnline,
+        lastSeen,
+        status: isOnline ? 'connected' : 'disconnected'
+    });
+});
+
+// Send command to MQTT device
+app.post('/api/mqtt/device/:deviceId/command', (req, res) => {
+    const { deviceId } = req.params;
+    const { command } = req.body;
+    
+    if (!command) {
+        return res.status(400).json({ error: 'Command is required' });
+    }
+    
+    const success = publishDeviceCommand(deviceId, command);
+    
+    if (success) {
+        res.json({ 
+            message: 'Command sent successfully via MQTT',
+            deviceId,
+            command
+        });
+    } else {
+        res.status(500).json({ 
+            error: 'Failed to send command via MQTT'
+        });
+    }
+});
+
+// Get all MQTT devices status
+app.get('/api/mqtt/devices', (req, res) => {
+    const devices = Array.from(mqttDevices.entries()).map(([deviceId, info]) => ({
+        deviceId,
+        protocol: 'mqtt',
+        isOnline: info.isOnline,
+        lastSeen: info.lastSeen,
+        status: info.isOnline ? 'connected' : 'disconnected'
+    }));
+    
+    res.json({ devices });
+});
+
+// ==================== END MQTT DEVICE API ENDPOINTS ====================
+
 // Function to notify ESP32 devices when status changes
 async function notifyDeviceStatusChange(deviceId, requestNumber, lineNumber, quantity, 品番, newStatus) {
-    console.log(`📢 Notifying device ${deviceId} of status change: ${newStatus}`);
+    console.log(`📢 Notifying device ${deviceId} of status change: ${newStatus} (MQTT + Socket.IO)`);
     
-    const deviceSocket = connectedDevices.get(deviceId);
-    if (deviceSocket) {
-        if (newStatus === 'in-progress') {
-            // Send display-update event to restore green picking screen
-            const displayUpdate = {
-                color: 'green',
-                quantity: quantity,
-                message: `Pick ${quantity}`,
-                requestNumber: requestNumber,
-                lineNumber: lineNumber,
-                品番: 品番
-            };
-            
-            deviceSocket.emit('display-update', displayUpdate);
-            console.log(`🟢 Sent display-update to device ${deviceId}: green screen restored`);
-        } else if (newStatus === 'completed') {
-            // Send red screen update
-            const displayUpdate = {
-                color: 'red',
-                quantity: 0,
-                message: 'Completed',
-                requestNumber: '',
-                lineNumber: 0,
-                品番: ''
-            };
-            
-            deviceSocket.emit('display-update', displayUpdate);
-            console.log(`🔴 Sent display-update to device ${deviceId}: completed status`);
+    let command = null;
+    
+    if (newStatus === 'in-progress') {
+        command = {
+            color: 'green',
+            quantity: quantity,
+            message: `Pick ${quantity}`,
+            requestNumber: requestNumber,
+            lineNumber: lineNumber,
+            品番: 品番
+        };
+    } else if (newStatus === 'completed') {
+        command = {
+            color: 'red',
+            quantity: 0,
+            message: 'Completed',
+            requestNumber: '',
+            lineNumber: 0,
+            品番: ''
+        };
+    }
+    
+    if (command) {
+        // Send via MQTT (for new MQTT devices)
+        const mqttSuccess = publishDeviceCommand(deviceId, command);
+        
+        // Send via Socket.IO (for existing devices)
+        const deviceSocket = connectedDevices.get(deviceId);
+        if (deviceSocket) {
+            deviceSocket.emit('display-update', command);
+            console.log(`✅ Sent display-update via Socket.IO to device ${deviceId}`);
+        } else {
+            console.log(`⚠️ Device ${deviceId} not connected via Socket.IO`);
         }
-    } else {
-        console.log(`⚠️ Device ${deviceId} not connected via Socket.IO`);
+        
+        if (mqttSuccess) {
+            console.log(`✅ Sent command via MQTT to device ${deviceId}`);
+        }
     }
 }
 
@@ -1391,10 +1670,23 @@ app.get('/', (req, res) => {
 async function startServer() {
     try {
         await connectToMongoDB();
+        
+        // Initialize MQTT connection
+        if (MQTT_ENABLED) {
+            console.log('🔗 Initializing MQTT connection...');
+            initializeMQTT();
+        } else {
+            console.log('ℹ️ MQTT is disabled. Set MQTT_ENABLED=true to enable MQTT support.');
+        }
+        
         httpServer.listen(PORT, () => {
             console.log(`Noda System server running on port ${PORT}`);
             console.log(`Access the application at: http://localhost:${PORT}`);
             console.log('Socket.IO server ready for IoT devices and tablets');
+            if (MQTT_ENABLED) {
+                console.log(`MQTT broker: ${MQTT_BROKER_URL}`);
+                console.log('Hybrid system: Supporting both Socket.IO and MQTT devices');
+            }
             
             // 🚨 NEW: Start periodic ESP32 notification check
             startPeriodicESP32Check();
