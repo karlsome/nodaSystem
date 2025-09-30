@@ -235,9 +235,16 @@ function initializeMQTT() {
     // Don't send credentials if they're empty (for test brokers)
     const mqttOptions = {
         clientId: `NodaServer_${Math.random().toString(16).substr(2, 8)}`,
-        keepalive: 60,
-        reconnectPeriod: 5000,
-        clean: true
+        keepalive: 30,          // Reduced from 60 to 30 seconds
+        connectTimeout: 10000,   // 10 second connection timeout
+        reconnectPeriod: 10000,  // Increased from 5 to 10 seconds
+        clean: true,
+        will: {
+            topic: 'noda/server/status',
+            payload: JSON.stringify({ status: 'offline', timestamp: Date.now() }),
+            qos: 1,
+            retain: true
+        }
     };
     
     // Only add credentials if they're provided
@@ -273,14 +280,30 @@ function initializeMQTT() {
     
     mqttClient.on('error', (error) => {
         console.error('❌ MQTT connection error:', error);
+        // Clear device tracking on connection error
+        if (error.code === 'ETIMEDOUT' || error.message.includes('Keepalive timeout')) {
+            console.log('🧹 Clearing MQTT device tracking due to connection error');
+            mqttConnectedDevices.clear();
+        }
     });
     
     mqttClient.on('close', () => {
         console.log('⚠️ MQTT connection closed');
+        // Clear device online status when connection closes
+        mqttDevices.forEach((device, deviceId) => {
+            if (device.isOnline) {
+                console.log(`📱 Marking device ${deviceId} as potentially offline due to MQTT disconnect`);
+                device.isOnline = false;
+            }
+        });
     });
     
     mqttClient.on('reconnect', () => {
         console.log('🔄 MQTT reconnecting...');
+    });
+    
+    mqttClient.on('offline', () => {
+        console.log('📵 MQTT client went offline');
     });
 }
 
