@@ -1768,6 +1768,215 @@ app.post('/api/refresh-devices/:requestNumber', async (req, res) => {
     }
 });
 
+// ==================== INVENTORY COUNT API ENDPOINTS ====================
+
+// Validate if a product exists in inventory
+app.get('/api/inventory/validate/:productNumber', async (req, res) => {
+    try {
+        const { productNumber } = req.params;
+
+        await client.connect();
+        const submittedDb = client.db("submittedDB");
+        const inventoryCollection = submittedDb.collection('nodaInventoryDB');
+
+        // Check if product exists
+        const product = await inventoryCollection.findOne({ 品番: productNumber });
+
+        res.json({
+            exists: product !== null,
+            productNumber: productNumber
+        });
+
+    } catch (error) {
+        console.error('Error validating product:', error);
+        res.status(500).json({ error: 'Failed to validate product' });
+    }
+});
+
+// Get current inventory data for a product
+app.get('/api/inventory/current/:productNumber', async (req, res) => {
+    try {
+        const { productNumber } = req.params;
+
+        await client.connect();
+        const submittedDb = client.db("submittedDB");
+        const inventoryCollection = submittedDb.collection('nodaInventoryDB');
+
+        // Get the most recent inventory record for this product
+        const inventoryResults = await inventoryCollection.aggregate([
+            { $match: { 品番: productNumber } },
+            {
+                $addFields: {
+                    timeStampDate: {
+                        $cond: {
+                            if: { $type: "$timeStamp" },
+                            then: {
+                                $cond: {
+                                    if: { $eq: [{ $type: "$timeStamp" }, "string"] },
+                                    then: { $dateFromString: { dateString: "$timeStamp" } },
+                                    else: "$timeStamp"
+                                }
+                            },
+                            else: new Date()
+                        }
+                    }
+                }
+            },
+            { $sort: { timeStampDate: -1 } },
+            { $limit: 1 }
+        ]).toArray();
+
+        if (inventoryResults.length === 0) {
+            return res.status(404).json({ error: 'Product not found in inventory' });
+        }
+
+        const inventory = inventoryResults[0];
+
+        res.json({
+            品番: inventory.品番,
+            背番号: inventory.背番号,
+            physicalQuantity: inventory.physicalQuantity || inventory.runningQuantity || 0,
+            reservedQuantity: inventory.reservedQuantity || 0,
+            availableQuantity: inventory.availableQuantity || inventory.runningQuantity || 0,
+            lastUpdated: inventory.timeStamp
+        });
+
+    } catch (error) {
+        console.error('Error getting current inventory:', error);
+        res.status(500).json({ error: 'Failed to get current inventory' });
+    }
+});
+
+// Submit inventory count (棚卸し)
+app.post('/api/inventory/count-submit', async (req, res) => {
+    try {
+        const { items, submittedBy, submittedAt } = req.body;
+
+        if (!items || !Array.isArray(items) || items.length === 0) {
+            return res.status(400).json({ error: 'Items array is required' });
+        }
+
+        if (!submittedBy) {
+            return res.status(400).json({ error: 'submittedBy is required' });
+        }
+
+        await client.connect();
+        const submittedDb = client.db("submittedDB");
+        const inventoryCollection = submittedDb.collection('nodaInventoryDB');
+
+        const processedItems = [];
+        const errors = [];
+
+        // Process each item
+        for (const item of items) {
+            try {
+                const { 品番, 背番号, currentQuantity, newQuantity } = item;
+
+                // Validate item data
+                if (!品番 || newQuantity === undefined || newQuantity === null) {
+                    errors.push({ 品番, error: 'Missing required fields' });
+                    continue;
+                }
+
+                // Get the most recent inventory record for this product
+                const inventoryResults = await inventoryCollection.aggregate([
+                    { $match: { 品番: 品番 } },
+                    {
+                        $addFields: {
+                            timeStampDate: {
+                                $cond: {
+                                    if: { $type: "$timeStamp" },
+                                    then: {
+                                        $cond: {
+                                            if: { $eq: [{ $type: "$timeStamp" }, "string"] },
+                                            then: { $dateFromString: { dateString: "$timeStamp" } },
+                                            else: "$timeStamp"
+                                        }
+                                    },
+                                    else: new Date()
+                                }
+                            }
+                        }
+                    },
+                    { $sort: { timeStampDate: -1 } },
+                    { $limit: 1 }
+                ]).toArray();
+
+                if (inventoryResults.length === 0) {
+                    errors.push({ 品番, error: 'Product not found in inventory' });
+                    continue;
+                }
+
+                const currentInventory = inventoryResults[0];
+                const oldPhysicalQuantity = currentInventory.physicalQuantity || currentInventory.runningQuantity || 0;
+                const oldReservedQuantity = currentInventory.reservedQuantity || 0;
+                const oldAvailableQuantity = currentInventory.availableQuantity || currentInventory.runningQuantity || 0;
+
+                // Calculate new quantities
+                const newPhysicalQuantity = newQuantity;
+                const newReservedQuantity = oldReservedQuantity; // Reserved stays the same
+                const newAvailableQuantity = newPhysicalQuantity - newReservedQuantity; // Recalculate available
+
+                const quantityDifference = newPhysicalQuantity - oldPhysicalQuantity;
+
+                // Create transaction record
+                const transactionRecord = {
+                    背番号: currentInventory.背番号,
+                    品番: 品番,
+                    timeStamp: new Date(),
+                    Date: new Date().toISOString().split('T')[0],
+
+                    // Two-stage inventory fields
+                    physicalQuantity: newPhysicalQuantity,
+                    reservedQuantity: newReservedQuantity,
+                    availableQuantity: newAvailableQuantity,
+
+                    // Legacy field for compatibility
+                    runningQuantity: newPhysicalQuantity,
+                    lastQuantity: oldPhysicalQuantity,
+
+                    action: '棚卸し adjustments',
+                    source: `Freya Sims 棚卸し - ${submittedBy}`,
+                    note: `Physical inventory count: ${oldPhysicalQuantity} → ${newPhysicalQuantity} (${quantityDifference >= 0 ? '+' : ''}${quantityDifference})`
+                };
+
+                // Insert the new record
+                await inventoryCollection.insertOne(transactionRecord);
+
+                processedItems.push({
+                    品番: 品番,
+                    背番号: currentInventory.背番号,
+                    oldQuantity: oldPhysicalQuantity,
+                    newQuantity: newPhysicalQuantity,
+                    difference: quantityDifference
+                });
+
+                console.log(`✅ Inventory count processed for ${品番}: ${oldPhysicalQuantity} → ${newPhysicalQuantity}`);
+
+            } catch (itemError) {
+                console.error(`Error processing item ${item.品番}:`, itemError);
+                errors.push({ 品番: item.品番, error: itemError.message });
+            }
+        }
+
+        res.json({
+            success: true,
+            processedCount: processedItems.length,
+            errorCount: errors.length,
+            processedItems: processedItems,
+            errors: errors.length > 0 ? errors : undefined,
+            submittedBy: submittedBy,
+            submittedAt: submittedAt || new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error('Error submitting inventory count:', error);
+        res.status(500).json({ error: 'Failed to submit inventory count', details: error.message });
+    }
+});
+
+// ==================== END INVENTORY COUNT API ENDPOINTS ====================
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
     res.json({ status: 'OK', timestamp: new Date().toISOString() });

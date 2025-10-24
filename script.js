@@ -979,6 +979,352 @@ document.addEventListener('keydown', function(e) {
     }
 });
 
+// ==================== INVENTORY COUNT SYSTEM ====================
+
+// Global storage for scanned inventory items
+let inventoryScannedItems = [];
+
+// Initialize inventory screen when opened
+function openInventorySystem() {
+    showScreen('inventory');
+    inventoryScannedItems = [];
+    updateInventoryList();
+
+    // Focus on scan input
+    setTimeout(() => {
+        const scanInput = document.getElementById('inventoryScanInput');
+        if (scanInput) {
+            scanInput.focus();
+        }
+    }, 300);
+
+    // Set up keyboard listener for scanning
+    setupInventoryScanListener();
+}
+
+// Set up keyboard listener for the scanner input
+function setupInventoryScanListener() {
+    const scanInput = document.getElementById('inventoryScanInput');
+    if (!scanInput) return;
+
+    // Remove any existing listeners
+    scanInput.replaceWith(scanInput.cloneNode(true));
+    const newScanInput = document.getElementById('inventoryScanInput');
+
+    newScanInput.addEventListener('keypress', async function(e) {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            const scannedValue = newScanInput.value.trim();
+
+            if (scannedValue) {
+                await processInventoryScan(scannedValue);
+                newScanInput.value = '';
+            }
+        }
+    });
+}
+
+// Process a scanned QR code
+async function processInventoryScan(scanValue) {
+    try {
+        // Parse the scanned value (format: "品番,数量")
+        const parts = scanValue.split(',');
+
+        if (parts.length !== 2) {
+            showToast('無効なQRコード形式です。形式: 品番,数量', 'error');
+            return;
+        }
+
+        const 品番 = parts[0].trim();
+        const scannedQuantity = parseInt(parts[1].trim());
+
+        if (!品番 || isNaN(scannedQuantity) || scannedQuantity < 0) {
+            showToast('品番または数量が無効です', 'error');
+            return;
+        }
+
+        // Validate that this product exists in inventory
+        const isValid = await validateProductExists(品番);
+        if (!isValid) {
+            showToast(`品番 ${品番} は在庫に存在しません`, 'error');
+            return;
+        }
+
+        // Get current inventory data
+        const currentInventory = await getCurrentInventory(品番);
+
+        // Check if already scanned
+        const existingIndex = inventoryScannedItems.findIndex(item => item.品番 === 品番);
+
+        if (existingIndex >= 0) {
+            // Update existing item
+            inventoryScannedItems[existingIndex].newQuantity = scannedQuantity;
+            inventoryScannedItems[existingIndex].scannedAt = new Date();
+            showToast(`${品番} の数量を更新しました`, 'info');
+        } else {
+            // Add new item to the list
+            inventoryScannedItems.push({
+                品番: 品番,
+                背番号: currentInventory.背番号 || 'N/A',
+                currentQuantity: currentInventory.physicalQuantity || 0,
+                newQuantity: scannedQuantity,
+                scannedAt: new Date()
+            });
+            showToast(`${品番} をリストに追加しました`, 'success');
+        }
+
+        updateInventoryList();
+
+    } catch (error) {
+        console.error('Error processing inventory scan:', error);
+        showToast('スキャン処理中にエラーが発生しました', 'error');
+    }
+}
+
+// Validate that a product exists in inventory
+async function validateProductExists(品番) {
+    try {
+        const response = await fetch(`${API_BASE_URL}/inventory/validate/${encodeURIComponent(品番)}`);
+        if (!response.ok) {
+            return false;
+        }
+        const data = await response.json();
+        return data.exists;
+    } catch (error) {
+        console.error('Error validating product:', error);
+        return false;
+    }
+}
+
+// Get current inventory data for a product
+async function getCurrentInventory(品番) {
+    try {
+        const response = await fetch(`${API_BASE_URL}/inventory/current/${encodeURIComponent(品番)}`);
+        if (!response.ok) {
+            throw new Error('Failed to get current inventory');
+        }
+        const data = await response.json();
+        return data;
+    } catch (error) {
+        console.error('Error getting current inventory:', error);
+        return { physicalQuantity: 0, 背番号: 'N/A' };
+    }
+}
+
+// Update the displayed list of scanned items
+function updateInventoryList() {
+    const listContainer = document.getElementById('inventoryItemsList');
+    const emptyState = document.getElementById('inventoryEmptyState');
+    const countDisplay = document.getElementById('inventoryItemCount');
+
+    if (!listContainer || !countDisplay) return;
+
+    // Update count
+    countDisplay.textContent = `(${inventoryScannedItems.length})`;
+
+    // Show/hide empty state
+    if (inventoryScannedItems.length === 0) {
+        if (emptyState) {
+            emptyState.classList.remove('hidden');
+        }
+        listContainer.innerHTML = `
+            <div id="inventoryEmptyState" class="p-12 text-center text-gray-500">
+                <i class="fas fa-barcode text-6xl mb-4 text-gray-300"></i>
+                <p class="text-lg">QRコードをスキャンしてください</p>
+                <p class="text-sm mt-2">スキャンした商品がここに表示されます</p>
+            </div>
+        `;
+        return;
+    }
+
+    // Hide empty state and build list
+    if (emptyState) {
+        emptyState.classList.add('hidden');
+    }
+
+    listContainer.innerHTML = '';
+
+    inventoryScannedItems.forEach((item, index) => {
+        const itemElement = createInventoryItemElement(item, index);
+        listContainer.appendChild(itemElement);
+    });
+}
+
+// Create a single inventory item element
+function createInventoryItemElement(item, index) {
+    const div = document.createElement('div');
+    div.className = 'p-6 hover:bg-gray-50 transition-colors';
+
+    const difference = item.newQuantity - item.currentQuantity;
+    const differenceClass = difference > 0 ? 'text-green-600' : difference < 0 ? 'text-red-600' : 'text-gray-600';
+    const differenceIcon = difference > 0 ? 'fa-arrow-up' : difference < 0 ? 'fa-arrow-down' : 'fa-equals';
+
+    div.innerHTML = `
+        <div class="flex items-center justify-between">
+            <div class="flex items-center space-x-4 flex-1">
+                <div class="w-16 h-16 bg-blue-100 rounded-xl flex items-center justify-center">
+                    <i class="fas fa-box text-blue-600 text-2xl"></i>
+                </div>
+                <div class="flex-1">
+                    <h4 class="text-lg font-bold text-gray-900">${item.品番}</h4>
+                    <p class="text-sm text-gray-600">背番号: ${item.背番号}</p>
+                    <p class="text-xs text-gray-500">${new Date(item.scannedAt).toLocaleString('ja-JP')}</p>
+                </div>
+            </div>
+
+            <div class="flex items-center space-x-6">
+                <!-- Current Quantity -->
+                <div class="text-center">
+                    <p class="text-sm text-gray-500">現在の在庫</p>
+                    <p class="text-2xl font-bold text-gray-900">${item.currentQuantity}</p>
+                </div>
+
+                <!-- Arrow -->
+                <div class="text-center">
+                    <i class="fas fa-arrow-right text-2xl text-gray-400"></i>
+                </div>
+
+                <!-- New Quantity (editable) -->
+                <div class="text-center">
+                    <p class="text-sm text-gray-500">新しい在庫</p>
+                    <input
+                        type="number"
+                        value="${item.newQuantity}"
+                        min="0"
+                        class="w-24 text-2xl font-bold text-center border-2 border-blue-300 rounded-lg px-2 py-1 focus:ring-2 focus:ring-blue-500"
+                        onchange="updateInventoryItemQuantity(${index}, this.value)"
+                    />
+                </div>
+
+                <!-- Difference -->
+                <div class="text-center min-w-[100px]">
+                    <p class="text-sm text-gray-500">差分</p>
+                    <p class="text-xl font-bold ${differenceClass}">
+                        <i class="fas ${differenceIcon} mr-1"></i>
+                        ${Math.abs(difference)}
+                    </p>
+                </div>
+
+                <!-- Remove button -->
+                <button
+                    onclick="removeInventoryItem(${index})"
+                    class="w-10 h-10 bg-red-100 hover:bg-red-200 text-red-600 rounded-lg transition-colors"
+                    title="削除">
+                    <i class="fas fa-trash"></i>
+                </button>
+            </div>
+        </div>
+    `;
+
+    return div;
+}
+
+// Update quantity for a specific item
+function updateInventoryItemQuantity(index, newValue) {
+    const quantity = parseInt(newValue);
+
+    if (isNaN(quantity) || quantity < 0) {
+        showToast('数量は0以上の数値を入力してください', 'error');
+        updateInventoryList();
+        return;
+    }
+
+    inventoryScannedItems[index].newQuantity = quantity;
+    updateInventoryList();
+}
+
+// Remove an item from the scanned list
+function removeInventoryItem(index) {
+    const item = inventoryScannedItems[index];
+    inventoryScannedItems.splice(index, 1);
+    showToast(`${item.品番} をリストから削除しました`, 'info');
+    updateInventoryList();
+}
+
+// Clear all scanned items
+function clearInventoryList() {
+    if (inventoryScannedItems.length === 0) {
+        showToast('リストは既に空です', 'info');
+        return;
+    }
+
+    if (confirm(`${inventoryScannedItems.length}件のアイテムをクリアしますか？`)) {
+        inventoryScannedItems = [];
+        updateInventoryList();
+        showToast('リストをクリアしました', 'success');
+    }
+}
+
+// Submit the inventory count to the server
+async function submitInventoryCount() {
+    if (!currentWorker) {
+        showToast('ログインが必要です', 'error');
+        return;
+    }
+
+    if (inventoryScannedItems.length === 0) {
+        showToast('スキャンしたアイテムがありません', 'error');
+        return;
+    }
+
+    if (!confirm(`${inventoryScannedItems.length}件のアイテムを送信しますか？`)) {
+        return;
+    }
+
+    try {
+        // Disable submit button
+        const submitBtn = document.getElementById('submitInventoryBtn');
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>送信中...';
+        }
+
+        const response = await fetch(`${API_BASE_URL}/inventory/count-submit`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                items: inventoryScannedItems,
+                submittedBy: currentWorker,
+                submittedAt: new Date().toISOString()
+            })
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || '送信に失敗しました');
+        }
+
+        const result = await response.json();
+
+        showToast(`${result.processedCount}件のアイテムを更新しました！`, 'success');
+
+        // Clear the list after successful submission
+        inventoryScannedItems = [];
+        updateInventoryList();
+
+        // Re-enable submit button
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<i class="fas fa-check mr-2"></i>送信';
+        }
+
+    } catch (error) {
+        console.error('Error submitting inventory count:', error);
+        showToast(`送信エラー: ${error.message}`, 'error');
+
+        // Re-enable submit button
+        const submitBtn = document.getElementById('submitInventoryBtn');
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<i class="fas fa-check mr-2"></i>送信';
+        }
+    }
+}
+
+// ==================== END INVENTORY COUNT SYSTEM ====================
+
 // Export functions for global access
 window.handleLogin = handleLogin;
 window.logout = logout;
@@ -992,6 +1338,10 @@ window.startPickingProcess = startPickingProcess;
 // window.startIndividualPicking = startIndividualPicking; // Removed - ESP32 handles picking automatically
 window.refreshPickingDetail = refreshPickingDetail;
 window.completeAndBackToList = completeAndBackToList;
+window.clearInventoryList = clearInventoryList;
+window.submitInventoryCount = submitInventoryCount;
+window.updateInventoryItemQuantity = updateInventoryItemQuantity;
+window.removeInventoryItem = removeInventoryItem;
 
 // Language translations
 const translations = {
