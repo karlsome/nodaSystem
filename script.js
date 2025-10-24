@@ -373,33 +373,33 @@ function createPickingRequestCard(request) {
     const card = document.createElement('div');
     card.className = 'picking-request-card';
     card.onclick = () => viewPickingDetail(request.requestNumber);
-    
+
     const statusClass = getStatusClass(request.status);
     const statusText = getStatusText(request.status);
     const formattedDate = new Date(request.createdAt).toLocaleDateString('ja-JP');
-    
+
     card.innerHTML = `
         <div class="flex items-center justify-between">
-            <div class="flex items-center space-x-4">
-                <div class="w-16 h-16 bg-green-100 rounded-xl flex items-center justify-center">
-                    <i class="fas fa-hand-paper text-green-600 text-2xl"></i>
+            <div class="flex items-center space-x-3">
+                <div class="w-12 h-12 bg-green-100 rounded-lg flex items-center justify-center">
+                    <i class="fas fa-box text-green-600 text-lg"></i>
                 </div>
                 <div>
-                    <h3 class="text-xl font-bold text-gray-900">${request.requestNumber}</h3>
-                    <p class="text-gray-600">
-                        ${request.itemCount}項目 • 合計数量: ${request.totalQuantity}
+                    <h3 class="text-lg font-bold text-gray-900">${request.requestNumber}</h3>
+                    <p class="text-sm text-gray-600">
+                        ${request.itemCount}項目 • ${request.totalQuantity}個
                     </p>
-                    <p class="text-sm text-gray-500">${formattedDate}</p>
                 </div>
             </div>
             <div class="text-right">
-                <span class="status-badge ${statusClass}">
+                <span class="status-badge ${statusClass} text-xs">
                     ${statusText}
                 </span>
+                <p class="text-xs text-gray-500 mt-1">${formattedDate}</p>
             </div>
         </div>
     `;
-    
+
     return card;
 }
 
@@ -442,25 +442,25 @@ function displayPickingDetail(request) {
     // Update request info
     const infoContainer = document.getElementById('pickingRequestInfo');
     const completedItems = request.lineItems.filter(item => item.status === 'completed').length;
-    
+
     infoContainer.innerHTML = `
-        <div class="text-center">
-            <p class="text-sm text-gray-500">依頼番号</p>
-            <p class="text-lg font-semibold text-gray-900">${request.requestNumber}</p>
+        <div>
+            <p class="text-xs text-gray-500 mb-1">依頼番号</p>
+            <p class="text-sm font-semibold text-gray-900">${request.requestNumber}</p>
         </div>
-        <div class="text-center">
-            <p class="text-sm text-gray-500">ステータス</p>
-            <span id="requestStatusBadge" class="status-badge ${getStatusClass(request.status)}">
+        <div>
+            <p class="text-xs text-gray-500 mb-1">ステータス</p>
+            <span id="requestStatusBadge" class="status-badge ${getStatusClass(request.status)} text-xs">
                 ${getStatusText(request.status)}
             </span>
         </div>
-        <div class="text-center">
-            <p class="text-sm text-gray-500">進捗</p>
-            <p class="text-lg font-semibold text-gray-900 request-progress">${completedItems}/${request.lineItems.length}</p>
+        <div>
+            <p class="text-xs text-gray-500 mb-1">進捗</p>
+            <p class="text-sm font-semibold text-gray-900 request-progress">${completedItems}/${request.lineItems.length}</p>
         </div>
-        <div class="text-center">
-            <p class="text-sm text-gray-500">作成者</p>
-            <p class="text-lg font-semibold text-gray-900">${request.createdBy}</p>
+        <div>
+            <p class="text-xs text-gray-500 mb-1">作成者</p>
+            <p class="text-sm font-semibold text-gray-900">${request.createdBy}</p>
         </div>
     `;
     
@@ -495,69 +495,55 @@ function displayPickingDetail(request) {
 
 function createPickingItemElement(item, index) {
     const itemDiv = document.createElement('div');
-    itemDiv.className = 'picking-item border rounded-lg p-4 mb-3';
+    itemDiv.className = 'picking-item p-4';
     // Add data attributes for real-time updates
     itemDiv.setAttribute('data-line', item.lineNumber);
     itemDiv.setAttribute('data-device-id', item.背番号);
     itemDiv.setAttribute('data-item-id', item.品番);
     itemDiv.setAttribute('data-status', item.status);
-    
+
     // Status icon and text based on item status
     let statusIcon = '';
     let statusText = '';
-    let statusClass = '';
-    
+
     if (item.status === 'completed') {
-        statusIcon = '<i class="fas fa-check-circle text-green-500"></i>';
+        statusIcon = '<i class="fas fa-check-circle text-green-500 text-xl"></i>';
         statusText = '完了';
-        statusClass = 'text-green-600';
     } else if (item.status === 'in-progress') {
-        statusIcon = '<i class="fas fa-clock text-yellow-500"></i>';
+        statusIcon = '<i class="fas fa-circle-notch fa-spin text-blue-500 text-xl"></i>';
         statusText = '進行中';
-        statusClass = 'text-yellow-600';
     } else {
-        statusIcon = '<i class="fas fa-clock text-gray-500"></i>';
+        statusIcon = '<i class="far fa-circle text-gray-400 text-xl"></i>';
         statusText = '待機中';
-        statusClass = 'text-gray-600';
     }
-    
-    const completedInfo = item.completedAt ? 
-        `<p class="text-xs text-gray-500">完了: ${new Date(item.completedAt).toLocaleString('ja-JP')}</p>
-         <p class="text-xs text-gray-500">作業者: ${item.completedBy || 'N/A'}</p>` : '';
+
+    const completedInfo = item.completedAt ?
+        `<p class="text-xs text-gray-500 mt-1">${new Date(item.completedAt).toLocaleTimeString('ja-JP')}</p>` : '';
 
     itemDiv.innerHTML = `
         <div class="flex items-center justify-between">
-            <div class="flex items-center space-x-4">
-                <div class="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center">
-                    <span class="text-blue-600 font-bold">${item.lineNumber}</span>
+            <div class="flex items-center space-x-3">
+                <div class="text-center status-icon">
+                    ${statusIcon}
                 </div>
                 <div>
-                    <h4 class="text-lg font-semibold text-gray-900">品番: ${item.品番}</h4>
-                    <div class="flex items-center">
-                        <div class="device-status-indicator w-3 h-3 rounded-full ${item.status === 'in-progress' ? 'bg-yellow-400' : item.status === 'completed' ? 'bg-green-500' : 'bg-gray-400'} mr-2"></div>
-                        <p class="text-gray-600">背番号: <span class="font-medium">${item.背番号}</span></p>
+                    <h4 class="font-semibold text-gray-900">${item.品番}</h4>
+                    <div class="flex items-center space-x-3 mt-1">
+                        <p class="text-sm text-gray-600">背番号: ${item.背番号}</p>
+                        <span class="text-gray-400">•</span>
+                        <p class="text-sm text-gray-600">数量: ${item.quantity}個</p>
                     </div>
-                    <p class="text-sm text-gray-500">数量: ${item.quantity}</p>
-                    <div class="completion-info mt-1">${completedInfo}</div>
+                    <div class="completion-info">${completedInfo}</div>
                 </div>
             </div>
-            <div class="text-right flex items-center space-x-4">
-                <div>
-                    <div class="text-2xl font-bold text-gray-900">${item.quantity}</div>
-                    <div class="text-sm text-gray-500">個</div>
-                </div>
-                <div class="flex flex-col items-center space-y-2">
-                    <div class="text-2xl status-icon">
-                        ${statusIcon}
-                    </div>
-                    <div class="status-badge ${item.status === 'completed' ? 'bg-green-100 text-green-800' : item.status === 'in-progress' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-800'} px-2 py-1 rounded-full text-xs font-medium">
-                        ${statusText}
-                    </div>
-                </div>
+            <div class="text-right">
+                <span class="status-badge ${item.status === 'completed' ? 'bg-green-100 text-green-800' : item.status === 'in-progress' ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'} text-xs">
+                    ${statusText}
+                </span>
             </div>
         </div>
     `;
-    
+
     return itemDiv;
 }
 
@@ -861,12 +847,12 @@ function completeAndBackToList() {
 function displayNoRequests() {
     const container = document.getElementById('pickingRequestsList');
     container.innerHTML = `
-        <div class="text-center py-12">
-            <div class="w-24 h-24 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-6">
-                <i class="fas fa-inbox text-4xl text-gray-400"></i>
+        <div class="bg-white rounded-lg border border-gray-200 p-12 text-center">
+            <div class="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <i class="fas fa-inbox text-2xl text-gray-400"></i>
             </div>
-            <h3 class="text-xl font-bold text-gray-900 mb-2">ピッキング依頼がありません</h3>
-            <p class="text-gray-600">現在処理可能なピッキング依頼はありません。</p>
+            <h3 class="text-lg font-bold text-gray-900 mb-2">ピッキング依頼がありません</h3>
+            <p class="text-sm text-gray-600">現在処理可能な依頼はありません</p>
         </div>
     `;
 }
