@@ -39,35 +39,31 @@ button {
 
 /* Large touch-friendly buttons */
 .main-action-button {
-    min-height: 200px;
     padding: 2rem;
     touch-action: manipulation;
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: all 0.2s ease;
 }
 
 .main-action-button:hover {
-    transform: translateY(-4px) scale(1.02);
-    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
 }
 
 .main-action-button:active {
-    transform: translateY(-2px) scale(0.98);
-    transition: all 0.1s ease;
+    transform: scale(0.98);
 }
 
 /* Status filter buttons */
 .status-filter {
-    min-height: 48px;
-    padding: 12px 24px;
-    border: 2px solid transparent;
+    padding: 8px 16px;
     background-color: #f3f4f6;
     color: #6b7280;
+    transition: all 0.2s;
 }
 
 .status-filter.active {
     background-color: #3b82f6;
     color: white;
-    border-color: #2563eb;
 }
 
 .status-filter:hover:not(.active) {
@@ -78,23 +74,20 @@ button {
 /* Picking request cards */
 .picking-request-card {
     background: white;
-    border: 2px solid #e5e7eb;
-    border-radius: 12px;
-    padding: 24px;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 16px;
     cursor: pointer;
-    transition: all 0.3s ease;
-    min-height: 120px;
+    transition: all 0.2s ease;
 }
 
 .picking-request-card:hover {
     border-color: #3b82f6;
-    transform: translateY(-2px);
-    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
 }
 
 .picking-request-card:active {
-    transform: translateY(0);
-    transition: all 0.1s ease;
+    transform: scale(0.98);
 }
 
 /* Status badges */
@@ -176,17 +169,12 @@ button {
 
 /* Item list styles */
 .picking-item {
-    padding: 20px;
-    border-bottom: 1px solid #e5e7eb;
+    padding: 16px;
     transition: background-color 0.2s ease;
 }
 
 .picking-item:hover {
     background-color: #f9fafb;
-}
-
-.picking-item:last-child {
-    border-bottom: none;
 }
 
 /* Progress indicators */
@@ -203,33 +191,12 @@ button {
 
 /* Responsive tablet adjustments */
 @media (min-width: 768px) and (max-width: 1024px) {
-    /* Tablet specific styles */
-    .main-container {
-        padding: 0 32px;
-    }
-    
     .main-action-button {
-        min-height: 250px;
-        padding: 3rem;
+        padding: 2.5rem;
     }
-    
+
     .picking-request-card {
-        padding: 32px;
-        min-height: 140px;
-    }
-    
-    /* Larger text for tablet readability */
-    h1 { font-size: 2rem; }
-    h2 { font-size: 1.875rem; }
-    h3 { font-size: 1.5rem; }
-    
-    /* Touch-friendly spacing */
-    .space-y-4 > * + * {
-        margin-top: 1.5rem;
-    }
-    
-    .space-y-6 > * + * {
-        margin-top: 2rem;
+        padding: 20px;
     }
 }
 
@@ -308,40 +275,10 @@ button:focus,
     animation: fadeIn 0.3s ease-out;
 }
 
-/* Custom scrollbars for better touch experience */
+/* Custom scrollbar */
 ::-webkit-scrollbar {
-    width: 8px;
-}
-
-::-webkit-scrollbar-track {
-    background: #f1f1f1;
-    border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb {
-    background: #c1c1c1;
-    border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-    background: #a8a8a8;
-}
-
-/* Print styles */
-@media print {
-    .no-print {
-        display: none !important;
-    }
-    
-    body {
-        -webkit-print-color-adjust: exact;
-        color-adjust: exact;
-    }
-}
-
-/* Custom scrollbar for webkit browsers */
-::-webkit-scrollbar {
-    width: 8px;
+    width: 6px;
+    height: 6px;
 }
 
 ::-webkit-scrollbar-track {
@@ -350,7 +287,7 @@ button:focus,
 
 ::-webkit-scrollbar-thumb {
     background: #cbd5e1;
-    border-radius: 4px;
+    border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -362,9 +299,10 @@ button:focus,
     .no-print {
         display: none !important;
     }
-    
-    .print-only {
-        display: block !important;
+
+    body {
+        -webkit-print-color-adjust: exact;
+        color-adjust: exact;
     }
 }
 
