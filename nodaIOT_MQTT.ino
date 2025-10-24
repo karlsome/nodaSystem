@@ -130,9 +130,11 @@ struct ConnectionState {
   unsigned long lastConnectAttempt = 0;
   unsigned long lastMqttMessage = 0;
   bool isReconnecting = false;
-  const unsigned long HEARTBEAT_INTERVAL = 30000; // Send heartbeat every 30 seconds
-  const unsigned long CONNECTION_TIMEOUT = 60000; // Consider disconnected after 60 seconds
-  const unsigned long RECONNECT_DELAY = 5000; // Wait 5 seconds between reconnect attempts
+  const unsigned long HEARTBEAT_INTERVAL = 25000; // Send heartbeat every 25 seconds (before 30s keepalive)
+  const unsigned long CONNECTION_TIMEOUT = 45000; // Consider disconnected after 45 seconds
+  const unsigned long RECONNECT_DELAY = 10000; // Wait 10 seconds between reconnect attempts (longer for stability)
+  const unsigned long MAX_RECONNECT_ATTEMPTS = 3; // Max consecutive attempts before longer delay
+  unsigned int reconnectAttempts = 0;
 } connectionState;
 
 // Screen power management
@@ -532,8 +534,11 @@ void connectToMQTT() {
   // Configure for standard MQTT (no SSL for testing)
   mqttClient.setServer(mqtt_server, mqtt_port);
   mqttClient.setCallback(mqttCallback);
-  mqttClient.setKeepAlive(60); // 60 second keep-alive
-  mqttClient.setSocketTimeout(30); // 30 second socket timeout
+  mqttClient.setKeepAlive(30); // Reduced to 30 seconds to match server
+  mqttClient.setSocketTimeout(15); // Reduced to 15 seconds for faster failure detection
+  
+  // Set buffer sizes for better reliability
+  mqttClient.setBufferSize(1024); // Increase buffer for larger messages
   
   deviceState.currentMessage = "Connecting MQTT...";
   update_screen_activity();
@@ -575,6 +580,7 @@ void reconnectMQTT() {
     deviceState.currentMessage = "MQTT Connected";
     connectionState.isReconnecting = false;
     connectionState.lastMqttMessage = millis();
+    connectionState.reconnectAttempts = 0; // Reset counter on successful connection
     
     // Subscribe to command topic
     bool subSuccess = mqttClient.subscribe(TOPIC_COMMAND.c_str(), 1); // QoS 1 for reliable delivery
@@ -605,7 +611,17 @@ void reconnectMQTT() {
   } else {
     Serial.print(" ❌ Failed, rc=");
     Serial.print(mqttClient.state());
-    Serial.println(" retrying in 5 seconds");
+    connectionState.reconnectAttempts++;
+    
+    // Use exponential backoff after multiple failures
+    unsigned long backoffDelay = connectionState.RECONNECT_DELAY;
+    if (connectionState.reconnectAttempts >= connectionState.MAX_RECONNECT_ATTEMPTS) {
+      backoffDelay = 30000; // Wait 30 seconds after multiple failures
+      Serial.println(" (using extended backoff)");
+    } else {
+      Serial.printf(" retrying in %lu seconds\n", backoffDelay / 1000);
+    }
+    
     deviceState.isConnected = false;
     deviceState.currentMessage = "MQTT Failed";
     connectionState.isReconnecting = false;
