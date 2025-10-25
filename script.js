@@ -29,14 +29,20 @@ document.addEventListener('DOMContentLoaded', function() {
 
 function initializeApp() {
     console.log('🔄 Initializing app...');
+
+    // Initialize language system
+    if (typeof initializeLanguage === 'function') {
+        initializeLanguage();
+    }
+
     updateCurrentTime();
     setInterval(updateCurrentTime, 1000); // Update time every second
-    
+
     // Check if already logged in
     const savedWorker = localStorage.getItem('currentWorker');
     console.log('💾 Checking localStorage for currentWorker:', savedWorker);
     console.log('💾 localStorage available:', typeof(Storage) !== "undefined");
-    
+
     if (savedWorker) {
         console.log('✅ Found saved worker, auto-logging in:', savedWorker);
         currentWorker = savedWorker;
@@ -175,14 +181,15 @@ function hideWorkerInfo() {
 function updateConnectionStatus(connected) {
     const statusElement = document.getElementById('connectionStatus');
     const textElement = document.getElementById('connectionText');
-    
+    const t = window.t || ((key) => key);
+
     if (statusElement && textElement) {
         if (connected) {
             statusElement.className = 'w-3 h-3 bg-green-400 rounded-full animate-pulse';
-            textElement.textContent = '接続中';
+            textElement.textContent = t('connection-status-connected');
         } else {
             statusElement.className = 'w-3 h-3 bg-red-400 rounded-full';
-            textElement.textContent = '切断';
+            textElement.textContent = t('connection-status-disconnected');
         }
     }
 }
@@ -374,9 +381,11 @@ function createPickingRequestCard(request) {
     card.className = 'picking-request-card';
     card.onclick = () => viewPickingDetail(request.requestNumber);
 
+    const t = window.t || ((key) => key);
     const statusClass = getStatusClass(request.status);
     const statusText = getStatusText(request.status);
-    const formattedDate = new Date(request.createdAt).toLocaleDateString('ja-JP');
+    const currentLang = window.currentLanguage || 'ja';
+    const formattedDate = new Date(request.createdAt).toLocaleDateString(currentLang === 'ja' ? 'ja-JP' : 'en-US');
 
     card.innerHTML = `
         <div class="flex items-center justify-between">
@@ -387,7 +396,7 @@ function createPickingRequestCard(request) {
                 <div>
                     <h3 class="text-lg font-bold text-gray-900">${request.requestNumber}</h3>
                     <p class="text-sm text-gray-600">
-                        ${request.itemCount}項目 • ${request.totalQuantity}個
+                        ${request.itemCount}${t('items-suffix')} • ${request.totalQuantity}${t('pieces')}
                     </p>
                 </div>
             </div>
@@ -428,16 +437,18 @@ function displayPickingDetail(request) {
         console.error('No request provided to displayPickingDetail');
         return;
     }
-    
+
+    const t = window.t || ((key) => key);
+
     // Ensure lineItems exists
     if (!request.lineItems) {
         console.error('Request missing lineItems:', request);
         request.lineItems = [];
     }
-    
+
     // Update header
-    document.getElementById('pickingDetailTitle').textContent = `ピッキング詳細: ${request.requestNumber}`;
-    document.getElementById('pickingDetailSubtitle').textContent = `${request.lineItems.length}項目のピッキング依頼`;
+    document.getElementById('pickingDetailTitle').textContent = `${t('picking-detail')}: ${request.requestNumber}`;
+    document.getElementById('pickingDetailSubtitle').textContent = `${request.lineItems.length}${t('items-suffix')}${t('items-picking')}`;
     
     // Update request info
     const infoContainer = document.getElementById('pickingRequestInfo');
@@ -445,21 +456,21 @@ function displayPickingDetail(request) {
 
     infoContainer.innerHTML = `
         <div>
-            <p class="text-xs text-gray-500 mb-1">依頼番号</p>
+            <p class="text-xs text-gray-500 mb-1">${t('request-number')}</p>
             <p class="text-sm font-semibold text-gray-900">${request.requestNumber}</p>
         </div>
         <div>
-            <p class="text-xs text-gray-500 mb-1">ステータス</p>
+            <p class="text-xs text-gray-500 mb-1">${t('status-label')}</p>
             <span id="requestStatusBadge" class="status-badge ${getStatusClass(request.status)} text-xs">
                 ${getStatusText(request.status)}
             </span>
         </div>
         <div>
-            <p class="text-xs text-gray-500 mb-1">進捗</p>
+            <p class="text-xs text-gray-500 mb-1">${t('progress-label')}</p>
             <p class="text-sm font-semibold text-gray-900 request-progress">${completedItems}/${request.lineItems.length}</p>
         </div>
         <div>
-            <p class="text-xs text-gray-500 mb-1">作成者</p>
+            <p class="text-xs text-gray-500 mb-1">${t('created-by')}</p>
             <p class="text-sm font-semibold text-gray-900">${request.createdBy}</p>
         </div>
     `;
@@ -480,15 +491,15 @@ function displayPickingDetail(request) {
     if (request.status === 'pending') {
         startBtn.disabled = false;
         startBtn.onclick = startPickingProcess;
-        startBtn.innerHTML = '<i class="fas fa-play mr-2"></i>ピッキング開始';
+        startBtn.innerHTML = `<i class="fas fa-play mr-2"></i>${t('start-button')}`;
     } else if (request.status === 'in-progress') {
         startBtn.disabled = true;
         startBtn.onclick = null;
-        startBtn.innerHTML = '<i class="fas fa-clock mr-2"></i>進行中...';
+        startBtn.innerHTML = `<i class="fas fa-clock mr-2"></i>${t('in-progress-button')}`;
     } else if (request.status === 'completed') {
         startBtn.disabled = false;
         startBtn.onclick = completeAndBackToList;
-        startBtn.innerHTML = '<i class="fas fa-check mr-2"></i>完了';
+        startBtn.innerHTML = `<i class="fas fa-check mr-2"></i>${t('completed-button')}`;
         startBtn.className = 'px-8 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors text-lg font-medium';
     }
 }
@@ -496,6 +507,8 @@ function displayPickingDetail(request) {
 function createPickingItemElement(item, index) {
     const itemDiv = document.createElement('div');
     itemDiv.className = 'picking-item p-4';
+    const t = window.t || ((key) => key);
+
     // Add data attributes for real-time updates
     itemDiv.setAttribute('data-line', item.lineNumber);
     itemDiv.setAttribute('data-device-id', item.背番号);
@@ -508,13 +521,13 @@ function createPickingItemElement(item, index) {
 
     if (item.status === 'completed') {
         statusIcon = '<i class="fas fa-check-circle text-green-500 text-xl"></i>';
-        statusText = '完了';
+        statusText = t('status-completed');
     } else if (item.status === 'in-progress') {
         statusIcon = '<i class="fas fa-circle-notch fa-spin text-blue-500 text-xl"></i>';
-        statusText = '進行中';
+        statusText = t('status-in-progress');
     } else {
         statusIcon = '<i class="far fa-circle text-gray-400 text-xl"></i>';
-        statusText = '待機中';
+        statusText = t('status-pending');
     }
 
     const completedInfo = item.completedAt ?
@@ -529,9 +542,9 @@ function createPickingItemElement(item, index) {
                 <div>
                     <h4 class="font-semibold text-gray-900">${item.品番}</h4>
                     <div class="flex items-center space-x-3 mt-1">
-                        <p class="text-sm text-gray-600">背番号: ${item.背番号}</p>
+                        <p class="text-sm text-gray-600">${t('device-number')}: ${item.背番号}</p>
                         <span class="text-gray-400">•</span>
-                        <p class="text-sm text-gray-600">数量: ${item.quantity}個</p>
+                        <p class="text-sm text-gray-600">${t('quantity')}: ${item.quantity}${t('pieces')}</p>
                     </div>
                     <div class="completion-info">${completedInfo}</div>
                 </div>
@@ -846,13 +859,15 @@ function completeAndBackToList() {
 
 function displayNoRequests() {
     const container = document.getElementById('pickingRequestsList');
+    const t = window.t || ((key) => key);
+
     container.innerHTML = `
         <div class="bg-white rounded-lg border border-gray-200 p-12 text-center">
             <div class="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
                 <i class="fas fa-inbox text-2xl text-gray-400"></i>
             </div>
-            <h3 class="text-lg font-bold text-gray-900 mb-2">ピッキング依頼がありません</h3>
-            <p class="text-sm text-gray-600">現在処理可能な依頼はありません</p>
+            <h3 class="text-lg font-bold text-gray-900 mb-2">${t('no-requests-title')}</h3>
+            <p class="text-sm text-gray-600">${t('no-requests-desc')}</p>
         </div>
     `;
 }
@@ -893,11 +908,12 @@ function getStatusClass(status) {
 }
 
 function getStatusText(status) {
+    const t = window.t || ((key) => key); // Fallback if translation not loaded
     switch (status) {
-        case 'pending': return '待機中';
-        case 'in-progress': return '進行中';
-        case 'completed': return '完了';
-        default: return '不明';
+        case 'pending': return t('status-pending');
+        case 'in-progress': return t('status-in-progress');
+        case 'completed': return t('status-completed');
+        default: return t('status-unknown');
     }
 }
 
@@ -1122,6 +1138,8 @@ function updateInventoryList() {
     // Update count
     countDisplay.textContent = `(${inventoryScannedItems.length})`;
 
+    const t = window.t || ((key) => key);
+
     // Show/hide empty state
     if (inventoryScannedItems.length === 0) {
         if (emptyState) {
@@ -1130,8 +1148,8 @@ function updateInventoryList() {
         listContainer.innerHTML = `
             <div id="inventoryEmptyState" class="p-12 text-center text-gray-500">
                 <i class="fas fa-barcode text-6xl mb-4 text-gray-300"></i>
-                <p class="text-lg">QRコードをスキャンしてください</p>
-                <p class="text-sm mt-2">スキャンした商品がここに表示されます</p>
+                <p class="text-lg">${t('scan-prompt')}</p>
+                <p class="text-sm mt-2">${t('scan-prompt-desc')}</p>
             </div>
         `;
         return;
@@ -1155,6 +1173,8 @@ function createInventoryItemElement(item, index) {
     const div = document.createElement('div');
     div.className = 'p-6 hover:bg-gray-50 transition-colors';
 
+    const t = window.t || ((key) => key);
+    const currentLang = window.currentLanguage || 'ja';
     const difference = item.newQuantity - item.currentQuantity;
     const differenceClass = difference > 0 ? 'text-green-600' : difference < 0 ? 'text-red-600' : 'text-gray-600';
     const differenceIcon = difference > 0 ? 'fa-arrow-up' : difference < 0 ? 'fa-arrow-down' : 'fa-equals';
@@ -1167,15 +1187,15 @@ function createInventoryItemElement(item, index) {
                 </div>
                 <div class="flex-1">
                     <h4 class="text-lg font-bold text-gray-900">${item.品番}</h4>
-                    <p class="text-sm text-gray-600">背番号: ${item.背番号}</p>
-                    <p class="text-xs text-gray-500">${new Date(item.scannedAt).toLocaleString('ja-JP')}</p>
+                    <p class="text-sm text-gray-600">${t('device-number')}: ${item.背番号}</p>
+                    <p class="text-xs text-gray-500">${new Date(item.scannedAt).toLocaleString(currentLang === 'ja' ? 'ja-JP' : 'en-US')}</p>
                 </div>
             </div>
 
             <div class="flex items-center space-x-6">
                 <!-- Current Quantity -->
                 <div class="text-center">
-                    <p class="text-sm text-gray-500">現在の在庫</p>
+                    <p class="text-sm text-gray-500">${t('current-inventory')}</p>
                     <p class="text-2xl font-bold text-gray-900">${item.currentQuantity}</p>
                 </div>
 
@@ -1186,7 +1206,7 @@ function createInventoryItemElement(item, index) {
 
                 <!-- New Quantity (editable) -->
                 <div class="text-center">
-                    <p class="text-sm text-gray-500">新しい在庫</p>
+                    <p class="text-sm text-gray-500">${t('new-inventory')}</p>
                     <input
                         type="number"
                         value="${item.newQuantity}"
@@ -1198,7 +1218,7 @@ function createInventoryItemElement(item, index) {
 
                 <!-- Difference -->
                 <div class="text-center min-w-[100px]">
-                    <p class="text-sm text-gray-500">差分</p>
+                    <p class="text-sm text-gray-500">${t('difference')}</p>
                     <p class="text-xl font-bold ${differenceClass}">
                         <i class="fas ${differenceIcon} mr-1"></i>
                         ${Math.abs(difference)}
@@ -1209,7 +1229,7 @@ function createInventoryItemElement(item, index) {
                 <button
                     onclick="removeInventoryItem(${index})"
                     class="w-10 h-10 bg-red-100 hover:bg-red-200 text-red-600 rounded-lg transition-colors"
-                    title="削除">
+                    title="${t('clear-button')}">
                     <i class="fas fa-trash"></i>
                 </button>
             </div>
