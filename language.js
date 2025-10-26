@@ -105,6 +105,19 @@ const translations = {
         'list-cleared': 'リストをクリアしました',
         'no-scanned-items': 'スキャンしたアイテムがありません',
         'submit-items-confirm': '件のアイテムを送信しますか？',
+        'submit-confirm-prefix': '',
+        'submit-confirm-suffix': '件のアイテムを送信しますか？',
+        'clear-confirm-prefix': '',
+        'clear-confirm-suffix': '件のアイテムをクリアしますか？',
+
+        // Voice Recognition
+        'voice-not-supported': 'ブラウザが音声認識をサポートしていません',
+
+        // Maintenance
+        'sending-maintenance-request': 'メンテナンス要請を送信中...',
+
+        // Task Type
+        'type-label': 'タイプ',
         'submitting': '送信中...',
         'items-updated': '件のアイテムを更新しました！',
         'submit-error': '送信エラー:',
@@ -120,7 +133,13 @@ const translations = {
         'footer-copyright': '© 2025 Noda System',
 
         // Language Selector
-        'language': '言語'
+        'language': '言語',
+
+        // System Lock Message
+        'system-lock-strong': 'システムロック中:',
+        'system-lock-message': '注文番号',
+        'system-lock-by': 'が',
+        'system-lock-processing': 'によって処理中です'
     },
     en: {
         // Header
@@ -225,6 +244,19 @@ const translations = {
         'list-cleared': 'List cleared',
         'no-scanned-items': 'No scanned items',
         'submit-items-confirm': 'Submit',
+        'submit-confirm-prefix': 'Submit',
+        'submit-confirm-suffix': 'items?',
+        'clear-confirm-prefix': 'Clear',
+        'clear-confirm-suffix': 'items?',
+
+        // Voice Recognition
+        'voice-not-supported': 'Browser does not support voice recognition',
+
+        // Maintenance
+        'sending-maintenance-request': 'Sending maintenance request...',
+
+        // Task Type
+        'type-label': 'Type',
         'submitting': 'Submitting...',
         'items-updated': 'items updated!',
         'submit-error': 'Submit error:',
@@ -240,7 +272,13 @@ const translations = {
         'footer-copyright': '© 2025 Noda System',
 
         // Language Selector
-        'language': 'Language'
+        'language': 'Language',
+
+        // System Lock Message
+        'system-lock-strong': 'System Locked:',
+        'system-lock-message': 'Order number',
+        'system-lock-by': 'is being processed by',
+        'system-lock-processing': ''
     }
 };
 

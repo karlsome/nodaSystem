@@ -120,7 +120,7 @@ function initializeSocket() {
         
         socket.on('error', (error) => {
             console.error('Socket error:', error);
-            showToast('通信エラーが発生しました', 'error');
+            showToast(t('connection-error'), 'error');
         });
     }
 }
@@ -206,7 +206,7 @@ function updateLockUI(lockStatus) {
         if (isLocked) {
             button.disabled = true;
             button.classList.add('opacity-50', 'cursor-not-allowed');
-            button.textContent = '他の注文が処理中です';
+            button.textContent = t('other-order-processing');
         } else {
             button.disabled = false;
             button.classList.remove('opacity-50', 'cursor-not-allowed');
@@ -236,7 +236,7 @@ function showLockNotification(activeRequestNumber, startedBy) {
         <div class="flex">
             <div class="ml-3">
                 <p class="text-sm">
-                    <strong>システムロック中:</strong> 注文番号 ${activeRequestNumber} が ${startedBy} によって処理中です
+                    <strong>${t('system-lock-strong')}</strong> ${t('system-lock-message')} ${activeRequestNumber} ${t('system-lock-by')} ${startedBy} ${t('system-lock-processing')}
                 </p>
             </div>
         </div>
@@ -563,12 +563,12 @@ function createPickingItemElement(item, index) {
 // Start picking process
 async function startPickingProcess() {
     if (!currentWorker) {
-        showToast('ログインが必要です', 'error');
+        showToast(t('login-required'), 'error');
         return;
     }
     
     if (!currentRequestNumber) {
-        showToast('ピッキング依頼が選択されていません', 'error');
+        showToast(t('no-request-selected'), 'error');
         return;
     }
     
@@ -613,12 +613,12 @@ async function startPickingProcess() {
 /*
 async function startIndividualPicking(lineNumber, deviceId) {
     if (!currentWorker) {
-        showToast('ログインが必要です', 'error');
+        showToast(t('login-required'), 'error');
         return;
     }
     
     if (!currentRequestNumber) {
-        showToast('ピッキング依頼が選択されていません', 'error');
+        showToast(t('no-request-selected'), 'error');
         return;
     }
     
@@ -783,7 +783,7 @@ function updateDeviceStatusInUI(deviceData) {
                     statusText.textContent = 'ピッキング中';
                     statusText.className = 'device-status-text text-green-600 font-medium';
                 } else if (status === 'standby') {
-                    statusText.textContent = 'スタンバイ';
+                    statusText.textContent = t('device-status-standby');
                     statusText.className = 'device-status-text text-blue-600';
                 } else {
                     statusText.textContent = 'オフライン';
@@ -894,7 +894,7 @@ async function refreshPickingRequests() {
         await refreshESP32Devices(currentRequestNumber);
     }
     
-    showToast('ピッキング依頼を更新しました', 'success');
+    showToast(t('requests-refreshed'), 'success');
 }
 
 // Utility functions
@@ -1047,7 +1047,7 @@ async function processInventoryScan(scanValue) {
         const parts = scanValue.split(',');
 
         if (parts.length !== 2) {
-            showToast('無効なQRコード形式です。形式: 品番,数量', 'error');
+            showToast(t('invalid-qr-format'), 'error');
             return;
         }
 
@@ -1055,7 +1055,7 @@ async function processInventoryScan(scanValue) {
         const scannedQuantity = parseInt(parts[1].trim());
 
         if (!品番 || isNaN(scannedQuantity) || scannedQuantity < 0) {
-            showToast('品番または数量が無効です', 'error');
+            showToast(t('invalid-product-quantity'), 'error');
             return;
         }
 
@@ -1093,7 +1093,7 @@ async function processInventoryScan(scanValue) {
 
     } catch (error) {
         console.error('Error processing inventory scan:', error);
-        showToast('スキャン処理中にエラーが発生しました', 'error');
+        showToast(t('scan-error'), 'error');
     }
 }
 
@@ -1264,30 +1264,30 @@ function removeInventoryItem(index) {
 // Clear all scanned items
 function clearInventoryList() {
     if (inventoryScannedItems.length === 0) {
-        showToast('リストは既に空です', 'info');
+        showToast(t('list-already-empty'), 'info');
         return;
     }
 
-    if (confirm(`${inventoryScannedItems.length}件のアイテムをクリアしますか？`)) {
+    if (confirm(`${t('clear-confirm-prefix')} ${inventoryScannedItems.length} ${t('clear-confirm-suffix')}`)) {
         inventoryScannedItems = [];
         updateInventoryList();
-        showToast('リストをクリアしました', 'success');
+        showToast(t('list-cleared'), 'success');
     }
 }
 
 // Submit the inventory count to the server
 async function submitInventoryCount() {
     if (!currentWorker) {
-        showToast('ログインが必要です', 'error');
+        showToast(t('login-required'), 'error');
         return;
     }
 
     if (inventoryScannedItems.length === 0) {
-        showToast('スキャンしたアイテムがありません', 'error');
+        showToast(t('no-scanned-items'), 'error');
         return;
     }
 
-    if (!confirm(`${inventoryScannedItems.length}件のアイテムを送信しますか？`)) {
+    if (!confirm(`${t('submit-confirm-prefix')} ${inventoryScannedItems.length} ${t('submit-confirm-suffix')}`)) {
         return;
     }
 
@@ -1536,7 +1536,7 @@ function startVoiceInput() {
 
 function startVoiceRecording() {
     if (!recognition) {
-        showToast(currentLanguage === 'ja' ? 'ブラウザが音声認識をサポートしていません' : 'Browser does not support voice recognition', 'error');
+        showToast(t('voice-not-supported'), 'error');
         return;
     }
     
@@ -1647,7 +1647,7 @@ function viewTaskDetail(task) {
         <div class="space-y-4">
             <div>
                 <h4 class="font-semibold text-gray-900">${task.title[currentLanguage]}</h4>
-                <p class="text-gray-600">${currentLanguage === 'ja' ? 'タイプ' : 'Type'}: ${task.type}</p>
+                <p class="text-gray-600">${t('type-label')}: ${task.type}</p>
             </div>
             <div class="grid grid-cols-2 gap-4">
                 <div>
@@ -1756,7 +1756,7 @@ function reportProblem() {
 }
 
 function requestMaintenance() {
-    showToast(currentLanguage === 'ja' ? 'メンテナンス要請を送信中...' : 'Sending maintenance request...', 'info');
+    showToast(t('sending-maintenance-request'), 'info');
     closeAllModals();
 }
 
