@@ -432,7 +432,7 @@ async function viewPickingDetail(requestNumber) {
     }
 }
 
-function displayPickingDetail(request) {
+async function displayPickingDetail(request) {
     if (!request) {
         console.error('No request provided to displayPickingDetail');
         return;
@@ -445,6 +445,9 @@ function displayPickingDetail(request) {
         console.error('Request missing lineItems:', request);
         request.lineItems = [];
     }
+
+    // Enrich line items with master data (収容数)
+    await enrichLineItemsWithMasterData(request.lineItems);
 
     // Update header
     document.getElementById('pickingDetailTitle').textContent = `${t('picking-detail')}: ${request.requestNumber}`;
@@ -504,6 +507,49 @@ function displayPickingDetail(request) {
     }
 }
 
+// Enrich line items with master data to calculate box quantities
+async function enrichLineItemsWithMasterData(lineItems) {
+    try {
+        for (const item of lineItems) {
+            // Fetch master data for this item
+            const masterData = await fetchMasterData(item.品番);
+            
+            if (masterData && masterData.収容数) {
+                const 収容数 = parseInt(masterData.収容数);
+                if (収容数 > 0) {
+                    // Calculate box quantity (pieces ÷ capacity per box)
+                    item.boxQuantity = Math.ceil(item.quantity / 収容数);
+                    item.収容数 = 収容数;
+                } else {
+                    item.boxQuantity = item.quantity; // Fallback if 収容数 is 0
+                    item.収容数 = 1;
+                }
+            } else {
+                // If no master data found, show original quantity
+                item.boxQuantity = item.quantity;
+                item.収容数 = 1;
+            }
+        }
+    } catch (error) {
+        console.error('Error enriching line items with master data:', error);
+    }
+}
+
+// Fetch master data from server
+async function fetchMasterData(品番) {
+    try {
+        const response = await fetch(`${API_BASE_URL}/master-data/${encodeURIComponent(品番)}`);
+        if (response.ok) {
+            const data = await response.json();
+            return data;
+        }
+        return null;
+    } catch (error) {
+        console.error(`Error fetching master data for ${品番}:`, error);
+        return null;
+    }
+}
+
 function createPickingItemElement(item, index) {
     const itemDiv = document.createElement('div');
     itemDiv.className = 'picking-item p-4';
@@ -533,6 +579,13 @@ function createPickingItemElement(item, index) {
     const completedInfo = item.completedAt ?
         `<p class="text-xs text-gray-500 mt-1">${new Date(item.completedAt).toLocaleTimeString('ja-JP')}</p>` : '';
 
+    // Use box quantity if available, otherwise use piece quantity
+    const displayQuantity = item.boxQuantity !== undefined ? item.boxQuantity : item.quantity;
+    const quantityUnit = item.boxQuantity !== undefined ? '個' : t('pieces');
+    const quantityDetail = item.boxQuantity !== undefined && item.収容数 > 1 
+        ? `<span class="text-xs text-gray-500">(${item.quantity}${t('pieces')} ÷ ${item.収容数})</span>` 
+        : '';
+
     itemDiv.innerHTML = `
         <div class="flex items-center justify-between">
             <div class="flex items-center space-x-3">
@@ -544,7 +597,7 @@ function createPickingItemElement(item, index) {
                     <div class="flex items-center space-x-3 mt-1">
                         <p class="text-sm text-gray-600">${t('device-number')}: ${item.背番号}</p>
                         <span class="text-gray-400">•</span>
-                        <p class="text-sm text-gray-600">${t('quantity')}: ${item.quantity}${t('pieces')}</p>
+                        <p class="text-sm text-gray-600">${t('quantity')}: ${displayQuantity}${quantityUnit} ${quantityDetail}</p>
                     </div>
                     <div class="completion-info">${completedInfo}</div>
                 </div>

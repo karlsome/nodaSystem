@@ -23,9 +23,21 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('.'));
 
-// MongoDB connection
+// MongoDB connection with SSL options for local testing
 let db;
-const client = new MongoClient(process.env.MONGODB_URI);
+const mongoOptions = {
+    // SSL/TLS options for local testing
+    tls: true,
+    tlsAllowInvalidCertificates: true,
+    tlsAllowInvalidHostnames: true,
+    // Connection pool settings
+    maxPoolSize: 10,
+    minPoolSize: 2,
+    serverSelectionTimeoutMS: 10000,
+    socketTimeoutMS: 45000,
+};
+
+const client = new MongoClient(process.env.MONGODB_URI, mongoOptions);
 
 // Connected devices storage
 const connectedDevices = new Map(); // deviceId -> socket
@@ -223,6 +235,33 @@ async function connectToMongoDB() {
     } catch (error) {
         console.error('Failed to connect to MongoDB:', error);
         process.exit(1);
+    }
+}
+
+// Helper function to get master data and calculate box quantity
+async function getMasterDataAndCalculateBoxQuantity(品番, pieceQuantity) {
+    try {
+        await client.connect();
+        const masterDb = client.db("Sasaki_Coating_MasterDB");
+        const masterCollection = masterDb.collection("masterDB");
+        
+        const masterData = await masterCollection.findOne({ 品番: 品番 });
+        
+        if (masterData && masterData.収容数) {
+            const 収容数 = parseInt(masterData.収容数);
+            if (収容数 > 0) {
+                const boxQuantity = Math.ceil(pieceQuantity / 収容数);
+                console.log(`📦 ${品番}: ${pieceQuantity}枚 ÷ ${収容数} = ${boxQuantity}個`);
+                return boxQuantity;
+            }
+        }
+        
+        // If no master data or 収容数 is 0, return original quantity
+        console.log(`⚠️ No master data found for ${品番}, using piece quantity: ${pieceQuantity}`);
+        return pieceQuantity;
+    } catch (error) {
+        console.error(`Error fetching master data for ${品番}:`, error);
+        return pieceQuantity; // Fallback to piece quantity
     }
 }
 
@@ -517,17 +556,21 @@ io.on('connection', (socket) => {
             console.log(`📊 Active picking result for ${deviceId}:`, activePicking);
             
             if (activePicking) {
-                // Device has active picking - restore green screen
+                // Device has active picking - restore green screen with box quantity
                 console.log(`🟢 Restoring active picking for device ${deviceId}: ${activePicking.requestNumber} - ${activePicking.品番} (${activePicking.quantity})`);
+                
+                // Calculate box quantity from master data
+                const boxQuantity = await getMasterDataAndCalculateBoxQuantity(activePicking.品番, activePicking.quantity);
+                
                 const displayUpdate = {
                     color: 'green',
-                    quantity: activePicking.quantity,
-                    message: `Pick ${activePicking.quantity}`,
+                    quantity: boxQuantity,
+                    message: `Pick ${boxQuantity}`,
                     requestNumber: activePicking.requestNumber,
                     lineNumber: activePicking.lineNumber,
                     品番: activePicking.品番
                 };
-                console.log(`📤 Sending display update:`, displayUpdate);
+                console.log(`📤 Sending display update with box quantity:`, displayUpdate);
                 socket.emit('display-update', displayUpdate);
             } else {
                 // No active picking - send initial state (red screen)
@@ -744,15 +787,18 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
         // Broadcast to all IoT devices (MQTT + Socket.IO)
         console.log(`🚀 Broadcasting to both MQTT and Socket.IO devices`);
         
-        // Send to MQTT devices (new hybrid approach)
-        updatedRequest.lineItems.forEach(item => {
+        // Send to MQTT devices with box quantities (new hybrid approach)
+        for (const item of updatedRequest.lineItems) {
             const deviceId = item.背番号;
             
             if (item.status === 'in-progress') {
+                // Calculate box quantity from master data
+                const boxQuantity = await getMasterDataAndCalculateBoxQuantity(item.品番, item.quantity);
+                
                 publishDeviceCommand(deviceId, {
                     color: 'green',
-                    quantity: item.quantity,
-                    message: `Pick ${item.quantity}`,
+                    quantity: boxQuantity,
+                    message: `Pick ${boxQuantity}`,
                     requestNumber,
                     lineNumber: item.lineNumber,
                     品番: item.品番
@@ -764,18 +810,21 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
                     message: 'No Pick'
                 });
             }
-        });
+        }
 
-        // Send to Socket.IO devices (existing functionality)
-        connectedDevices.forEach((deviceSocket, deviceId) => {
+        // Send to Socket.IO devices with box quantities (existing functionality)
+        for (const [deviceId, deviceSocket] of connectedDevices.entries()) {
             const deviceItem = updatedRequest.lineItems.find(item => item.背番号 === deviceId);
             
             if (deviceItem && deviceItem.status === 'in-progress') {
-                // Device has items to pick - show green with quantity
+                // Calculate box quantity from master data
+                const boxQuantity = await getMasterDataAndCalculateBoxQuantity(deviceItem.品番, deviceItem.quantity);
+                
+                // Device has items to pick - show green with box quantity
                 deviceSocket.emit('display-update', {
                     color: 'green',
-                    quantity: deviceItem.quantity,
-                    message: `Pick ${deviceItem.quantity}`,
+                    quantity: boxQuantity,
+                    message: `Pick ${boxQuantity}`,
                     requestNumber,
                     lineNumber: deviceItem.lineNumber,
                     品番: deviceItem.品番
@@ -788,7 +837,7 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
                     message: 'No Pick'
                 });
             }
-        });
+        }
         
         console.log(`Picking started for ${requestNumber} by ${startedBy}`);
         res.json({ message: 'Picking process started', pickingData });
@@ -1067,16 +1116,19 @@ app.get('/api/device/:deviceId/status', async (req, res) => {
         console.log(`🌐 REST API: Active picking for ${deviceId}:`, activePicking);
         
         if (activePicking) {
+            // Calculate box quantity from master data
+            const boxQuantity = await getMasterDataAndCalculateBoxQuantity(activePicking.品番, activePicking.quantity);
+            
             const response = {
                 status: 'picking',
                 color: 'green',
-                quantity: activePicking.quantity,
-                message: `Pick ${activePicking.quantity}`,
+                quantity: boxQuantity,
+                message: `Pick ${boxQuantity}`,
                 requestNumber: activePicking.requestNumber,
                 lineNumber: activePicking.lineNumber,
                 品番: activePicking.品番
             };
-            console.log(`🌐 REST API: Sending response:`, response);
+            console.log(`🌐 REST API: Sending response with box quantity:`, response);
             res.json(response);
         } else {
             const response = {
@@ -1224,10 +1276,13 @@ async function notifyDeviceStatusChange(deviceId, requestNumber, lineNumber, qua
     let command = null;
     
     if (newStatus === 'in-progress') {
+        // Calculate box quantity from master data
+        const boxQuantity = await getMasterDataAndCalculateBoxQuantity(品番, quantity);
+        
         command = {
             color: 'green',
-            quantity: quantity,
-            message: `Pick ${quantity}`,
+            quantity: boxQuantity,
+            message: `Pick ${boxQuantity}`,
             requestNumber: requestNumber,
             lineNumber: lineNumber,
             品番: 品番
@@ -1976,6 +2031,46 @@ app.post('/api/inventory/count-submit', async (req, res) => {
 });
 
 // ==================== END INVENTORY COUNT API ENDPOINTS ====================
+
+// ==================== MASTER DATA API ENDPOINT ====================
+
+// Get master data by 品番
+app.get('/api/master-data/:productNumber', async (req, res) => {
+    try {
+        const { productNumber } = req.params;
+
+        await client.connect();
+        const masterDb = client.db("Sasaki_Coating_MasterDB");
+        const masterCollection = masterDb.collection("masterDB");
+
+        // Find the master data by 品番
+        const masterData = await masterCollection.findOne({ 品番: productNumber });
+
+        if (!masterData) {
+            return res.status(404).json({ error: 'Master data not found' });
+        }
+
+        res.json({
+            品番: masterData.品番,
+            モデル: masterData.モデル,
+            背番号: masterData.背番号,
+            品名: masterData.品名,
+            形状: masterData.形状,
+            色: masterData.色,
+            収容数: masterData.収容数,
+            工場: masterData.工場,
+            材料: masterData.材料,
+            材料背番号: masterData.材料背番号,
+            imageURL: masterData.imageURL
+        });
+
+    } catch (error) {
+        console.error('Error fetching master data:', error);
+        res.status(500).json({ error: 'Failed to fetch master data', details: error.message });
+    }
+});
+
+// ==================== END MASTER DATA API ENDPOINT ====================
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
