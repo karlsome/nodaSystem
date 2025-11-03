@@ -11,8 +11,8 @@ let recentActivities = []; // Initialize empty array for activities
 let todaysTasks = []; // Initialize empty array for tasks
 
 // API base URL - change this to your server URL
-//const API_BASE_URL = 'http://localhost:3001/api';
-const API_BASE_URL = 'https://nodasystem.onrender.com/api';
+const API_BASE_URL = 'http://localhost:3001/api';
+//const API_BASE_URL = 'https://nodasystem.onrender.com/api';
 
 // Debug localStorage on page load
 console.log('🔄 Page loaded, checking localStorage availability...');
@@ -2370,3 +2370,528 @@ if (universalScanInput) {
         }, 1000);
     });
 }
+
+// ==================== TANAOROSHI (棚卸し) SYSTEM ====================
+
+// Global variables for tanaoroshi
+let tanaoroshiCountedProducts = []; // Array to store counted products
+let currentTanaoroshiProduct = null; // Currently counting product
+let tanaoroshiScanBuffer = ''; // Buffer for QR scan input
+let isTanaoroshiModalOpen = false; // Track if modal is open
+
+// Initialize tanaoroshi when inventory screen is shown
+function openInventorySystem() {
+    showScreen('inventory');
+    initializeTanaoroshi();
+}
+
+function initializeTanaoroshi() {
+    console.log('🔄 Initializing Tanaoroshi system...');
+    
+    // Reset state
+    tanaoroshiCountedProducts = [];
+    currentTanaoroshiProduct = null;
+    tanaoroshiScanBuffer = '';
+    isTanaoroshiModalOpen = false;
+    
+    // Show scanner area, hide summary list
+    document.getElementById('tanaoroshiScannerArea').classList.remove('hidden');
+    document.getElementById('tanaoroshiSummaryList').classList.add('hidden');
+    
+    // Close modal if open
+    document.getElementById('tanaoroshiCountingModal').classList.add('hidden');
+    
+    // Setup keyboard listener for HID mode QR scanner
+    setupTanaoroshiKeyboardListener();
+    
+    console.log('✅ Tanaoroshi system ready');
+}
+
+// Setup keyboard listener for QR scanner (HID mode)
+function setupTanaoroshiKeyboardListener() {
+    // Remove existing listener if any
+    document.removeEventListener('keydown', tanaoroshiKeyHandler);
+    
+    // Add new listener
+    document.addEventListener('keydown', tanaoroshiKeyHandler);
+    
+    console.log('⌨️ Tanaoroshi keyboard listener active');
+}
+
+// Keyboard handler for QR scanning
+function tanaoroshiKeyHandler(event) {
+    // Only process if on inventory screen and modal is open or waiting for initial scan
+    if (currentScreen !== 'inventory') {
+        return;
+    }
+    
+    // Ignore if user is typing in an input field (except our modal state)
+    if (event.target.tagName === 'INPUT' && !isTanaoroshiModalOpen) {
+        return;
+    }
+    
+    // Enter key - process the scanned data
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        
+        if (tanaoroshiScanBuffer.trim() !== '') {
+            processTanaoroshiScan(tanaoroshiScanBuffer.trim());
+            tanaoroshiScanBuffer = ''; // Clear buffer
+        }
+        
+        return;
+    }
+    
+    // Ignore special keys
+    if (event.key.length > 1 && event.key !== 'Enter') {
+        return;
+    }
+    
+    // Add character to buffer
+    tanaoroshiScanBuffer += event.key;
+}
+
+// Process scanned QR code
+async function processTanaoroshiScan(scanData) {
+    console.log('📦 Tanaoroshi scan received:', scanData);
+    
+    // Parse QR code format: "GN519-10200,20"
+    const parts = scanData.split(',');
+    if (parts.length !== 2) {
+        showToast('❌ QRコード形式が無効です (形式: 品番,数量)', 'error');
+        return;
+    }
+    
+    const scannedProductNumber = parts[0].trim();
+    const scannedBoxQuantity = parseInt(parts[1].trim());
+    
+    if (!scannedProductNumber || isNaN(scannedBoxQuantity)) {
+        showToast('❌ QRコードデータが無効です', 'error');
+        return;
+    }
+    
+    // If no modal is open, this is the initial product scan
+    if (!isTanaoroshiModalOpen) {
+        await startCountingProduct(scannedProductNumber, scannedBoxQuantity);
+    } else {
+        // Modal is open, this is a box scan
+        await processBoxScan(scannedProductNumber, scannedBoxQuantity);
+    }
+}
+
+// Start counting a new product
+async function startCountingProduct(productNumber, referenceQuantity) {
+    try {
+        console.log(`🆕 Starting count for product: ${productNumber}`);
+        
+        // Fetch product data from API
+        showToast('🔍 製品情報を取得中...', 'info');
+        
+        const response = await fetch(`${API_BASE_URL}/tanaoroshi/${productNumber}`);
+        
+        if (!response.ok) {
+            if (response.status === 404) {
+                showToast('❌ 製品が見つかりません', 'error');
+            } else {
+                showToast('❌ 製品情報の取得に失敗しました', 'error');
+            }
+            return;
+        }
+        
+        const productData = await response.json();
+        console.log('✅ Product data fetched:', productData);
+        
+        // Initialize current product object
+        currentTanaoroshiProduct = {
+            品番: productData.品番,
+            品名: productData.品名,
+            背番号: productData.背番号,
+            収容数: productData.収容数,
+            imageURL: productData.imageURL,
+            currentPhysicalQuantity: productData.currentPhysicalQuantity,
+            currentReservedQuantity: productData.currentReservedQuantity,
+            currentAvailableQuantity: productData.currentAvailableQuantity,
+            countedBoxes: 0,
+            countedPieces: 0
+        };
+        
+        // Open counting modal
+        openTanaoroshiCountingModal();
+        
+        showToast('✅ カウント開始', 'success');
+        
+    } catch (error) {
+        console.error('Error starting product count:', error);
+        showToast('❌ エラーが発生しました', 'error');
+    }
+}
+
+// Open the counting modal
+function openTanaoroshiCountingModal() {
+    if (!currentTanaoroshiProduct) return;
+    
+    const modal = document.getElementById('tanaoroshiCountingModal');
+    const product = currentTanaoroshiProduct;
+    
+    // Set product info
+    document.getElementById('modalProductNumber').textContent = product.品番;
+    document.getElementById('modalProductName').textContent = product.品名 || '-';
+    
+    // Set product image
+    const imgElement = document.getElementById('modalProductImage');
+    if (product.imageURL) {
+        imgElement.src = product.imageURL;
+        imgElement.style.display = 'block';
+    } else {
+        imgElement.style.display = 'none';
+    }
+    
+    // Calculate expected boxes
+    const expectedBoxes = Math.ceil(product.currentPhysicalQuantity / product.収容数);
+    
+    // Set expected count
+    document.getElementById('modalExpectedPieces').textContent = `${product.currentPhysicalQuantity} 個`;
+    document.getElementById('modalExpectedBoxes').textContent = `= ${expectedBoxes} 箱`;
+    document.getElementById('modalBoxInfo').textContent = `1箱 = ${product.収容数}個`;
+    
+    // Reset counter
+    updateTanaoroshiCounter();
+    
+    // Show modal
+    modal.classList.remove('hidden');
+    isTanaoroshiModalOpen = true;
+    
+    console.log('📋 Counting modal opened');
+}
+
+// Process box scan (when modal is open)
+async function processBoxScan(scannedProductNumber, scannedBoxQuantity) {
+    if (!currentTanaoroshiProduct) {
+        showToast('❌ エラー: 製品がありません', 'error');
+        return;
+    }
+    
+    // Validate product number matches
+    if (scannedProductNumber !== currentTanaoroshiProduct.品番) {
+        showToast(`❌ 製品番号が異なります！ 期待: ${currentTanaoroshiProduct.品番}`, 'error');
+        
+        // Flash red
+        const counterArea = document.getElementById('modalCounterArea');
+        counterArea.classList.add('bg-red-100', 'border-red-500');
+        setTimeout(() => {
+            counterArea.classList.remove('bg-red-100', 'border-red-500');
+            counterArea.classList.add('bg-gradient-to-br', 'from-green-50', 'to-emerald-50', 'border-green-200');
+        }, 1000);
+        
+        return;
+    }
+    
+    // Validate box quantity matches 収容数
+    if (scannedBoxQuantity !== currentTanaoroshiProduct.収容数) {
+        showToast(`❌ 箱数量が異なります！ 期待: ${currentTanaoroshiProduct.収容数}個/箱`, 'error');
+        return;
+    }
+    
+    // Increment count
+    currentTanaoroshiProduct.countedBoxes += 1;
+    currentTanaoroshiProduct.countedPieces += scannedBoxQuantity;
+    
+    // Update display
+    updateTanaoroshiCounter();
+    
+    // Flash green
+    const counterArea = document.getElementById('modalCounterArea');
+    counterArea.classList.add('bg-green-200', 'border-green-500');
+    setTimeout(() => {
+        counterArea.classList.remove('bg-green-200', 'border-green-500');
+        counterArea.classList.add('bg-gradient-to-br', 'from-green-50', 'to-emerald-50', 'border-green-200');
+    }, 300);
+    
+    console.log(`✅ Box scanned: ${currentTanaoroshiProduct.countedBoxes} boxes (${currentTanaoroshiProduct.countedPieces} pieces)`);
+}
+
+// Update counter display
+function updateTanaoroshiCounter() {
+    if (!currentTanaoroshiProduct) return;
+    
+    const countedBoxes = currentTanaoroshiProduct.countedBoxes;
+    const countedPieces = currentTanaoroshiProduct.countedPieces;
+    const expectedPieces = currentTanaoroshiProduct.currentPhysicalQuantity;
+    const expectedBoxes = Math.ceil(expectedPieces / currentTanaoroshiProduct.収容数);
+    
+    // Update counter text
+    document.getElementById('modalCountedBoxes').textContent = `${countedBoxes} 箱`;
+    document.getElementById('modalCountedPieces').textContent = `(${countedPieces} 個)`;
+    
+    // Update status indicator
+    const statusIndicator = document.getElementById('modalStatusIndicator');
+    const statusText = document.getElementById('modalStatusText');
+    
+    if (countedPieces === 0) {
+        statusIndicator.className = 'inline-flex items-center px-4 py-2 rounded-full text-sm font-medium bg-gray-100 text-gray-700';
+        statusText.textContent = 'スキャン待機中';
+    } else if (countedPieces < expectedPieces) {
+        statusIndicator.className = 'inline-flex items-center px-4 py-2 rounded-full text-sm font-medium bg-yellow-100 text-yellow-700';
+        statusText.textContent = `不足 (${expectedPieces - countedPieces}個)`;
+    } else if (countedPieces > expectedPieces) {
+        statusIndicator.className = 'inline-flex items-center px-4 py-2 rounded-full text-sm font-medium bg-red-100 text-red-700';
+        statusText.textContent = `超過 (+${countedPieces - expectedPieces}個)`;
+    } else {
+        statusIndicator.className = 'inline-flex items-center px-4 py-2 rounded-full text-sm font-medium bg-green-100 text-green-700';
+        statusText.textContent = '✓ 一致';
+    }
+}
+
+// Manual adjustment (+/- buttons)
+function adjustTanaoroshiCount(delta) {
+    if (!currentTanaoroshiProduct) return;
+    
+    const newBoxCount = currentTanaoroshiProduct.countedBoxes + delta;
+    
+    // Prevent negative count
+    if (newBoxCount < 0) {
+        showToast('❌ 箱数は0未満にできません', 'error');
+        return;
+    }
+    
+    currentTanaoroshiProduct.countedBoxes = newBoxCount;
+    currentTanaoroshiProduct.countedPieces = newBoxCount * currentTanaoroshiProduct.収容数;
+    
+    updateTanaoroshiCounter();
+    
+    console.log(`🔧 Manual adjustment: ${newBoxCount} boxes (${currentTanaoroshiProduct.countedPieces} pieces)`);
+}
+
+// Complete counting for current product
+async function completeTanaoroshiCount() {
+    if (!currentTanaoroshiProduct) return;
+    
+    const countedPieces = currentTanaoroshiProduct.countedPieces;
+    const expectedPieces = currentTanaoroshiProduct.currentPhysicalQuantity;
+    const difference = countedPieces - expectedPieces;
+    
+    // If there's a discrepancy, show confirmation
+    if (difference !== 0) {
+        const boxDifference = Math.ceil(Math.abs(difference) / currentTanaoroshiProduct.収容数);
+        const action = difference > 0 ? '追加' : '削減';
+        const message = `在庫が ${Math.abs(difference)}個 (${boxDifference}箱) ${action}されます。よろしいですか？`;
+        
+        if (!confirm(message)) {
+            return;
+        }
+    }
+    
+    // Add to counted products list
+    tanaoroshiCountedProducts.push({
+        品番: currentTanaoroshiProduct.品番,
+        品名: currentTanaoroshiProduct.品名,
+        背番号: currentTanaoroshiProduct.背番号,
+        収容数: currentTanaoroshiProduct.収容数,
+        imageURL: currentTanaoroshiProduct.imageURL,
+        oldPhysicalQuantity: expectedPieces,
+        newPhysicalQuantity: countedPieces,
+        oldReservedQuantity: currentTanaoroshiProduct.currentReservedQuantity,
+        countedBoxes: currentTanaoroshiProduct.countedBoxes,
+        difference: difference
+    });
+    
+    // Close modal
+    closeTanaoroshiModal();
+    
+    // Update summary list
+    updateTanaoroshiSummaryList();
+    
+    showToast('✅ カウント完了', 'success');
+}
+
+// Close counting modal
+function closeTanaoroshiModal() {
+    document.getElementById('tanaoroshiCountingModal').classList.add('hidden');
+    isTanaoroshiModalOpen = false;
+    currentTanaoroshiProduct = null;
+    
+    console.log('📋 Counting modal closed');
+}
+
+// Update summary list display
+function updateTanaoroshiSummaryList() {
+    const summaryList = document.getElementById('tanaoroshiSummaryList');
+    const itemsList = document.getElementById('tanaoroshiItemsList');
+    const itemCount = document.getElementById('tanaoroshiItemCount');
+    
+    // Show summary list
+    summaryList.classList.remove('hidden');
+    document.getElementById('tanaoroshiScannerArea').classList.add('hidden');
+    
+    // Update count
+    itemCount.textContent = `(${tanaoroshiCountedProducts.length})`;
+    
+    // Clear and rebuild list
+    itemsList.innerHTML = '';
+    
+    tanaoroshiCountedProducts.forEach((product, index) => {
+        const row = createTanaoroshiSummaryRow(product, index);
+        itemsList.appendChild(row);
+    });
+}
+
+// Create summary row element
+function createTanaoroshiSummaryRow(product, index) {
+    const row = document.createElement('div');
+    row.className = 'p-4 hover:bg-gray-50 transition-colors';
+    
+    const oldBoxes = Math.ceil(product.oldPhysicalQuantity / product.収容数);
+    const newBoxes = product.countedBoxes;
+    const diffClass = product.difference > 0 ? 'text-green-600' : product.difference < 0 ? 'text-red-600' : 'text-gray-600';
+    const diffSymbol = product.difference > 0 ? '+' : '';
+    
+    row.innerHTML = `
+        <div class="flex items-center justify-between">
+            <div class="flex items-center space-x-4 flex-1">
+                ${product.imageURL ? `
+                    <img src="${product.imageURL}" alt="${product.品番}" class="w-16 h-16 object-contain rounded border border-gray-200">
+                ` : `
+                    <div class="w-16 h-16 bg-gray-100 rounded border border-gray-200 flex items-center justify-center">
+                        <i class="fas fa-box text-gray-400"></i>
+                    </div>
+                `}
+                <div class="flex-1">
+                    <h4 class="font-bold text-gray-900">${product.品番}</h4>
+                    <p class="text-sm text-gray-600">${product.品名 || '-'}</p>
+                    <div class="flex items-center space-x-4 mt-2">
+                        <span class="text-sm">
+                            <span class="text-red-600 line-through">${product.oldPhysicalQuantity}個 (${oldBoxes}箱)</span>
+                        </span>
+                        <i class="fas fa-arrow-right text-gray-400 text-xs"></i>
+                        <span class="text-sm">
+                            <span class="${diffClass} font-bold">${product.newPhysicalQuantity}個 (${newBoxes}箱)</span>
+                        </span>
+                        ${product.difference !== 0 ? `
+                            <span class="text-xs ${diffClass} font-medium">
+                                (${diffSymbol}${product.difference}個)
+                            </span>
+                        ` : ''}
+                    </div>
+                </div>
+            </div>
+            <div class="flex items-center space-x-2">
+                <button onclick="editTanaoroshiProduct(${index})" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors">
+                    <i class="fas fa-edit mr-1"></i>編集
+                </button>
+                <button onclick="deleteTanaoroshiProduct(${index})" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors">
+                    <i class="fas fa-trash mr-1"></i>削除
+                </button>
+            </div>
+        </div>
+    `;
+    
+    return row;
+}
+
+// Edit counted product
+function editTanaoroshiProduct(index) {
+    const product = tanaoroshiCountedProducts[index];
+    
+    // Remove from list
+    tanaoroshiCountedProducts.splice(index, 1);
+    
+    // Set as current product and reopen modal
+    currentTanaoroshiProduct = {
+        品番: product.品番,
+        品名: product.品名,
+        背番号: product.背番号,
+        収容数: product.収容数,
+        imageURL: product.imageURL,
+        currentPhysicalQuantity: product.oldPhysicalQuantity,
+        currentReservedQuantity: product.oldReservedQuantity,
+        currentAvailableQuantity: product.oldPhysicalQuantity - product.oldReservedQuantity,
+        countedBoxes: product.countedBoxes,
+        countedPieces: product.newPhysicalQuantity
+    };
+    
+    openTanaoroshiCountingModal();
+    
+    // Update summary list
+    if (tanaoroshiCountedProducts.length === 0) {
+        // Reset to scanner area if no more products
+        document.getElementById('tanaoroshiSummaryList').classList.add('hidden');
+        document.getElementById('tanaoroshiScannerArea').classList.remove('hidden');
+    } else {
+        updateTanaoroshiSummaryList();
+    }
+}
+
+// Delete counted product
+function deleteTanaoroshiProduct(index) {
+    const product = tanaoroshiCountedProducts[index];
+    
+    if (!confirm(`${product.品番} を削除しますか？`)) {
+        return;
+    }
+    
+    tanaoroshiCountedProducts.splice(index, 1);
+    
+    if (tanaoroshiCountedProducts.length === 0) {
+        // Reset to scanner area
+        document.getElementById('tanaoroshiSummaryList').classList.add('hidden');
+        document.getElementById('tanaoroshiScannerArea').classList.remove('hidden');
+    } else {
+        updateTanaoroshiSummaryList();
+    }
+    
+    showToast('削除しました', 'info');
+}
+
+// Submit all counted products
+async function submitTanaoroshiCount() {
+    if (tanaoroshiCountedProducts.length === 0) {
+        showToast('❌ カウント済み製品がありません', 'error');
+        return;
+    }
+    
+    if (!confirm(`${tanaoroshiCountedProducts.length}件の製品カウントを送信しますか？`)) {
+        return;
+    }
+    
+    try {
+        // Show loading toast
+        showToast('📤 送信中...', 'info');
+        
+        // Prepare data
+        const submissionData = {
+            countedProducts: tanaoroshiCountedProducts,
+            submittedBy: currentWorker || 'Tablet User'
+        };
+        
+        console.log('📤 Submitting tanaoroshi:', submissionData);
+        
+        // Submit to API
+        const response = await fetch(`${API_BASE_URL}/tanaoroshi/submit`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(submissionData)
+        });
+        
+        if (!response.ok) {
+            throw new Error('Submission failed');
+        }
+        
+        const result = await response.json();
+        console.log('✅ Submission result:', result);
+        
+        showToast(`✅ ${result.processedCount}件の製品を更新しました`, 'success');
+        
+        // Reset system
+        setTimeout(() => {
+            initializeTanaoroshi();
+        }, 2000);
+        
+    } catch (error) {
+        console.error('Error submitting tanaoroshi:', error);
+        showToast('❌ 送信に失敗しました', 'error');
+    }
+}
+
+// ==================== END TANAOROSHI SYSTEM ====================

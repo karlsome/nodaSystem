@@ -1977,6 +1977,222 @@ app.post('/api/inventory/count-submit', async (req, res) => {
 
 // ==================== END INVENTORY COUNT API ENDPOINTS ====================
 
+// ==================== TANAOROSHI (棚卸し) API ENDPOINTS ====================
+
+// Get product info for tanaoroshi by 品番
+app.get('/api/tanaoroshi/:productNumber', async (req, res) => {
+    try {
+        const { productNumber } = req.params;
+        console.log(`📦 Fetching tanaoroshi data for: ${productNumber}`);
+
+        await client.connect();
+        
+        // Fetch master data
+        const masterDb = client.db("Sasaki_Coating_MasterDB");
+        const masterCollection = masterDb.collection("masterDB");
+        const masterData = await masterCollection.findOne({ 品番: productNumber });
+
+        if (!masterData) {
+            return res.status(404).json({ error: 'Product not found in master database' });
+        }
+
+        // Fetch current inventory data
+        const db = client.db("submittedDB");
+        const inventoryCollection = db.collection("nodaInventoryDB");
+        
+        // Get the latest inventory record for this product
+        const currentInventory = await inventoryCollection
+            .find({ 品番: productNumber })
+            .sort({ timeStamp: -1 })
+            .limit(1)
+            .toArray();
+
+        if (currentInventory.length === 0) {
+            return res.status(404).json({ error: 'No inventory record found for this product' });
+        }
+
+        const latestRecord = currentInventory[0];
+
+        res.json({
+            // Master data
+            品番: masterData.品番,
+            品名: masterData.品名,
+            モデル: masterData.モデル,
+            背番号: masterData.背番号,
+            形状: masterData.形状,
+            色: masterData.色,
+            収容数: parseInt(masterData.収容数) || 1,
+            imageURL: masterData.imageURL || '',
+            
+            // Current inventory data
+            currentPhysicalQuantity: latestRecord.physicalQuantity || 0,
+            currentReservedQuantity: latestRecord.reservedQuantity || 0,
+            currentAvailableQuantity: latestRecord.availableQuantity || 0,
+            currentRunningQuantity: latestRecord.runningQuantity || 0
+        });
+
+    } catch (error) {
+        console.error('Error fetching tanaoroshi data:', error);
+        res.status(500).json({ error: 'Failed to fetch tanaoroshi data', details: error.message });
+    }
+});
+
+// Submit tanaoroshi (棚卸し) count results
+app.post('/api/tanaoroshi/submit', async (req, res) => {
+    try {
+        const { countedProducts, submittedBy } = req.body;
+        
+        if (!countedProducts || !Array.isArray(countedProducts) || countedProducts.length === 0) {
+            return res.status(400).json({ error: 'No counted products provided' });
+        }
+
+        if (!submittedBy) {
+            return res.status(400).json({ error: 'Submitted by information required' });
+        }
+
+        console.log(`📦 Processing tanaoroshi submission from ${submittedBy} for ${countedProducts.length} products`);
+
+        await client.connect();
+        const db = client.db("submittedDB");
+        const inventoryCollection = db.collection("nodaInventoryDB");
+
+        const processedItems = [];
+        const errors = [];
+        const submissionTimestamp = new Date();
+
+        for (const product of countedProducts) {
+            try {
+                const { 品番, 背番号, newPhysicalQuantity, oldPhysicalQuantity, oldReservedQuantity } = product;
+
+                if (!品番 || !背番号 || newPhysicalQuantity === undefined) {
+                    errors.push({ 品番, error: 'Missing required fields' });
+                    continue;
+                }
+
+                // Calculate the difference
+                const difference = newPhysicalQuantity - oldPhysicalQuantity;
+                
+                // Calculate new available quantity (reservedQuantity stays the same)
+                const newAvailableQuantity = newPhysicalQuantity - oldReservedQuantity;
+                
+                // Get the previous running quantity to calculate new running quantity
+                const previousRecord = await inventoryCollection
+                    .find({ 品番: 品番 })
+                    .sort({ timeStamp: -1 })
+                    .limit(1)
+                    .toArray();
+                
+                const previousRunningQuantity = previousRecord.length > 0 ? previousRecord[0].runningQuantity : 0;
+                const newRunningQuantity = previousRunningQuantity + difference;
+
+                // Determine action and note
+                let action, note;
+                if (difference > 0) {
+                    action = `棚卸し (+${difference})`;
+                    note = `added ${difference} pieces because lacking`;
+                } else if (difference < 0) {
+                    action = `棚卸し (${difference})`;
+                    note = `deducted ${Math.abs(difference)} pieces because excess`;
+                } else {
+                    action = '棚卸し (±0)';
+                    note = 'count matches inventory';
+                }
+
+                // Create transaction record
+                const transactionRecord = {
+                    背番号: 背番号,
+                    品番: 品番,
+                    timeStamp: submissionTimestamp,
+                    Date: submissionTimestamp.toISOString().split('T')[0],
+                    
+                    physicalQuantity: newPhysicalQuantity,
+                    reservedQuantity: oldReservedQuantity, // Keep the same
+                    availableQuantity: newAvailableQuantity,
+                    runningQuantity: newRunningQuantity,
+                    lastQuantity: newPhysicalQuantity,
+                    
+                    action: action,
+                    source: `tablet 棚卸し - ${submittedBy}`,
+                    note: note
+                };
+
+                // Insert the new record
+                await inventoryCollection.insertOne(transactionRecord);
+
+                processedItems.push({
+                    品番: 品番,
+                    背番号: 背番号,
+                    oldQuantity: oldPhysicalQuantity,
+                    newQuantity: newPhysicalQuantity,
+                    difference: difference
+                });
+
+                console.log(`✅ Tanaoroshi processed for ${品番}: ${oldPhysicalQuantity} → ${newPhysicalQuantity} (${difference >= 0 ? '+' : ''}${difference})`);
+
+            } catch (itemError) {
+                console.error(`Error processing item ${product.品番}:`, itemError);
+                errors.push({ 品番: product.品番, error: itemError.message });
+            }
+        }
+
+        res.json({
+            success: true,
+            processedCount: processedItems.length,
+            errorCount: errors.length,
+            processedItems: processedItems,
+            errors: errors.length > 0 ? errors : undefined,
+            submittedBy: submittedBy,
+            submittedAt: submissionTimestamp.toISOString()
+        });
+
+    } catch (error) {
+        console.error('Error submitting tanaoroshi:', error);
+        res.status(500).json({ error: 'Failed to submit tanaoroshi', details: error.message });
+    }
+});
+
+// ==================== END TANAOROSHI API ENDPOINTS ====================
+
+// ==================== MASTER DATA API ENDPOINT ====================
+
+// Get master data by 品番
+app.get('/api/master-data/:productNumber', async (req, res) => {
+    try {
+        const { productNumber } = req.params;
+
+        await client.connect();
+        const masterDb = client.db("Sasaki_Coating_MasterDB");
+        const masterCollection = masterDb.collection("masterDB");
+
+        // Find the master data by 品番
+        const masterData = await masterCollection.findOne({ 品番: productNumber });
+
+        if (!masterData) {
+            return res.status(404).json({ error: 'Master data not found' });
+        }
+
+        res.json({
+            品番: masterData.品番,
+            モデル: masterData.モデル,
+            背番号: masterData.背番号,
+            品名: masterData.品名,
+            形状: masterData.形状,
+            色: masterData.色,
+            収容数: masterData.収容数,
+            工場: masterData.工場,
+            材料: masterData.材料,
+            材料背番号: masterData.材料背番号,
+            imageURL: masterData.imageURL
+        });
+
+    } catch (error) {
+        console.error('Error fetching master data:', error);
+        res.status(500).json({ error: 'Failed to fetch master data', details: error.message });
+    }
+});
+
+// ==================== END MASTER DATA API ENDPOINT ====================
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
     res.json({ status: 'OK', timestamp: new Date().toISOString() });
