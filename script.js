@@ -404,6 +404,43 @@ function createPickingRequestCard(request) {
     return card;
 }
 
+// Enrich line items with master data (収容数) and calculate box quantities
+async function enrichLineItemsWithMasterData(lineItems) {
+    for (const item of lineItems) {
+        try {
+            const masterData = await fetchMasterData(item.品番);
+            if (masterData && masterData.収容数) {
+                const 収容数 = parseInt(masterData.収容数);
+                item.収容数 = 収容数;
+                item.boxQuantity = Math.ceil(item.quantity / 収容数);
+            } else {
+                // If no master data, assume 1:1 (no box conversion)
+                item.収容数 = 1;
+                item.boxQuantity = item.quantity;
+            }
+        } catch (error) {
+            console.error(`Error fetching master data for ${item.品番}:`, error);
+            // Fallback: no box conversion
+            item.収容数 = 1;
+            item.boxQuantity = item.quantity;
+        }
+    }
+}
+
+// Fetch master data for a specific product
+async function fetchMasterData(品番) {
+    try {
+        const response = await fetch(`${API_BASE_URL}/master-data/${品番}`);
+        if (!response.ok) {
+            throw new Error('Master data not found');
+        }
+        return await response.json();
+    } catch (error) {
+        console.error(`Error fetching master data for ${品番}:`, error);
+        return null;
+    }
+}
+
 async function viewPickingDetail(requestNumber) {
     try {
         currentRequestNumber = requestNumber;
@@ -424,7 +461,7 @@ async function viewPickingDetail(requestNumber) {
     }
 }
 
-function displayPickingDetail(request) {
+async function displayPickingDetail(request) {
     if (!request) {
         console.error('No request provided to displayPickingDetail');
         return;
@@ -435,6 +472,9 @@ function displayPickingDetail(request) {
         console.error('Request missing lineItems:', request);
         request.lineItems = [];
     }
+    
+    // Enrich line items with master data and box quantities
+    await enrichLineItemsWithMasterData(request.lineItems);
     
     // Update header
     document.getElementById('pickingDetailTitle').textContent = `ピッキング詳細: ${request.requestNumber}`;
@@ -526,6 +566,13 @@ function createPickingItemElement(item, index) {
         `<p class="text-xs text-gray-500">完了: ${new Date(item.completedAt).toLocaleString('ja-JP')}</p>
          <p class="text-xs text-gray-500">作業者: ${item.completedBy || 'N/A'}</p>` : '';
 
+    // Determine display quantity (box or pieces)
+    const displayQuantity = item.boxQuantity !== undefined ? item.boxQuantity : item.quantity;
+    const quantityUnit = item.boxQuantity !== undefined ? '個' : '個';
+    const quantityDetail = item.boxQuantity !== undefined && item.収容数 > 1 
+        ? `<span class="text-xs text-gray-500">(${item.quantity}個 ÷ ${item.収容数})</span>` 
+        : '';
+
     itemDiv.innerHTML = `
         <div class="flex items-center justify-between">
             <div class="flex items-center space-x-4">
@@ -538,14 +585,17 @@ function createPickingItemElement(item, index) {
                         <div class="device-status-indicator w-3 h-3 rounded-full ${item.status === 'in-progress' ? 'bg-yellow-400' : item.status === 'completed' ? 'bg-green-500' : 'bg-gray-400'} mr-2"></div>
                         <p class="text-gray-600">背番号: <span class="font-medium">${item.背番号}</span></p>
                     </div>
-                    <p class="text-sm text-gray-500">数量: ${item.quantity}</p>
+                    <p class="text-sm text-gray-500">
+                        数量: ${displayQuantity}${quantityUnit} ${quantityDetail}
+                    </p>
                     <div class="completion-info mt-1">${completedInfo}</div>
                 </div>
             </div>
             <div class="text-right flex items-center space-x-4">
                 <div>
-                    <div class="text-2xl font-bold text-gray-900">${item.quantity}</div>
-                    <div class="text-sm text-gray-500">個</div>
+                    <div class="text-2xl font-bold text-gray-900">${displayQuantity}</div>
+                    <div class="text-sm text-gray-500">${quantityUnit}</div>
+                    ${quantityDetail ? `<div class="text-xs text-gray-400 mt-1">${item.quantity}個</div>` : ''}
                 </div>
                 <div class="flex flex-col items-center space-y-2">
                     <div class="text-2xl status-icon">
