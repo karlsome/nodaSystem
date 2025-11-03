@@ -25,7 +25,17 @@ app.use(express.static('.'));
 
 // MongoDB connection
 let db;
-const client = new MongoClient(process.env.MONGODB_URI);
+
+// MongoDB options for local development (bypass SSL certificate verification)
+const mongoOptions = {
+    tls: true,
+    tlsAllowInvalidCertificates: true,
+    tlsAllowInvalidHostnames: true,
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+};
+
+const client = new MongoClient(process.env.MONGODB_URI, mongoOptions);
 
 // Connected devices storage
 const connectedDevices = new Map(); // deviceId -> socket
@@ -2007,11 +2017,9 @@ app.get('/api/tanaoroshi/:productNumber', async (req, res) => {
             .limit(1)
             .toArray();
 
-        if (currentInventory.length === 0) {
-            return res.status(404).json({ error: 'No inventory record found for this product' });
-        }
-
-        const latestRecord = currentInventory[0];
+        // Check if product exists in inventory
+        const isNewProduct = currentInventory.length === 0;
+        const latestRecord = isNewProduct ? null : currentInventory[0];
 
         res.json({
             // Master data
@@ -2024,11 +2032,12 @@ app.get('/api/tanaoroshi/:productNumber', async (req, res) => {
             収容数: parseInt(masterData.収容数) || 1,
             imageURL: masterData.imageURL || '',
             
-            // Current inventory data
-            currentPhysicalQuantity: latestRecord.physicalQuantity || 0,
-            currentReservedQuantity: latestRecord.reservedQuantity || 0,
-            currentAvailableQuantity: latestRecord.availableQuantity || 0,
-            currentRunningQuantity: latestRecord.runningQuantity || 0
+            // Current inventory data (0 if new product)
+            isNewProduct: isNewProduct,
+            currentPhysicalQuantity: isNewProduct ? 0 : (latestRecord.physicalQuantity || 0),
+            currentReservedQuantity: isNewProduct ? 0 : (latestRecord.reservedQuantity || 0),
+            currentAvailableQuantity: isNewProduct ? 0 : (latestRecord.availableQuantity || 0),
+            currentRunningQuantity: isNewProduct ? 0 : (latestRecord.runningQuantity || 0)
         });
 
     } catch (error) {
@@ -2062,13 +2071,48 @@ app.post('/api/tanaoroshi/submit', async (req, res) => {
 
         for (const product of countedProducts) {
             try {
-                const { 品番, 背番号, newPhysicalQuantity, oldPhysicalQuantity, oldReservedQuantity } = product;
+                const { 品番, 背番号, newPhysicalQuantity, oldPhysicalQuantity, oldReservedQuantity, isNewProduct } = product;
 
                 if (!品番 || !背番号 || newPhysicalQuantity === undefined) {
                     errors.push({ 品番, error: 'Missing required fields' });
                     continue;
                 }
 
+                // Handle new products (not in inventory before)
+                if (isNewProduct) {
+                    const transactionRecord = {
+                        背番号: 背番号,
+                        品番: 品番,
+                        timeStamp: submissionTimestamp,
+                        Date: submissionTimestamp.toISOString().split('T')[0],
+                        
+                        physicalQuantity: newPhysicalQuantity,
+                        reservedQuantity: 0,
+                        availableQuantity: newPhysicalQuantity,
+                        runningQuantity: newPhysicalQuantity,
+                        lastQuantity: 0,
+                        
+                        action: `棚卸し (+${newPhysicalQuantity})`,
+                        source: `tablet 棚卸し - ${submittedBy}`,
+                        note: `added ${newPhysicalQuantity} because missing from inventory`
+                    };
+
+                    await inventoryCollection.insertOne(transactionRecord);
+
+                    processedItems.push({
+                        品番: 品番,
+                        背番号: 背番号,
+                        oldQuantity: 0,
+                        newQuantity: newPhysicalQuantity,
+                        difference: newPhysicalQuantity,
+                        isNew: true
+                    });
+
+                    console.log(`✅ New product added to inventory: ${品番} with ${newPhysicalQuantity} pieces`);
+                    continue;
+                }
+
+                // Handle existing products
                 // Calculate the difference
                 const difference = newPhysicalQuantity - oldPhysicalQuantity;
                 

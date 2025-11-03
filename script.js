@@ -2501,6 +2501,23 @@ async function startCountingProduct(productNumber, referenceQuantity) {
         const productData = await response.json();
         console.log('✅ Product data fetched:', productData);
         
+        // Check if this is a new product (not in inventory)
+        if (productData.isNewProduct) {
+            const confirmAdd = confirm(
+                `⚠️ このアイテムは在庫にありません。\n` +
+                `品番: ${productData.品番}\n` +
+                `品名: ${productData.品名 || '-'}\n\n` +
+                `追加しますか？`
+            );
+            
+            if (!confirmAdd) {
+                showToast('キャンセルしました', 'info');
+                return;
+            }
+            
+            showToast('📦 新規製品として追加します', 'info');
+        }
+        
         // Initialize current product object
         currentTanaoroshiProduct = {
             品番: productData.品番,
@@ -2508,6 +2525,7 @@ async function startCountingProduct(productNumber, referenceQuantity) {
             背番号: productData.背番号,
             収容数: productData.収容数,
             imageURL: productData.imageURL,
+            isNewProduct: productData.isNewProduct || false,
             currentPhysicalQuantity: productData.currentPhysicalQuantity,
             currentReservedQuantity: productData.currentReservedQuantity,
             currentAvailableQuantity: productData.currentAvailableQuantity,
@@ -2549,9 +2567,14 @@ function openTanaoroshiCountingModal() {
     // Calculate expected boxes
     const expectedBoxes = Math.ceil(product.currentPhysicalQuantity / product.収容数);
     
-    // Set expected count
-    document.getElementById('modalExpectedPieces').textContent = `${product.currentPhysicalQuantity} 個`;
-    document.getElementById('modalExpectedBoxes').textContent = `= ${expectedBoxes} 箱`;
+    // Set expected count with special styling for new products
+    if (product.isNewProduct) {
+        document.getElementById('modalExpectedPieces').innerHTML = `<span class="text-gray-400">0 個</span> <span class="text-xs text-orange-600 ml-2">(在庫なし)</span>`;
+        document.getElementById('modalExpectedBoxes').innerHTML = `<span class="text-gray-400">= 0 箱</span>`;
+    } else {
+        document.getElementById('modalExpectedPieces').textContent = `${product.currentPhysicalQuantity} 個`;
+        document.getElementById('modalExpectedBoxes').textContent = `= ${expectedBoxes} 箱`;
+    }
     document.getElementById('modalBoxInfo').textContent = `1箱 = ${product.収容数}個`;
     
     // Reset counter
@@ -2669,15 +2692,30 @@ async function completeTanaoroshiCount() {
     const countedPieces = currentTanaoroshiProduct.countedPieces;
     const expectedPieces = currentTanaoroshiProduct.currentPhysicalQuantity;
     const difference = countedPieces - expectedPieces;
+    const isNewProduct = currentTanaoroshiProduct.isNewProduct || false;
     
-    // If there's a discrepancy, show confirmation
-    if (difference !== 0) {
-        const boxDifference = Math.ceil(Math.abs(difference) / currentTanaoroshiProduct.収容数);
-        const action = difference > 0 ? '追加' : '削減';
-        const message = `在庫が ${Math.abs(difference)}個 (${boxDifference}箱) ${action}されます。よろしいですか？`;
+    // For new products, show special confirmation
+    if (isNewProduct) {
+        if (countedPieces === 0) {
+            showToast('❌ カウント数を入力してください', 'error');
+            return;
+        }
+        
+        const message = `新規製品を在庫に追加します。\n品番: ${currentTanaoroshiProduct.品番}\n数量: ${countedPieces}個 (${currentTanaoroshiProduct.countedBoxes}箱)\n\nよろしいですか？`;
         
         if (!confirm(message)) {
             return;
+        }
+    } else {
+        // If there's a discrepancy, show confirmation
+        if (difference !== 0) {
+            const boxDifference = Math.ceil(Math.abs(difference) / currentTanaoroshiProduct.収容数);
+            const action = difference > 0 ? '追加' : '削減';
+            const message = `在庫が ${Math.abs(difference)}個 (${boxDifference}箱) ${action}されます。よろしいですか？`;
+            
+            if (!confirm(message)) {
+                return;
+            }
         }
     }
     
@@ -2688,6 +2726,7 @@ async function completeTanaoroshiCount() {
         背番号: currentTanaoroshiProduct.背番号,
         収容数: currentTanaoroshiProduct.収容数,
         imageURL: currentTanaoroshiProduct.imageURL,
+        isNewProduct: isNewProduct,
         oldPhysicalQuantity: expectedPieces,
         newPhysicalQuantity: countedPieces,
         oldReservedQuantity: currentTanaoroshiProduct.currentReservedQuantity,
@@ -2744,6 +2783,7 @@ function createTanaoroshiSummaryRow(product, index) {
     const newBoxes = product.countedBoxes;
     const diffClass = product.difference > 0 ? 'text-green-600' : product.difference < 0 ? 'text-red-600' : 'text-gray-600';
     const diffSymbol = product.difference > 0 ? '+' : '';
+    const isNewProduct = product.isNewProduct || false;
     
     row.innerHTML = `
         <div class="flex items-center justify-between">
@@ -2756,11 +2796,16 @@ function createTanaoroshiSummaryRow(product, index) {
                     </div>
                 `}
                 <div class="flex-1">
-                    <h4 class="font-bold text-gray-900">${product.品番}</h4>
+                    <div class="flex items-center space-x-2">
+                        <h4 class="font-bold text-gray-900">${product.品番}</h4>
+                        ${isNewProduct ? `
+                            <span class="px-2 py-1 bg-orange-100 text-orange-700 text-xs font-bold rounded">NEW</span>
+                        ` : ''}
+                    </div>
                     <p class="text-sm text-gray-600">${product.品名 || '-'}</p>
                     <div class="flex items-center space-x-4 mt-2">
                         <span class="text-sm">
-                            <span class="text-red-600 line-through">${product.oldPhysicalQuantity}個 (${oldBoxes}箱)</span>
+                            <span class="text-red-600 ${isNewProduct ? '' : 'line-through'}">${product.oldPhysicalQuantity}個 (${oldBoxes}箱)</span>
                         </span>
                         <i class="fas fa-arrow-right text-gray-400 text-xs"></i>
                         <span class="text-sm">
@@ -2802,6 +2847,7 @@ function editTanaoroshiProduct(index) {
         背番号: product.背番号,
         収容数: product.収容数,
         imageURL: product.imageURL,
+        isNewProduct: product.isNewProduct || false,
         currentPhysicalQuantity: product.oldPhysicalQuantity,
         currentReservedQuantity: product.oldReservedQuantity,
         currentAvailableQuantity: product.oldPhysicalQuantity - product.oldReservedQuantity,
