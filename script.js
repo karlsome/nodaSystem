@@ -420,6 +420,9 @@ function createPickingRequestCard(request) {
     const statusText = getStatusText(request.status);
     const formattedDate = new Date(request.createdAt).toLocaleDateString('ja-JP');
     
+    // Color the suffix based on order number
+    const coloredRequestNumber = colorizeRequestNumber(request.requestNumber);
+    
     card.innerHTML = `
         <div class="flex items-center justify-between">
             <div class="flex items-center space-x-4">
@@ -427,7 +430,7 @@ function createPickingRequestCard(request) {
                     <i class="fas fa-hand-paper text-green-600 text-2xl"></i>
                 </div>
                 <div>
-                    <h3 class="text-xl font-bold text-gray-900">${request.requestNumber}</h3>
+                    <h3 class="text-xl font-bold text-gray-900">${coloredRequestNumber}</h3>
                     <p class="text-gray-600">
                         ${request.itemCount}項目 • 合計数量: ${request.totalQuantity}
                     </p>
@@ -443,6 +446,30 @@ function createPickingRequestCard(request) {
     `;
     
     return card;
+}
+
+// Helper function to colorize request number suffix
+function colorizeRequestNumber(requestNumber) {
+    // Extract the last part (e.g., -001, -002, -003)
+    const match = requestNumber.match(/^(.+)(-)(\d+)$/);
+    
+    if (!match) return requestNumber; // Return as-is if pattern doesn't match
+    
+    const prefix = match[1]; // e.g., "NODAPO-20251104"
+    const dash = match[2];   // "-"
+    const suffix = match[3]; // e.g., "001"
+    const suffixNum = parseInt(suffix);
+    
+    let colorClass = '';
+    if (suffixNum === 1) {
+        colorClass = 'text-blue-600'; // -001 is blue
+    } else if (suffixNum === 2) {
+        colorClass = 'text-purple-800'; // -002 is dark purple
+    } else {
+        colorClass = 'text-red-600'; // -003 and above is red
+    }
+    
+    return `${prefix}<span class="${colorClass}">${dash}${suffix}</span>`;
 }
 
 // Enrich line items with master data (収容数) and calculate box quantities
