@@ -288,7 +288,9 @@ function initializeMQTT() {
             payload: JSON.stringify({ status: 'offline', timestamp: Date.now() }),
             qos: 1,
             retain: true
-        }
+        },
+        // SSL/TLS options for HiveMQ Cloud
+        rejectUnauthorized: false  // Skip certificate verification (similar to MongoDB)
     };
     
     // Only add credentials if they're provided

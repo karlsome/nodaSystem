@@ -65,10 +65,10 @@ const int numNetworks = sizeof(ssidList) / sizeof(ssidList[0]);
 // Server configuration
 const char* websockets_server = "nodasystem.onrender.com";
 const int websockets_port = 443;  // For REST API fallback
-const char* mqtt_server = "test.mosquitto.org";  // Public test broker for initial testing
-const int mqtt_port = 1883;  // Standard MQTT (non-SSL for testing)
-const char* mqtt_user = "";  // No auth required for test broker
-const char* mqtt_password = "";  // No auth required for test broker
+const char* mqtt_server = "351e74fee4f548758a62972322c7eb29.s1.eu.hivemq.cloud";  // HiveMQ Cloud broker
+const int mqtt_port = 8883;  // TLS/SSL MQTT port
+const char* mqtt_user = "nodasims";  // HiveMQ Cloud username
+const char* mqtt_password = "Sasaki1234";  // HiveMQ Cloud password
 
 // Device configuration
 const String DEVICE_ID = "C74"; // 背番号 - Change for each device
@@ -108,7 +108,7 @@ const String TOPIC_HEARTBEAT = "noda/device/" + DEVICE_ID + "/heartbeat";
 const unsigned long BTN_DEBOUNCE_MS = 30;
 
 // MQTT client
-WiFiClient wifiClient;  // Use regular WiFiClient for non-SSL MQTT
+WiFiClientSecure wifiClient;  // Use WiFiClientSecure for TLS/SSL MQTT (HiveMQ Cloud)
 PubSubClient mqttClient(wifiClient);
 
 // Device state
@@ -529,13 +529,16 @@ void checkDeviceStatusViaAPI() {
 
 // MQTT connection and management functions
 void connectToMQTT() {
-  Serial.println("🔌 Connecting to MQTT broker...");
+  Serial.println("🔌 Connecting to HiveMQ Cloud broker with TLS...");
   
-  // Configure for standard MQTT (no SSL for testing)
+  // Configure WiFiClientSecure for TLS/SSL connection
+  wifiClient.setInsecure(); // Skip certificate verification for simplicity (use CA cert in production)
+  
+  // Configure MQTT client
   mqttClient.setServer(mqtt_server, mqtt_port);
   mqttClient.setCallback(mqttCallback);
-  mqttClient.setKeepAlive(30); // Reduced to 30 seconds to match server
-  mqttClient.setSocketTimeout(15); // Reduced to 15 seconds for faster failure detection
+  mqttClient.setKeepAlive(30); // 30 seconds keepalive
+  mqttClient.setSocketTimeout(15); // 15 seconds timeout for faster failure detection
   
   // Set buffer sizes for better reliability
   mqttClient.setBufferSize(1024); // Increase buffer for larger messages
