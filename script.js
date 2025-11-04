@@ -619,18 +619,11 @@ function createPickingItemElement(item, index) {
         `<p class="text-xs text-gray-500">完了: ${new Date(item.completedAt).toLocaleString('ja-JP')}</p>
          <p class="text-xs text-gray-500">作業者: ${item.completedBy || 'N/A'}</p>` : '';
 
-    // Determine display quantity (box or pieces)
+    // Use box quantity if available, otherwise use piece quantity
     const displayQuantity = item.boxQuantity !== undefined ? item.boxQuantity : item.quantity;
     const quantityUnit = item.boxQuantity !== undefined ? '個' : '個';
     const quantityDetail = item.boxQuantity !== undefined && item.収容数 > 1 
         ? `<span class="text-xs text-gray-500">(${item.quantity}個 ÷ ${item.収容数})</span>` 
-        : '';
-
-    // Use box quantity if available, otherwise use piece quantity
-    const displayQuantity = item.boxQuantity !== undefined ? item.boxQuantity : item.quantity;
-    const quantityUnit = item.boxQuantity !== undefined ? '個' : t('pieces');
-    const quantityDetail = item.boxQuantity !== undefined && item.収容数 > 1 
-        ? `<span class="text-xs text-gray-500">(${item.quantity}${t('pieces')} ÷ ${item.収容数})</span>` 
         : '';
 
     itemDiv.innerHTML = `
