@@ -29,14 +29,20 @@ document.addEventListener('DOMContentLoaded', function() {
 
 function initializeApp() {
     console.log('🔄 Initializing app...');
+
+    // Initialize language system
+    if (typeof initializeLanguage === 'function') {
+        initializeLanguage();
+    }
+
     updateCurrentTime();
     setInterval(updateCurrentTime, 1000); // Update time every second
-    
+
     // Check if already logged in
     const savedWorker = localStorage.getItem('currentWorker');
     console.log('💾 Checking localStorage for currentWorker:', savedWorker);
     console.log('💾 localStorage available:', typeof(Storage) !== "undefined");
-    
+
     if (savedWorker) {
         console.log('✅ Found saved worker, auto-logging in:', savedWorker);
         currentWorker = savedWorker;
@@ -114,7 +120,7 @@ function initializeSocket() {
         
         socket.on('error', (error) => {
             console.error('Socket error:', error);
-            showToast('通信エラーが発生しました', 'error');
+            showToast(t('connection-error'), 'error');
         });
     }
 }
@@ -176,14 +182,15 @@ function hideWorkerInfo() {
 function updateConnectionStatus(connected) {
     const statusElement = document.getElementById('connectionStatus');
     const textElement = document.getElementById('connectionText');
-    
+    const t = window.t || ((key) => key);
+
     if (statusElement && textElement) {
         if (connected) {
             statusElement.className = 'w-3 h-3 bg-green-400 rounded-full animate-pulse';
-            textElement.textContent = '接続中';
+            textElement.textContent = t('connection-status-connected');
         } else {
             statusElement.className = 'w-3 h-3 bg-red-400 rounded-full';
-            textElement.textContent = '切断';
+            textElement.textContent = t('connection-status-disconnected');
         }
     }
 }
@@ -200,7 +207,7 @@ function updateLockUI(lockStatus) {
         if (isLocked) {
             button.disabled = true;
             button.classList.add('opacity-50', 'cursor-not-allowed');
-            button.textContent = '他の注文が処理中です';
+            button.textContent = t('other-order-processing');
         } else {
             button.disabled = false;
             button.classList.remove('opacity-50', 'cursor-not-allowed');
@@ -230,7 +237,7 @@ function showLockNotification(activeRequestNumber, startedBy) {
         <div class="flex">
             <div class="ml-3">
                 <p class="text-sm">
-                    <strong>システムロック中:</strong> 注文番号 ${activeRequestNumber} が ${startedBy} によって処理中です
+                    <strong>${t('system-lock-strong')}</strong> ${t('system-lock-message')} ${activeRequestNumber} ${t('system-lock-by')} ${startedBy} ${t('system-lock-processing')}
                 </p>
             </div>
         </div>
@@ -467,7 +474,9 @@ async function displayPickingDetail(request) {
         console.error('No request provided to displayPickingDetail');
         return;
     }
-    
+
+    const t = window.t || ((key) => key);
+
     // Ensure lineItems exists
     if (!request.lineItems) {
         console.error('Request missing lineItems:', request);
@@ -478,8 +487,8 @@ async function displayPickingDetail(request) {
     await enrichLineItemsWithMasterData(request.lineItems);
     
     // Update header
-    document.getElementById('pickingDetailTitle').textContent = `ピッキング詳細: ${request.requestNumber}`;
-    document.getElementById('pickingDetailSubtitle').textContent = `${request.lineItems.length}項目のピッキング依頼`;
+    document.getElementById('pickingDetailTitle').textContent = `${t('picking-detail')}: ${request.requestNumber}`;
+    document.getElementById('pickingDetailSubtitle').textContent = `${request.lineItems.length}${t('items-suffix')}${t('items-picking')}`;
     
     // Update request info
     const infoContainer = document.getElementById('pickingRequestInfo');
@@ -522,16 +531,59 @@ async function displayPickingDetail(request) {
     if (request.status === 'pending') {
         startBtn.disabled = false;
         startBtn.onclick = startPickingProcess;
-        startBtn.innerHTML = '<i class="fas fa-play mr-2"></i>ピッキング開始';
+        startBtn.innerHTML = `<i class="fas fa-play mr-2"></i>${t('start-button')}`;
     } else if (request.status === 'in-progress') {
         startBtn.disabled = true;
         startBtn.onclick = null;
-        startBtn.innerHTML = '<i class="fas fa-clock mr-2"></i>進行中...';
+        startBtn.innerHTML = `<i class="fas fa-clock mr-2"></i>${t('in-progress-button')}`;
     } else if (request.status === 'completed') {
         startBtn.disabled = false;
         startBtn.onclick = completeAndBackToList;
-        startBtn.innerHTML = '<i class="fas fa-check mr-2"></i>完了';
+        startBtn.innerHTML = `<i class="fas fa-check mr-2"></i>${t('completed-button')}`;
         startBtn.className = 'px-8 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors text-lg font-medium';
+    }
+}
+
+// Enrich line items with master data to calculate box quantities
+async function enrichLineItemsWithMasterData(lineItems) {
+    try {
+        for (const item of lineItems) {
+            // Fetch master data for this item
+            const masterData = await fetchMasterData(item.品番);
+            
+            if (masterData && masterData.収容数) {
+                const 収容数 = parseInt(masterData.収容数);
+                if (収容数 > 0) {
+                    // Calculate box quantity (pieces ÷ capacity per box)
+                    item.boxQuantity = Math.ceil(item.quantity / 収容数);
+                    item.収容数 = 収容数;
+                } else {
+                    item.boxQuantity = item.quantity; // Fallback if 収容数 is 0
+                    item.収容数 = 1;
+                }
+            } else {
+                // If no master data found, show original quantity
+                item.boxQuantity = item.quantity;
+                item.収容数 = 1;
+            }
+        }
+    } catch (error) {
+        console.error('Error enriching line items with master data:', error);
+    }
+}
+
+// Fetch master data from server
+async function fetchMasterData(品番) {
+    try {
+        const response = await fetch(`${API_BASE_URL}/master-data/${encodeURIComponent(品番)}`);
+        if (response.ok) {
+            const data = await response.json();
+            return data;
+        }
+        return null;
+    } catch (error) {
+        console.error(`Error fetching master data for ${品番}:`, error);
+        return null;
     }
 }
 
@@ -572,6 +624,13 @@ function createPickingItemElement(item, index) {
     const quantityUnit = item.boxQuantity !== undefined ? '個' : '個';
     const quantityDetail = item.boxQuantity !== undefined && item.収容数 > 1 
         ? `<span class="text-xs text-gray-500">(${item.quantity}個 ÷ ${item.収容数})</span>` 
+        : '';
+
+    // Use box quantity if available, otherwise use piece quantity
+    const displayQuantity = item.boxQuantity !== undefined ? item.boxQuantity : item.quantity;
+    const quantityUnit = item.boxQuantity !== undefined ? '個' : t('pieces');
+    const quantityDetail = item.boxQuantity !== undefined && item.収容数 > 1 
+        ? `<span class="text-xs text-gray-500">(${item.quantity}${t('pieces')} ÷ ${item.収容数})</span>` 
         : '';
 
     itemDiv.innerHTML = `
@@ -616,12 +675,12 @@ function createPickingItemElement(item, index) {
 // Start picking process
 async function startPickingProcess() {
     if (!currentWorker) {
-        showToast('ログインが必要です', 'error');
+        showToast(t('login-required'), 'error');
         return;
     }
     
     if (!currentRequestNumber) {
-        showToast('ピッキング依頼が選択されていません', 'error');
+        showToast(t('no-request-selected'), 'error');
         return;
     }
     
@@ -666,12 +725,12 @@ async function startPickingProcess() {
 /*
 async function startIndividualPicking(lineNumber, deviceId) {
     if (!currentWorker) {
-        showToast('ログインが必要です', 'error');
+        showToast(t('login-required'), 'error');
         return;
     }
     
     if (!currentRequestNumber) {
-        showToast('ピッキング依頼が選択されていません', 'error');
+        showToast(t('no-request-selected'), 'error');
         return;
     }
     
@@ -836,7 +895,7 @@ function updateDeviceStatusInUI(deviceData) {
                     statusText.textContent = 'ピッキング中';
                     statusText.className = 'device-status-text text-green-600 font-medium';
                 } else if (status === 'standby') {
-                    statusText.textContent = 'スタンバイ';
+                    statusText.textContent = t('device-status-standby');
                     statusText.className = 'device-status-text text-blue-600';
                 } else {
                     statusText.textContent = 'オフライン';
@@ -912,6 +971,8 @@ function completeAndBackToList() {
 
 function displayNoRequests() {
     const container = document.getElementById('pickingRequestsList');
+    const t = window.t || ((key) => key);
+
     container.innerHTML = `
         <div class="text-center py-12">
             <div class="w-24 h-24 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-6">
@@ -945,7 +1006,7 @@ async function refreshPickingRequests() {
         await refreshESP32Devices(currentRequestNumber);
     }
     
-    showToast('ピッキング依頼を更新しました', 'success');
+    showToast(t('requests-refreshed'), 'success');
 }
 
 // Utility functions
@@ -959,11 +1020,12 @@ function getStatusClass(status) {
 }
 
 function getStatusText(status) {
+    const t = window.t || ((key) => key); // Fallback if translation not loaded
     switch (status) {
-        case 'pending': return '待機中';
-        case 'in-progress': return '進行中';
-        case 'completed': return '完了';
-        default: return '不明';
+        case 'pending': return t('status-pending');
+        case 'in-progress': return t('status-in-progress');
+        case 'completed': return t('status-completed');
+        default: return t('status-unknown');
     }
 }
 
@@ -1118,7 +1180,7 @@ async function processInventoryScan(scanValue) {
         const parts = scanValue.split(',');
 
         if (parts.length !== 2) {
-            showToast('無効なQRコード形式です。形式: 品番,数量', 'error');
+            showToast(t('invalid-qr-format'), 'error');
             return;
         }
 
@@ -1126,7 +1188,7 @@ async function processInventoryScan(scanValue) {
         const scannedQuantity = parseInt(parts[1].trim());
 
         if (!品番 || isNaN(scannedQuantity) || scannedQuantity < 0) {
-            showToast('品番または数量が無効です', 'error');
+            showToast(t('invalid-product-quantity'), 'error');
             return;
         }
 
@@ -1164,7 +1226,7 @@ async function processInventoryScan(scanValue) {
 
     } catch (error) {
         console.error('Error processing inventory scan:', error);
-        showToast('スキャン処理中にエラーが発生しました', 'error');
+        showToast(t('scan-error'), 'error');
     }
 }
 
@@ -1209,6 +1271,8 @@ function updateInventoryList() {
     // Update count
     countDisplay.textContent = `(${inventoryScannedItems.length})`;
 
+    const t = window.t || ((key) => key);
+
     // Show/hide empty state
     if (inventoryScannedItems.length === 0) {
         if (emptyState) {
@@ -1217,8 +1281,8 @@ function updateInventoryList() {
         listContainer.innerHTML = `
             <div id="inventoryEmptyState" class="p-12 text-center text-gray-500">
                 <i class="fas fa-barcode text-6xl mb-4 text-gray-300"></i>
-                <p class="text-lg">QRコードをスキャンしてください</p>
-                <p class="text-sm mt-2">スキャンした商品がここに表示されます</p>
+                <p class="text-lg">${t('scan-prompt')}</p>
+                <p class="text-sm mt-2">${t('scan-prompt-desc')}</p>
             </div>
         `;
         return;
@@ -1242,6 +1306,8 @@ function createInventoryItemElement(item, index) {
     const div = document.createElement('div');
     div.className = 'p-6 hover:bg-gray-50 transition-colors';
 
+    const t = window.t || ((key) => key);
+    const currentLang = window.currentLanguage || 'ja';
     const difference = item.newQuantity - item.currentQuantity;
     const differenceClass = difference > 0 ? 'text-green-600' : difference < 0 ? 'text-red-600' : 'text-gray-600';
     const differenceIcon = difference > 0 ? 'fa-arrow-up' : difference < 0 ? 'fa-arrow-down' : 'fa-equals';
@@ -1254,15 +1320,15 @@ function createInventoryItemElement(item, index) {
                 </div>
                 <div class="flex-1">
                     <h4 class="text-lg font-bold text-gray-900">${item.品番}</h4>
-                    <p class="text-sm text-gray-600">背番号: ${item.背番号}</p>
-                    <p class="text-xs text-gray-500">${new Date(item.scannedAt).toLocaleString('ja-JP')}</p>
+                    <p class="text-sm text-gray-600">${t('device-number')}: ${item.背番号}</p>
+                    <p class="text-xs text-gray-500">${new Date(item.scannedAt).toLocaleString(currentLang === 'ja' ? 'ja-JP' : 'en-US')}</p>
                 </div>
             </div>
 
             <div class="flex items-center space-x-6">
                 <!-- Current Quantity -->
                 <div class="text-center">
-                    <p class="text-sm text-gray-500">現在の在庫</p>
+                    <p class="text-sm text-gray-500">${t('current-inventory')}</p>
                     <p class="text-2xl font-bold text-gray-900">${item.currentQuantity}</p>
                 </div>
 
@@ -1273,7 +1339,7 @@ function createInventoryItemElement(item, index) {
 
                 <!-- New Quantity (editable) -->
                 <div class="text-center">
-                    <p class="text-sm text-gray-500">新しい在庫</p>
+                    <p class="text-sm text-gray-500">${t('new-inventory')}</p>
                     <input
                         type="number"
                         value="${item.newQuantity}"
@@ -1285,7 +1351,7 @@ function createInventoryItemElement(item, index) {
 
                 <!-- Difference -->
                 <div class="text-center min-w-[100px]">
-                    <p class="text-sm text-gray-500">差分</p>
+                    <p class="text-sm text-gray-500">${t('difference')}</p>
                     <p class="text-xl font-bold ${differenceClass}">
                         <i class="fas ${differenceIcon} mr-1"></i>
                         ${Math.abs(difference)}
@@ -1296,7 +1362,7 @@ function createInventoryItemElement(item, index) {
                 <button
                     onclick="removeInventoryItem(${index})"
                     class="w-10 h-10 bg-red-100 hover:bg-red-200 text-red-600 rounded-lg transition-colors"
-                    title="削除">
+                    title="${t('clear-button')}">
                     <i class="fas fa-trash"></i>
                 </button>
             </div>
@@ -1331,30 +1397,30 @@ function removeInventoryItem(index) {
 // Clear all scanned items
 function clearInventoryList() {
     if (inventoryScannedItems.length === 0) {
-        showToast('リストは既に空です', 'info');
+        showToast(t('list-already-empty'), 'info');
         return;
     }
 
-    if (confirm(`${inventoryScannedItems.length}件のアイテムをクリアしますか？`)) {
+    if (confirm(`${t('clear-confirm-prefix')} ${inventoryScannedItems.length} ${t('clear-confirm-suffix')}`)) {
         inventoryScannedItems = [];
         updateInventoryList();
-        showToast('リストをクリアしました', 'success');
+        showToast(t('list-cleared'), 'success');
     }
 }
 
 // Submit the inventory count to the server
 async function submitInventoryCount() {
     if (!currentWorker) {
-        showToast('ログインが必要です', 'error');
+        showToast(t('login-required'), 'error');
         return;
     }
 
     if (inventoryScannedItems.length === 0) {
-        showToast('スキャンしたアイテムがありません', 'error');
+        showToast(t('no-scanned-items'), 'error');
         return;
     }
 
-    if (!confirm(`${inventoryScannedItems.length}件のアイテムを送信しますか？`)) {
+    if (!confirm(`${t('submit-confirm-prefix')} ${inventoryScannedItems.length} ${t('submit-confirm-suffix')}`)) {
         return;
     }
 
@@ -1694,7 +1760,7 @@ function startVoiceInput() {
 
 function startVoiceRecording() {
     if (!recognition) {
-        showToast(currentLanguage === 'ja' ? 'ブラウザが音声認識をサポートしていません' : 'Browser does not support voice recognition', 'error');
+        showToast(t('voice-not-supported'), 'error');
         return;
     }
     
@@ -1805,7 +1871,7 @@ function viewTaskDetail(task) {
         <div class="space-y-4">
             <div>
                 <h4 class="font-semibold text-gray-900">${task.title[currentLanguage]}</h4>
-                <p class="text-gray-600">${currentLanguage === 'ja' ? 'タイプ' : 'Type'}: ${task.type}</p>
+                <p class="text-gray-600">${t('type-label')}: ${task.type}</p>
             </div>
             <div class="grid grid-cols-2 gap-4">
                 <div>
@@ -1914,7 +1980,7 @@ function reportProblem() {
 }
 
 function requestMaintenance() {
-    showToast(currentLanguage === 'ja' ? 'メンテナンス要請を送信中...' : 'Sending maintenance request...', 'info');
+    showToast(t('sending-maintenance-request'), 'info');
     closeAllModals();
 }
 

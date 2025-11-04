@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <link rel="stylesheet" href="styles.css">
+    <script src="language.js"></script>
     <script>
         tailwind.config = {
             theme: {
@@ -41,6 +42,13 @@
                         </div>
                     </div>
                     <div class="flex items-center space-x-4">
+                        <!-- Language Dropdown -->
+                        <div class="relative">
+                            <select id="languageSelect" onchange="switchLanguage(this.value)" class="px-3 py-2 bg-gray-50 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer">
+                                <option value="ja">日本語</option>
+                                <option value="en">English</option>
+                            </select>
+                        </div>
                         <div class="text-right">
                             <p class="text-xl font-mono font-semibold text-gray-900" id="currentTime">--:--</p>
                         </div>
@@ -67,7 +75,7 @@
                         <div class="w-16 h-16 bg-blue-500 rounded-full flex items-center justify-center mx-auto mb-3">
                             <i class="fas fa-user text-white text-2xl"></i>
                         </div>
-                        <h2 class="text-xl font-bold text-gray-900">ログイン</h2>
+                        <h2 class="text-xl font-bold text-gray-900" data-i18n="login-title">ログイン</h2>
                     </div>
 
                     <form onsubmit="handleLogin(event)" class="space-y-4">
@@ -77,7 +85,7 @@
                                    class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                    placeholder="例: Karl Ranile">
                         </div>
-                        <button type="submit" class="w-full py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors font-medium">
+                        <button type="submit" class="w-full py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors font-medium" data-i18n="login-button">
                             ログイン
                         </button>
                     </form>
@@ -87,7 +95,7 @@
             <!-- Home Screen -->
             <div id="homeScreen" class="hidden max-w-3xl mx-auto mt-12">
                 <div class="text-center mb-8">
-                    <h2 class="text-2xl font-bold text-gray-900">作業選択</h2>
+                    <h2 class="text-2xl font-bold text-gray-900" data-i18n="work-selection">作業選択</h2>
                 </div>
 
                 <!-- Main Action Buttons -->
@@ -101,8 +109,8 @@
                             <div class="w-16 h-16 bg-blue-100 rounded-xl flex items-center justify-center mx-auto mb-4">
                                 <i class="fas fa-clipboard-list text-3xl text-blue-600"></i>
                             </div>
-                            <h3 class="text-2xl font-bold text-gray-900 mb-2">棚卸し</h3>
-                            <p class="text-sm text-gray-600">在庫確認・棚卸し作業</p>
+                            <h3 class="text-2xl font-bold text-gray-900 mb-2" data-i18n="inventory-button-title">棚卸し</h3>
+                            <p class="text-sm text-gray-600" data-i18n="inventory-button-desc">在庫確認・棚卸し作業</p>
                         </div>
                     </button>
 
@@ -115,8 +123,8 @@
                             <div class="w-16 h-16 bg-green-100 rounded-xl flex items-center justify-center mx-auto mb-4">
                                 <i class="fas fa-hand-paper text-3xl text-green-600"></i>
                             </div>
-                            <h3 class="text-2xl font-bold text-gray-900 mb-2">ピッキング</h3>
-                            <p class="text-sm text-gray-600">ピッキング依頼処理</p>
+                            <h3 class="text-2xl font-bold text-gray-900 mb-2" data-i18n="picking-button-title">ピッキング</h3>
+                            <p class="text-sm text-gray-600" data-i18n="picking-button-desc">ピッキング依頼処理</p>
                         </div>
                     </button>
 
@@ -143,26 +151,26 @@
                         <button onclick="backToHome()" class="w-10 h-10 bg-white hover:bg-gray-100 border border-gray-300 rounded-lg flex items-center justify-center transition-colors">
                             <i class="fas fa-arrow-left text-gray-700"></i>
                         </button>
-                        <h2 class="text-2xl font-bold text-gray-900">ピッキング依頼</h2>
+                        <h2 class="text-2xl font-bold text-gray-900" data-i18n="picking-requests">ピッキング依頼</h2>
                     </div>
                     <button onclick="refreshPickingRequests()" class="px-4 py-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors">
-                        <i class="fas fa-refresh mr-2"></i>更新
+                        <i class="fas fa-refresh mr-2"></i><span data-i18n="refresh-button">更新</span>
                     </button>
                 </div>
 
                 <!-- Status Filter -->
                 <div class="mb-4">
                     <div class="flex space-x-2">
-                        <button onclick="filterByStatus('all')" class="status-filter active px-3 py-2 rounded-lg text-sm font-medium transition-colors">
+                        <button onclick="filterByStatus('all')" class="status-filter active px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-i18n="filter-all">
                             全て
                         </button>
-                        <button onclick="filterByStatus('pending')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors">
+                        <button onclick="filterByStatus('pending')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-i18n="filter-pending">
                             待機中
                         </button>
-                        <button onclick="filterByStatus('in-progress')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors">
+                        <button onclick="filterByStatus('in-progress')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-i18n="filter-in-progress">
                             進行中
                         </button>
-                        <button onclick="filterByStatus('completed')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors">
+                        <button onclick="filterByStatus('completed')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-i18n="filter-completed">
                             完了
                         </button>
                     </div>
@@ -173,7 +181,7 @@
                     <!-- Loading state -->
                     <div id="loadingState" class="text-center py-12">
                         <div class="animate-spin w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full mx-auto mb-3"></div>
-                        <p class="text-sm text-gray-600">読み込み中...</p>
+                        <p class="text-sm text-gray-600" data-i18n="loading">読み込み中...</p>
                     </div>
                 </div>
             </div>
@@ -193,10 +201,10 @@
                     <div class="flex space-x-2">
                         <button onclick="startPickingProcess()" id="startPickingBtn"
                                 class="px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors font-medium">
-                            <i class="fas fa-play mr-2"></i>開始
+                            <i class="fas fa-play mr-2"></i><span data-i18n="start-button">開始</span>
                         </button>
                         <button onclick="refreshPickingDetail()" class="px-4 py-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors">
-                            <i class="fas fa-refresh"></i>
+                            <i class="fas fa-refresh mr-2"></i><span data-i18n="refresh-button">更新</span>
                         </button>
                     </div>
                 </div>
@@ -212,10 +220,10 @@
                 <div class="bg-white rounded-lg border border-gray-200">
                     <div class="px-5 py-4 border-b border-gray-200">
                         <div class="flex items-center justify-between">
-                            <h3 class="text-lg font-bold text-gray-900">ピッキング項目</h3>
+                            <h3 class="text-lg font-bold text-gray-900" data-i18n="picking-items">ピッキング項目</h3>
                             <div class="flex items-center space-x-2">
                                 <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse" id="connectionStatus"></div>
-                                <span class="text-xs text-gray-500" id="connectionText">接続中</span>
+                                <span class="text-xs text-gray-500" id="connectionText" data-i18n="connection-status-connected">接続中</span>
                             </div>
                         </div>
                     </div>
@@ -468,7 +476,7 @@
         <footer class="bg-white border-t border-gray-200 py-3">
             <div class="max-w-7xl mx-auto px-6">
                 <div class="text-center text-xs text-gray-500">
-                    <p>&copy; 2025 Noda System</p>
+                    <p data-i18n="footer-copyright">&copy; 2025 Noda System</p>
                 </div>
             </div>
         </footer>

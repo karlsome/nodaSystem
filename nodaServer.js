@@ -23,7 +23,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('.'));
 
-// MongoDB connection
+// MongoDB connection with SSL options for local testing
 let db;
 
 // MongoDB options for local development (bypass SSL certificate verification)
@@ -267,6 +267,33 @@ async function connectToMongoDB() {
     } catch (error) {
         console.error('Failed to connect to MongoDB:', error);
         process.exit(1);
+    }
+}
+
+// Helper function to get master data and calculate box quantity
+async function getMasterDataAndCalculateBoxQuantity(品番, pieceQuantity) {
+    try {
+        await client.connect();
+        const masterDb = client.db("Sasaki_Coating_MasterDB");
+        const masterCollection = masterDb.collection("masterDB");
+        
+        const masterData = await masterCollection.findOne({ 品番: 品番 });
+        
+        if (masterData && masterData.収容数) {
+            const 収容数 = parseInt(masterData.収容数);
+            if (収容数 > 0) {
+                const boxQuantity = Math.ceil(pieceQuantity / 収容数);
+                console.log(`📦 ${品番}: ${pieceQuantity}枚 ÷ ${収容数} = ${boxQuantity}個`);
+                return boxQuantity;
+            }
+        }
+        
+        // If no master data or 収容数 is 0, return original quantity
+        console.log(`⚠️ No master data found for ${品番}, using piece quantity: ${pieceQuantity}`);
+        return pieceQuantity;
+    } catch (error) {
+        console.error(`Error fetching master data for ${品番}:`, error);
+        return pieceQuantity; // Fallback to piece quantity
     }
 }
 
@@ -580,7 +607,7 @@ io.on('connection', (socket) => {
                     lineNumber: activePicking.lineNumber,
                     品番: activePicking.品番
                 };
-                console.log(`📤 Sending display update:`, displayUpdate);
+                console.log(`📤 Sending display update with box quantity:`, displayUpdate);
                 socket.emit('display-update', displayUpdate);
             } else {
                 // No active picking - send initial state (red screen)
@@ -1154,7 +1181,7 @@ app.get('/api/device/:deviceId/status', async (req, res) => {
                 lineNumber: activePicking.lineNumber,
                 品番: activePicking.品番
             };
-            console.log(`🌐 REST API: Sending response:`, response);
+            console.log(`🌐 REST API: Sending response with box quantity:`, response);
             res.json(response);
         } else {
             const response = {
