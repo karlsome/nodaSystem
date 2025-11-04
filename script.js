@@ -939,7 +939,15 @@ function updateDeviceStatusInUI(deviceData) {
 function updateProgressCounter() {
     if (!currentRequest) return;
     
-    const completedItems = document.querySelectorAll('.picking-item .status-badge:contains("完了")').length;
+    // Count completed items by checking text content (can't use :contains in querySelectorAll)
+    const allStatusBadges = document.querySelectorAll('.picking-item .status-badge');
+    let completedItems = 0;
+    allStatusBadges.forEach(badge => {
+        if (badge.textContent.trim() === '完了') {
+            completedItems++;
+        }
+    });
+    
     const totalItems = currentRequest.lineItems.length;
     
     const progressElement = document.querySelector('.request-progress');
