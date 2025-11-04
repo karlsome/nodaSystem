@@ -11,8 +11,8 @@ let recentActivities = []; // Initialize empty array for activities
 let todaysTasks = []; // Initialize empty array for tasks
 
 // API base URL - change this to your server URL
-//const API_BASE_URL = 'http://localhost:3001/api';
-const API_BASE_URL = 'https://nodasystem.onrender.com/api';
+const API_BASE_URL = 'http://localhost:3001/api';
+//const API_BASE_URL = 'https://nodasystem.onrender.com/api';
 
 // Debug localStorage on page load
 console.log('🔄 Page loaded, checking localStorage availability...');
@@ -167,6 +167,7 @@ function logout() {
     showToast('ログアウトしました', 'info');
 }
 
+
 function showWorkerInfo() {
     document.getElementById('workerName').textContent = currentWorker;
     document.getElementById('workerInfo').style.display = 'block';
@@ -278,6 +279,7 @@ function showScreen(screenName) {
     document.getElementById('pickingScreen').classList.add('hidden');
     document.getElementById('pickingDetailScreen').classList.add('hidden');
     document.getElementById('inventoryScreen').classList.add('hidden');
+    document.getElementById('nyukoScreen').classList.add('hidden');
     
     // Show selected screen
     document.getElementById(screenName + 'Screen').classList.remove('hidden');
@@ -380,36 +382,71 @@ function createPickingRequestCard(request) {
     const card = document.createElement('div');
     card.className = 'picking-request-card';
     card.onclick = () => viewPickingDetail(request.requestNumber);
-
-    const t = window.t || ((key) => key);
+    
     const statusClass = getStatusClass(request.status);
     const statusText = getStatusText(request.status);
-    const currentLang = window.currentLanguage || 'ja';
-    const formattedDate = new Date(request.createdAt).toLocaleDateString(currentLang === 'ja' ? 'ja-JP' : 'en-US');
-
+    const formattedDate = new Date(request.createdAt).toLocaleDateString('ja-JP');
+    
     card.innerHTML = `
         <div class="flex items-center justify-between">
-            <div class="flex items-center space-x-3">
-                <div class="w-12 h-12 bg-green-100 rounded-lg flex items-center justify-center">
-                    <i class="fas fa-box text-green-600 text-lg"></i>
+            <div class="flex items-center space-x-4">
+                <div class="w-16 h-16 bg-green-100 rounded-xl flex items-center justify-center">
+                    <i class="fas fa-hand-paper text-green-600 text-2xl"></i>
                 </div>
                 <div>
-                    <h3 class="text-lg font-bold text-gray-900">${request.requestNumber}</h3>
-                    <p class="text-sm text-gray-600">
-                        ${request.itemCount}${t('items-suffix')} • ${request.totalQuantity}${t('pieces')}
+                    <h3 class="text-xl font-bold text-gray-900">${request.requestNumber}</h3>
+                    <p class="text-gray-600">
+                        ${request.itemCount}項目 • 合計数量: ${request.totalQuantity}
                     </p>
+                    <p class="text-sm text-gray-500">${formattedDate}</p>
                 </div>
             </div>
             <div class="text-right">
-                <span class="status-badge ${statusClass} text-xs">
+                <span class="status-badge ${statusClass}">
                     ${statusText}
                 </span>
-                <p class="text-xs text-gray-500 mt-1">${formattedDate}</p>
             </div>
         </div>
     `;
-
+    
     return card;
+}
+
+// Enrich line items with master data (収容数) and calculate box quantities
+async function enrichLineItemsWithMasterData(lineItems) {
+    for (const item of lineItems) {
+        try {
+            const masterData = await fetchMasterData(item.品番);
+            if (masterData && masterData.収容数) {
+                const 収容数 = parseInt(masterData.収容数);
+                item.収容数 = 収容数;
+                item.boxQuantity = Math.ceil(item.quantity / 収容数);
+            } else {
+                // If no master data, assume 1:1 (no box conversion)
+                item.収容数 = 1;
+                item.boxQuantity = item.quantity;
+            }
+        } catch (error) {
+            console.error(`Error fetching master data for ${item.品番}:`, error);
+            // Fallback: no box conversion
+            item.収容数 = 1;
+            item.boxQuantity = item.quantity;
+        }
+    }
+}
+
+// Fetch master data for a specific product
+async function fetchMasterData(品番) {
+    try {
+        const response = await fetch(`${API_BASE_URL}/master-data/${品番}`);
+        if (!response.ok) {
+            throw new Error('Master data not found');
+        }
+        return await response.json();
+    } catch (error) {
+        console.error(`Error fetching master data for ${品番}:`, error);
+        return null;
+    }
 }
 
 async function viewPickingDetail(requestNumber) {
@@ -445,10 +482,10 @@ async function displayPickingDetail(request) {
         console.error('Request missing lineItems:', request);
         request.lineItems = [];
     }
-
-    // Enrich line items with master data (収容数)
+    
+    // Enrich line items with master data and box quantities
     await enrichLineItemsWithMasterData(request.lineItems);
-
+    
     // Update header
     document.getElementById('pickingDetailTitle').textContent = `${t('picking-detail')}: ${request.requestNumber}`;
     document.getElementById('pickingDetailSubtitle').textContent = `${request.lineItems.length}${t('items-suffix')}${t('items-picking')}`;
@@ -456,25 +493,25 @@ async function displayPickingDetail(request) {
     // Update request info
     const infoContainer = document.getElementById('pickingRequestInfo');
     const completedItems = request.lineItems.filter(item => item.status === 'completed').length;
-
+    
     infoContainer.innerHTML = `
-        <div>
-            <p class="text-xs text-gray-500 mb-1">${t('request-number')}</p>
-            <p class="text-sm font-semibold text-gray-900">${request.requestNumber}</p>
+        <div class="text-center">
+            <p class="text-sm text-gray-500">依頼番号</p>
+            <p class="text-lg font-semibold text-gray-900">${request.requestNumber}</p>
         </div>
-        <div>
-            <p class="text-xs text-gray-500 mb-1">${t('status-label')}</p>
-            <span id="requestStatusBadge" class="status-badge ${getStatusClass(request.status)} text-xs">
+        <div class="text-center">
+            <p class="text-sm text-gray-500">ステータス</p>
+            <span id="requestStatusBadge" class="status-badge ${getStatusClass(request.status)}">
                 ${getStatusText(request.status)}
             </span>
         </div>
-        <div>
-            <p class="text-xs text-gray-500 mb-1">${t('progress-label')}</p>
-            <p class="text-sm font-semibold text-gray-900 request-progress">${completedItems}/${request.lineItems.length}</p>
+        <div class="text-center">
+            <p class="text-sm text-gray-500">進捗</p>
+            <p class="text-lg font-semibold text-gray-900 request-progress">${completedItems}/${request.lineItems.length}</p>
         </div>
-        <div>
-            <p class="text-xs text-gray-500 mb-1">${t('created-by')}</p>
-            <p class="text-sm font-semibold text-gray-900">${request.createdBy}</p>
+        <div class="text-center">
+            <p class="text-sm text-gray-500">作成者</p>
+            <p class="text-lg font-semibold text-gray-900">${request.createdBy}</p>
         </div>
     `;
     
@@ -552,32 +589,42 @@ async function fetchMasterData(品番) {
 
 function createPickingItemElement(item, index) {
     const itemDiv = document.createElement('div');
-    itemDiv.className = 'picking-item p-4';
-    const t = window.t || ((key) => key);
-
+    itemDiv.className = 'picking-item border rounded-lg p-4 mb-3';
     // Add data attributes for real-time updates
     itemDiv.setAttribute('data-line', item.lineNumber);
     itemDiv.setAttribute('data-device-id', item.背番号);
     itemDiv.setAttribute('data-item-id', item.品番);
     itemDiv.setAttribute('data-status', item.status);
-
+    
     // Status icon and text based on item status
     let statusIcon = '';
     let statusText = '';
-
+    let statusClass = '';
+    
     if (item.status === 'completed') {
-        statusIcon = '<i class="fas fa-check-circle text-green-500 text-xl"></i>';
-        statusText = t('status-completed');
+        statusIcon = '<i class="fas fa-check-circle text-green-500"></i>';
+        statusText = '完了';
+        statusClass = 'text-green-600';
     } else if (item.status === 'in-progress') {
-        statusIcon = '<i class="fas fa-circle-notch fa-spin text-blue-500 text-xl"></i>';
-        statusText = t('status-in-progress');
+        statusIcon = '<i class="fas fa-clock text-yellow-500"></i>';
+        statusText = '進行中';
+        statusClass = 'text-yellow-600';
     } else {
-        statusIcon = '<i class="far fa-circle text-gray-400 text-xl"></i>';
-        statusText = t('status-pending');
+        statusIcon = '<i class="fas fa-clock text-gray-500"></i>';
+        statusText = '待機中';
+        statusClass = 'text-gray-600';
     }
+    
+    const completedInfo = item.completedAt ? 
+        `<p class="text-xs text-gray-500">完了: ${new Date(item.completedAt).toLocaleString('ja-JP')}</p>
+         <p class="text-xs text-gray-500">作業者: ${item.completedBy || 'N/A'}</p>` : '';
 
-    const completedInfo = item.completedAt ?
-        `<p class="text-xs text-gray-500 mt-1">${new Date(item.completedAt).toLocaleTimeString('ja-JP')}</p>` : '';
+    // Determine display quantity (box or pieces)
+    const displayQuantity = item.boxQuantity !== undefined ? item.boxQuantity : item.quantity;
+    const quantityUnit = item.boxQuantity !== undefined ? '個' : '個';
+    const quantityDetail = item.boxQuantity !== undefined && item.収容数 > 1 
+        ? `<span class="text-xs text-gray-500">(${item.quantity}個 ÷ ${item.収容数})</span>` 
+        : '';
 
     // Use box quantity if available, otherwise use piece quantity
     const displayQuantity = item.boxQuantity !== undefined ? item.boxQuantity : item.quantity;
@@ -588,28 +635,40 @@ function createPickingItemElement(item, index) {
 
     itemDiv.innerHTML = `
         <div class="flex items-center justify-between">
-            <div class="flex items-center space-x-3">
-                <div class="text-center status-icon">
-                    ${statusIcon}
+            <div class="flex items-center space-x-4">
+                <div class="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center">
+                    <span class="text-blue-600 font-bold">${item.lineNumber}</span>
                 </div>
                 <div>
-                    <h4 class="font-semibold text-gray-900">${item.品番}</h4>
-                    <div class="flex items-center space-x-3 mt-1">
-                        <p class="text-sm text-gray-600">${t('device-number')}: ${item.背番号}</p>
-                        <span class="text-gray-400">•</span>
-                        <p class="text-sm text-gray-600">${t('quantity')}: ${displayQuantity}${quantityUnit} ${quantityDetail}</p>
+                    <h4 class="text-lg font-semibold text-gray-900">品番: ${item.品番}</h4>
+                    <div class="flex items-center">
+                        <div class="device-status-indicator w-3 h-3 rounded-full ${item.status === 'in-progress' ? 'bg-yellow-400' : item.status === 'completed' ? 'bg-green-500' : 'bg-gray-400'} mr-2"></div>
+                        <p class="text-gray-600">背番号: <span class="font-medium">${item.背番号}</span></p>
                     </div>
-                    <div class="completion-info">${completedInfo}</div>
+                    <p class="text-sm text-gray-500">
+                        数量: ${displayQuantity}${quantityUnit} ${quantityDetail}
+                    </p>
+                    <div class="completion-info mt-1">${completedInfo}</div>
                 </div>
             </div>
-            <div class="text-right">
-                <span class="status-badge ${item.status === 'completed' ? 'bg-green-100 text-green-800' : item.status === 'in-progress' ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'} text-xs">
-                    ${statusText}
-                </span>
+            <div class="text-right flex items-center space-x-4">
+                <div>
+                    <div class="text-2xl font-bold text-gray-900">${displayQuantity}</div>
+                    <div class="text-sm text-gray-500">${quantityUnit}</div>
+                    ${quantityDetail ? `<div class="text-xs text-gray-400 mt-1">${item.quantity}個</div>` : ''}
+                </div>
+                <div class="flex flex-col items-center space-y-2">
+                    <div class="text-2xl status-icon">
+                        ${statusIcon}
+                    </div>
+                    <div class="status-badge ${item.status === 'completed' ? 'bg-green-100 text-green-800' : item.status === 'in-progress' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-800'} px-2 py-1 rounded-full text-xs font-medium">
+                        ${statusText}
+                    </div>
+                </div>
             </div>
         </div>
     `;
-
+    
     return itemDiv;
 }
 
@@ -915,12 +974,12 @@ function displayNoRequests() {
     const t = window.t || ((key) => key);
 
     container.innerHTML = `
-        <div class="bg-white rounded-lg border border-gray-200 p-12 text-center">
-            <div class="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                <i class="fas fa-inbox text-2xl text-gray-400"></i>
+        <div class="text-center py-12">
+            <div class="w-24 h-24 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-6">
+                <i class="fas fa-inbox text-4xl text-gray-400"></i>
             </div>
-            <h3 class="text-lg font-bold text-gray-900 mb-2">${t('no-requests-title')}</h3>
-            <p class="text-sm text-gray-600">${t('no-requests-desc')}</p>
+            <h3 class="text-xl font-bold text-gray-900 mb-2">ピッキング依頼がありません</h3>
+            <p class="text-gray-600">現在処理可能なピッキング依頼はありません。</p>
         </div>
     `;
 }
@@ -1052,6 +1111,7 @@ document.addEventListener('keydown', function(e) {
 
 // Global storage for scanned inventory items
 let inventoryScannedItems = [];
+let scanBuffer = ''; // Buffer to accumulate scanned characters
 
 // Initialize inventory screen when opened
 function openInventorySystem() {
@@ -1059,38 +1119,58 @@ function openInventorySystem() {
     inventoryScannedItems = [];
     updateInventoryList();
 
-    // Focus on scan input
-    setTimeout(() => {
-        const scanInput = document.getElementById('inventoryScanInput');
-        if (scanInput) {
-            scanInput.focus();
-        }
-    }, 300);
-
     // Set up keyboard listener for scanning
     setupInventoryScanListener();
 }
 
-// Set up keyboard listener for the scanner input
+// Set up keyboard listener for the entire page
 function setupInventoryScanListener() {
-    const scanInput = document.getElementById('inventoryScanInput');
-    if (!scanInput) return;
+    console.log('🎧 Setting up page-wide keyboard listener for inventory scanning');
+    
+    // Remove any existing listener
+    document.removeEventListener('keydown', handleInventoryScan);
+    
+    // Add new listener to the entire document
+    document.addEventListener('keydown', handleInventoryScan);
+    
+    console.log('✅ Keyboard listener active - waiting for scans (Enter key is delimiter)');
+}
 
-    // Remove any existing listeners
-    scanInput.replaceWith(scanInput.cloneNode(true));
-    const newScanInput = document.getElementById('inventoryScanInput');
-
-    newScanInput.addEventListener('keypress', async function(e) {
-        if (e.key === 'Enter') {
-            e.preventDefault();
-            const scannedValue = newScanInput.value.trim();
-
-            if (scannedValue) {
-                await processInventoryScan(scannedValue);
-                newScanInput.value = '';
-            }
+// Handle keyboard input for scanning
+async function handleInventoryScan(e) {
+    // Only process when on inventory screen
+    if (currentScreen !== 'inventory') return;
+    
+    // Ignore if user is typing in an input field (except our hidden scanner input)
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+        if (e.target.id !== 'inventoryScanInput') return;
+    }
+    
+    // Check if Enter key (delimiter)
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        console.log('✅ Enter key pressed - Processing scan buffer:', scanBuffer);
+        
+        if (scanBuffer.trim()) {
+            console.log('📦 Processing scanned value:', scanBuffer.trim());
+            await processInventoryScan(scanBuffer.trim());
+            scanBuffer = ''; // Clear buffer after processing
+            console.log('🧹 Buffer cleared');
+        } else {
+            console.log('⚠️ Buffer is empty, nothing to process');
         }
-    });
+        return;
+    }
+    
+    // Ignore special keys
+    if (e.key.length > 1 && e.key !== 'Enter') {
+        console.log('⏭️ Ignoring special key:', e.key);
+        return;
+    }
+    
+    // Add character to buffer
+    scanBuffer += e.key;
+    console.log('⌨️ Key captured:', e.key, '| Current buffer:', scanBuffer);
 }
 
 // Process a scanned QR code
@@ -1415,6 +1495,97 @@ window.clearInventoryList = clearInventoryList;
 window.submitInventoryCount = submitInventoryCount;
 window.updateInventoryItemQuantity = updateInventoryItemQuantity;
 window.removeInventoryItem = removeInventoryItem;
+
+// Tanaoroshi (棚卸し) system functions
+window.adjustTanaoroshiCount = adjustTanaoroshiCount;
+window.completeTanaoroshiCount = completeTanaoroshiCount;
+window.closeTanaoroshiModal = closeTanaoroshiModal;
+window.editTanaoroshiProduct = editTanaoroshiProduct;
+window.deleteTanaoroshiProduct = deleteTanaoroshiProduct;
+window.submitTanaoroshiCount = submitTanaoroshiCount;
+
+// Nyuko (入庫) system functions
+window.openNyukoSystem = openNyukoSystem;
+window.adjustNyukoCount = adjustNyukoCount;
+window.completeNyukoInput = completeNyukoInput;
+window.closeNyukoModal = closeNyukoModal;
+window.editNyukoProduct = editNyukoProduct;
+window.deleteNyukoProduct = deleteNyukoProduct;
+window.submitNyukoInput = submitNyukoInput;
+
+// Language translations
+const translations = {
+    ja: {
+        'scan-title': 'スキャンしてください',
+        'scan-subtitle': 'QRコードまたはバーコードをスキャン',
+        'start-scan': 'スキャン開始',
+        'voice-input': '音声入力 (QRなし)',
+        'available-tasks': '利用可能なタスク',
+        'help': 'ヘルプ',
+        'map': 'マップ',
+        'messages': 'メッセージ',
+        'stats': '統計',
+        'today-summary': '今日の概要',
+        'completed': '完了',
+        'in-progress': '進行中',
+        'pending': '待機中',
+        'scanner-title': 'スキャナー',
+        'position-code': 'コードを中央に配置してください',
+        'scan-instruction': 'QRコードまたはバーコードをスキャン',
+        'process': '処理',
+        'manual': '手動入力',
+        'voice-title': '音声入力',
+        'speak-item': '品番を話してください',
+        'voice-instruction': 'マイクボタンを押して品番を読み上げてください',
+        'heard': '聞き取り結果:',
+        'start-recording': '録音開始',
+        'stop-recording': '録音停止',
+        'confirm': '確認',
+        'start-task': 'タスク開始',
+        'cancel': 'キャンセル',
+        'messages-title': 'メッセージ',
+        'help-title': 'ヘルプ・サポート',
+        'call-supervisor': '監督者に連絡',
+        'report-problem': '問題を報告',
+        'maintenance': 'メンテナンス要請',
+        'instructions': '操作手順'
+    },
+    en: {
+        'scan-title': 'Please Scan',
+        'scan-subtitle': 'Scan QR code or barcode',
+        'start-scan': 'Start Scan',
+        'voice-input': 'Voice Input (No QR)',
+        'available-tasks': 'Available Tasks',
+        'help': 'Help',
+        'map': 'Map',
+        'messages': 'Messages',
+        'stats': 'Stats',
+        'today-summary': 'Today\'s Summary',
+        'completed': 'Completed',
+        'in-progress': 'In Progress',
+        'pending': 'Pending',
+        'scanner-title': 'Scanner',
+        'position-code': 'Position code in center',
+        'scan-instruction': 'Scan QR code or barcode',
+        'process': 'Process',
+        'manual': 'Manual Entry',
+        'voice-title': 'Voice Input',
+        'speak-item': 'Please speak item number',
+        'voice-instruction': 'Press microphone button and speak item number',
+        'heard': 'Heard:',
+        'start-recording': 'Start Recording',
+        'stop-recording': 'Stop Recording',
+        'confirm': 'Confirm',
+        'start-task': 'Start Task',
+        'cancel': 'Cancel',
+        'messages-title': 'Messages',
+        'help-title': 'Help & Support',
+        'call-supervisor': 'Call Supervisor',
+        'report-problem': 'Report Problem',
+        'maintenance': 'Request Maintenance',
+        'instructions': 'Instructions'
+    }
+};
 
 // Available tasks data
 let availableTasks = [
@@ -2333,3 +2504,1089 @@ if (universalScanInput) {
         }, 1000);
     });
 }
+
+// ==================== TANAOROSHI (棚卸し) SYSTEM ====================
+
+// Global variables for tanaoroshi
+let tanaoroshiCountedProducts = []; // Array to store counted products
+let currentTanaoroshiProduct = null; // Currently counting product
+let tanaoroshiScanBuffer = ''; // Buffer for QR scan input
+let isTanaoroshiModalOpen = false; // Track if modal is open
+
+// Initialize tanaoroshi when inventory screen is shown
+function openInventorySystem() {
+    showScreen('inventory');
+    initializeTanaoroshi();
+}
+
+function initializeTanaoroshi() {
+    console.log('🔄 Initializing Tanaoroshi system...');
+    
+    // Reset state
+    tanaoroshiCountedProducts = [];
+    currentTanaoroshiProduct = null;
+    tanaoroshiScanBuffer = '';
+    isTanaoroshiModalOpen = false;
+    
+    // Show scanner area, hide summary list
+    document.getElementById('tanaoroshiScannerArea').classList.remove('hidden');
+    document.getElementById('tanaoroshiSummaryList').classList.add('hidden');
+    
+    // Close modal if open
+    document.getElementById('tanaoroshiCountingModal').classList.add('hidden');
+    
+    // Setup keyboard listener for HID mode QR scanner
+    setupTanaoroshiKeyboardListener();
+    
+    console.log('✅ Tanaoroshi system ready');
+}
+
+// Setup keyboard listener for QR scanner (HID mode)
+function setupTanaoroshiKeyboardListener() {
+    // Remove existing listener if any
+    document.removeEventListener('keydown', tanaoroshiKeyHandler);
+    
+    // Add new listener
+    document.addEventListener('keydown', tanaoroshiKeyHandler);
+    
+    console.log('⌨️ Tanaoroshi keyboard listener active');
+}
+
+// Keyboard handler for QR scanning
+function tanaoroshiKeyHandler(event) {
+    // Only process if on inventory screen and modal is open or waiting for initial scan
+    if (currentScreen !== 'inventory') {
+        return;
+    }
+    
+    // Ignore if user is typing in an input field (except our modal state)
+    if (event.target.tagName === 'INPUT' && !isTanaoroshiModalOpen) {
+        return;
+    }
+    
+    // Enter key - process the scanned data
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        
+        if (tanaoroshiScanBuffer.trim() !== '') {
+            processTanaoroshiScan(tanaoroshiScanBuffer.trim());
+            tanaoroshiScanBuffer = ''; // Clear buffer
+        }
+        
+        return;
+    }
+    
+    // Ignore special keys
+    if (event.key.length > 1 && event.key !== 'Enter') {
+        return;
+    }
+    
+    // Add character to buffer
+    tanaoroshiScanBuffer += event.key;
+}
+
+// Process scanned QR code
+async function processTanaoroshiScan(scanData) {
+    console.log('📦 Tanaoroshi scan received:', scanData);
+    
+    // Parse QR code format: "GN519-10200,20"
+    const parts = scanData.split(',');
+    if (parts.length !== 2) {
+        showToast('❌ QRコード形式が無効です (形式: 品番,数量)', 'error');
+        return;
+    }
+    
+    const scannedProductNumber = parts[0].trim();
+    const scannedBoxQuantity = parseInt(parts[1].trim());
+    
+    if (!scannedProductNumber || isNaN(scannedBoxQuantity)) {
+        showToast('❌ QRコードデータが無効です', 'error');
+        return;
+    }
+    
+    // If no modal is open, this is the initial product scan
+    if (!isTanaoroshiModalOpen) {
+        await startCountingProduct(scannedProductNumber, scannedBoxQuantity);
+    } else {
+        // Modal is open, this is a box scan
+        await processBoxScan(scannedProductNumber, scannedBoxQuantity);
+    }
+}
+
+// Start counting a new product
+async function startCountingProduct(productNumber, referenceQuantity) {
+    try {
+        console.log(`🆕 Starting count for product: ${productNumber}`);
+        
+        // Fetch product data from API
+        showToast('🔍 製品情報を取得中...', 'info');
+        
+        const response = await fetch(`${API_BASE_URL}/tanaoroshi/${productNumber}`);
+        
+        if (!response.ok) {
+            if (response.status === 404) {
+                showToast('❌ 製品が見つかりません', 'error');
+            } else {
+                showToast('❌ 製品情報の取得に失敗しました', 'error');
+            }
+            return;
+        }
+        
+        const productData = await response.json();
+        console.log('✅ Product data fetched:', productData);
+        
+        // Check if this is a new product (not in inventory)
+        if (productData.isNewProduct) {
+            const confirmAdd = confirm(
+                `⚠️ このアイテムは在庫にありません。\n` +
+                `品番: ${productData.品番}\n` +
+                `品名: ${productData.品名 || '-'}\n\n` +
+                `追加しますか？`
+            );
+            
+            if (!confirmAdd) {
+                showToast('キャンセルしました', 'info');
+                return;
+            }
+            
+            showToast('📦 新規製品として追加します', 'info');
+        }
+        
+        // Initialize current product object
+        currentTanaoroshiProduct = {
+            品番: productData.品番,
+            品名: productData.品名,
+            背番号: productData.背番号,
+            収容数: productData.収容数,
+            imageURL: productData.imageURL,
+            isNewProduct: productData.isNewProduct || false,
+            currentPhysicalQuantity: productData.currentPhysicalQuantity,
+            currentReservedQuantity: productData.currentReservedQuantity,
+            currentAvailableQuantity: productData.currentAvailableQuantity,
+            countedBoxes: 0,
+            countedPieces: 0
+        };
+        
+        // Open counting modal
+        openTanaoroshiCountingModal();
+        
+        showToast('✅ カウント開始', 'success');
+        
+    } catch (error) {
+        console.error('Error starting product count:', error);
+        showToast('❌ エラーが発生しました', 'error');
+    }
+}
+
+// Open the counting modal
+function openTanaoroshiCountingModal() {
+    if (!currentTanaoroshiProduct) return;
+    
+    const modal = document.getElementById('tanaoroshiCountingModal');
+    const product = currentTanaoroshiProduct;
+    
+    // Set product info
+    document.getElementById('modalProductNumber').textContent = product.品番;
+    document.getElementById('modalSebangou').textContent = product.背番号 || '-';
+    document.getElementById('modalProductName').textContent = product.品名 || '-';
+    
+    // Set product image
+    const imgElement = document.getElementById('modalProductImage');
+    if (product.imageURL) {
+        imgElement.src = product.imageURL;
+        imgElement.style.display = 'block';
+    } else {
+        imgElement.style.display = 'none';
+    }
+    
+    // Calculate expected boxes
+    const expectedBoxes = Math.ceil(product.currentPhysicalQuantity / product.収容数);
+    
+    // Set expected count with special styling for new products
+    if (product.isNewProduct) {
+        document.getElementById('modalExpectedPieces').innerHTML = `<span class="text-gray-400">0 個</span> <span class="text-xs text-orange-600 ml-2">(在庫なし)</span>`;
+        document.getElementById('modalExpectedBoxes').innerHTML = `<span class="text-gray-400">= 0 箱</span>`;
+    } else {
+        document.getElementById('modalExpectedPieces').textContent = `${product.currentPhysicalQuantity} 個`;
+        document.getElementById('modalExpectedBoxes').textContent = `= ${expectedBoxes} 箱`;
+    }
+    document.getElementById('modalBoxInfo').textContent = `1箱 = ${product.収容数}個`;
+    
+    // Reset counter
+    updateTanaoroshiCounter();
+    
+    // Show modal
+    modal.classList.remove('hidden');
+    isTanaoroshiModalOpen = true;
+    
+    console.log('📋 Counting modal opened');
+}
+
+// Process box scan (when modal is open)
+async function processBoxScan(scannedProductNumber, scannedBoxQuantity) {
+    if (!currentTanaoroshiProduct) {
+        showToast('❌ エラー: 製品がありません', 'error');
+        return;
+    }
+    
+    // Validate product number matches
+    if (scannedProductNumber !== currentTanaoroshiProduct.品番) {
+        showToast(`❌ 製品番号が異なります！ 期待: ${currentTanaoroshiProduct.品番}`, 'error');
+        
+        // Flash red
+        const counterArea = document.getElementById('modalCounterArea');
+        counterArea.classList.add('bg-red-100', 'border-red-500');
+        setTimeout(() => {
+            counterArea.classList.remove('bg-red-100', 'border-red-500');
+            counterArea.classList.add('bg-gradient-to-br', 'from-green-50', 'to-emerald-50', 'border-green-200');
+        }, 1000);
+        
+        return;
+    }
+    
+    // Validate box quantity matches 収容数
+    if (scannedBoxQuantity !== currentTanaoroshiProduct.収容数) {
+        showToast(`❌ 箱数量が異なります！ 期待: ${currentTanaoroshiProduct.収容数}個/箱`, 'error');
+        return;
+    }
+    
+    // Increment count
+    currentTanaoroshiProduct.countedBoxes += 1;
+    currentTanaoroshiProduct.countedPieces += scannedBoxQuantity;
+    
+    // Update display
+    updateTanaoroshiCounter();
+    
+    // Flash green
+    const counterArea = document.getElementById('modalCounterArea');
+    counterArea.classList.add('bg-green-200', 'border-green-500');
+    setTimeout(() => {
+        counterArea.classList.remove('bg-green-200', 'border-green-500');
+        counterArea.classList.add('bg-gradient-to-br', 'from-green-50', 'to-emerald-50', 'border-green-200');
+    }, 300);
+    
+    console.log(`✅ Box scanned: ${currentTanaoroshiProduct.countedBoxes} boxes (${currentTanaoroshiProduct.countedPieces} pieces)`);
+}
+
+// Update counter display
+function updateTanaoroshiCounter() {
+    if (!currentTanaoroshiProduct) return;
+    
+    const countedBoxes = currentTanaoroshiProduct.countedBoxes;
+    const countedPieces = currentTanaoroshiProduct.countedPieces;
+    const expectedPieces = currentTanaoroshiProduct.currentPhysicalQuantity;
+    const expectedBoxes = Math.ceil(expectedPieces / currentTanaoroshiProduct.収容数);
+    
+    // Update counter text
+    document.getElementById('modalCountedBoxes').textContent = `${countedBoxes} 箱`;
+    document.getElementById('modalCountedPieces').textContent = `(${countedPieces} 個)`;
+    
+    // Update status indicator
+    const statusIndicator = document.getElementById('modalStatusIndicator');
+    const statusText = document.getElementById('modalStatusText');
+    
+    if (countedPieces === 0) {
+        statusIndicator.className = 'inline-flex items-center px-4 py-2 rounded-full text-sm font-medium bg-gray-100 text-gray-700';
+        statusText.textContent = 'スキャン待機中';
+    } else if (countedPieces < expectedPieces) {
+        statusIndicator.className = 'inline-flex items-center px-4 py-2 rounded-full text-sm font-medium bg-yellow-100 text-yellow-700';
+        statusText.textContent = `不足 (${expectedPieces - countedPieces}個)`;
+    } else if (countedPieces > expectedPieces) {
+        statusIndicator.className = 'inline-flex items-center px-4 py-2 rounded-full text-sm font-medium bg-red-100 text-red-700';
+        statusText.textContent = `超過 (+${countedPieces - expectedPieces}個)`;
+    } else {
+        statusIndicator.className = 'inline-flex items-center px-4 py-2 rounded-full text-sm font-medium bg-green-100 text-green-700';
+        statusText.textContent = '✓ 一致';
+    }
+}
+
+// Manual adjustment (+/- buttons)
+function adjustTanaoroshiCount(delta) {
+    if (!currentTanaoroshiProduct) return;
+    
+    const newBoxCount = currentTanaoroshiProduct.countedBoxes + delta;
+    
+    // Prevent negative count
+    if (newBoxCount < 0) {
+        showToast('❌ 箱数は0未満にできません', 'error');
+        return;
+    }
+    
+    currentTanaoroshiProduct.countedBoxes = newBoxCount;
+    currentTanaoroshiProduct.countedPieces = newBoxCount * currentTanaoroshiProduct.収容数;
+    
+    updateTanaoroshiCounter();
+    
+    console.log(`🔧 Manual adjustment: ${newBoxCount} boxes (${currentTanaoroshiProduct.countedPieces} pieces)`);
+}
+
+// Complete counting for current product
+async function completeTanaoroshiCount() {
+    if (!currentTanaoroshiProduct) return;
+    
+    const countedPieces = currentTanaoroshiProduct.countedPieces;
+    const expectedPieces = currentTanaoroshiProduct.currentPhysicalQuantity;
+    const difference = countedPieces - expectedPieces;
+    const isNewProduct = currentTanaoroshiProduct.isNewProduct || false;
+    
+    // For new products, show special confirmation
+    if (isNewProduct) {
+        if (countedPieces === 0) {
+            showToast('❌ カウント数を入力してください', 'error');
+            return;
+        }
+        
+        const message = `新規製品を在庫に追加します。\n品番: ${currentTanaoroshiProduct.品番}\n数量: ${countedPieces}個 (${currentTanaoroshiProduct.countedBoxes}箱)\n\nよろしいですか？`;
+        
+        if (!confirm(message)) {
+            return;
+        }
+    } else {
+        // If there's a discrepancy, show confirmation
+        if (difference !== 0) {
+            const boxDifference = Math.ceil(Math.abs(difference) / currentTanaoroshiProduct.収容数);
+            const action = difference > 0 ? '追加' : '削減';
+            const message = `在庫が ${Math.abs(difference)}個 (${boxDifference}箱) ${action}されます。よろしいですか？`;
+            
+            if (!confirm(message)) {
+                return;
+            }
+        }
+    }
+    
+    // Add to counted products list
+    tanaoroshiCountedProducts.push({
+        品番: currentTanaoroshiProduct.品番,
+        品名: currentTanaoroshiProduct.品名,
+        背番号: currentTanaoroshiProduct.背番号,
+        収容数: currentTanaoroshiProduct.収容数,
+        imageURL: currentTanaoroshiProduct.imageURL,
+        isNewProduct: isNewProduct,
+        oldPhysicalQuantity: expectedPieces,
+        newPhysicalQuantity: countedPieces,
+        oldReservedQuantity: currentTanaoroshiProduct.currentReservedQuantity,
+        countedBoxes: currentTanaoroshiProduct.countedBoxes,
+        difference: difference
+    });
+    
+    // Close modal
+    closeTanaoroshiModal();
+    
+    // Update summary list
+    updateTanaoroshiSummaryList();
+    
+    showToast('✅ カウント完了', 'success');
+}
+
+// Close counting modal
+function closeTanaoroshiModal() {
+    document.getElementById('tanaoroshiCountingModal').classList.add('hidden');
+    isTanaoroshiModalOpen = false;
+    currentTanaoroshiProduct = null;
+    
+    console.log('📋 Counting modal closed');
+}
+
+// Update summary list display
+function updateTanaoroshiSummaryList() {
+    const summaryList = document.getElementById('tanaoroshiSummaryList');
+    const itemsList = document.getElementById('tanaoroshiItemsList');
+    const itemCount = document.getElementById('tanaoroshiItemCount');
+    
+    // Show summary list
+    summaryList.classList.remove('hidden');
+    document.getElementById('tanaoroshiScannerArea').classList.add('hidden');
+    
+    // Update count
+    itemCount.textContent = `(${tanaoroshiCountedProducts.length})`;
+    
+    // Clear and rebuild list
+    itemsList.innerHTML = '';
+    
+    tanaoroshiCountedProducts.forEach((product, index) => {
+        const row = createTanaoroshiSummaryRow(product, index);
+        itemsList.appendChild(row);
+    });
+}
+
+// Create summary row element
+function createTanaoroshiSummaryRow(product, index) {
+    const row = document.createElement('div');
+    row.className = 'p-4 hover:bg-gray-50 transition-colors';
+    
+    const oldBoxes = Math.ceil(product.oldPhysicalQuantity / product.収容数);
+    const newBoxes = product.countedBoxes;
+    const diffClass = product.difference > 0 ? 'text-green-600' : product.difference < 0 ? 'text-red-600' : 'text-gray-600';
+    const diffSymbol = product.difference > 0 ? '+' : '';
+    const isNewProduct = product.isNewProduct || false;
+    
+    row.innerHTML = `
+        <div class="flex items-center justify-between">
+            <div class="flex items-center space-x-4 flex-1">
+                ${product.imageURL ? `
+                    <img src="${product.imageURL}" alt="${product.品番}" class="w-16 h-16 object-contain rounded border border-gray-200">
+                ` : `
+                    <div class="w-16 h-16 bg-gray-100 rounded border border-gray-200 flex items-center justify-center">
+                        <i class="fas fa-box text-gray-400"></i>
+                    </div>
+                `}
+                <div class="flex-1">
+                    <div class="flex items-center space-x-2">
+                        <h4 class="font-bold text-gray-900">${product.品番}</h4>
+                        ${isNewProduct ? `
+                            <span class="px-2 py-1 bg-orange-100 text-orange-700 text-xs font-bold rounded">NEW</span>
+                        ` : ''}
+                    </div>
+                    <p class="text-sm text-gray-600">${product.品名 || '-'}</p>
+                    <div class="flex items-center space-x-4 mt-2">
+                        <span class="text-sm">
+                            <span class="text-red-600 ${isNewProduct ? '' : 'line-through'}">${product.oldPhysicalQuantity}個 (${oldBoxes}箱)</span>
+                        </span>
+                        <i class="fas fa-arrow-right text-gray-400 text-xs"></i>
+                        <span class="text-sm">
+                            <span class="${diffClass} font-bold">${product.newPhysicalQuantity}個 (${newBoxes}箱)</span>
+                        </span>
+                        ${product.difference !== 0 ? `
+                            <span class="text-xs ${diffClass} font-medium">
+                                (${diffSymbol}${product.difference}個)
+                            </span>
+                        ` : ''}
+                    </div>
+                </div>
+            </div>
+            <div class="flex items-center space-x-2">
+                <button onclick="editTanaoroshiProduct(${index})" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors">
+                    <i class="fas fa-edit mr-1"></i>編集
+                </button>
+                <button onclick="deleteTanaoroshiProduct(${index})" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors">
+                    <i class="fas fa-trash mr-1"></i>削除
+                </button>
+            </div>
+        </div>
+    `;
+    
+    return row;
+}
+
+// Edit counted product
+function editTanaoroshiProduct(index) {
+    const product = tanaoroshiCountedProducts[index];
+    
+    // Remove from list
+    tanaoroshiCountedProducts.splice(index, 1);
+    
+    // Set as current product and reopen modal
+    currentTanaoroshiProduct = {
+        品番: product.品番,
+        品名: product.品名,
+        背番号: product.背番号,
+        収容数: product.収容数,
+        imageURL: product.imageURL,
+        isNewProduct: product.isNewProduct || false,
+        currentPhysicalQuantity: product.oldPhysicalQuantity,
+        currentReservedQuantity: product.oldReservedQuantity,
+        currentAvailableQuantity: product.oldPhysicalQuantity - product.oldReservedQuantity,
+        countedBoxes: product.countedBoxes,
+        countedPieces: product.newPhysicalQuantity
+    };
+    
+    openTanaoroshiCountingModal();
+    
+    // Update summary list
+    if (tanaoroshiCountedProducts.length === 0) {
+        // Reset to scanner area if no more products
+        document.getElementById('tanaoroshiSummaryList').classList.add('hidden');
+        document.getElementById('tanaoroshiScannerArea').classList.remove('hidden');
+    } else {
+        updateTanaoroshiSummaryList();
+    }
+}
+
+// Delete counted product
+function deleteTanaoroshiProduct(index) {
+    const product = tanaoroshiCountedProducts[index];
+    
+    if (!confirm(`${product.品番} を削除しますか？`)) {
+        return;
+    }
+    
+    tanaoroshiCountedProducts.splice(index, 1);
+    
+    if (tanaoroshiCountedProducts.length === 0) {
+        // Reset to scanner area
+        document.getElementById('tanaoroshiSummaryList').classList.add('hidden');
+        document.getElementById('tanaoroshiScannerArea').classList.remove('hidden');
+    } else {
+        updateTanaoroshiSummaryList();
+    }
+    
+    showToast('削除しました', 'info');
+}
+
+// Submit all counted products
+async function submitTanaoroshiCount() {
+    if (tanaoroshiCountedProducts.length === 0) {
+        showToast('❌ カウント済み製品がありません', 'error');
+        return;
+    }
+    
+    if (!confirm(`${tanaoroshiCountedProducts.length}件の製品カウントを送信しますか？`)) {
+        return;
+    }
+    
+    try {
+        // Show loading toast
+        showToast('📤 送信中...', 'info');
+        
+        // Prepare data
+        const submissionData = {
+            countedProducts: tanaoroshiCountedProducts,
+            submittedBy: currentWorker || 'Tablet User'
+        };
+        
+        console.log('📤 Submitting tanaoroshi:', submissionData);
+        
+        // Submit to API
+        const response = await fetch(`${API_BASE_URL}/tanaoroshi/submit`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(submissionData)
+        });
+        
+        if (!response.ok) {
+            throw new Error('Submission failed');
+        }
+        
+        const result = await response.json();
+        console.log('✅ Submission result:', result);
+        
+        showToast(`✅ ${result.processedCount}件の製品を更新しました`, 'success');
+        
+        // Reset system
+        setTimeout(() => {
+            initializeTanaoroshi();
+        }, 2000);
+        
+    } catch (error) {
+        console.error('Error submitting tanaoroshi:', error);
+        showToast('❌ 送信に失敗しました', 'error');
+    }
+}
+
+// ==================== END TANAOROSHI SYSTEM ====================
+
+// ==================== NYUKO (入庫) SYSTEM ====================
+
+// Global variables for nyuko
+let nyukoInputProducts = []; // Array to store input products
+let currentNyukoProduct = null; // Currently inputting product
+let nyukoScanBuffer = ''; // Buffer for QR scan input
+let isNyukoModalOpen = false; // Track if modal is open
+
+// Initialize nyuko when screen is shown
+function openNyukoSystem() {
+    showScreen('nyuko');
+    initializeNyuko();
+}
+
+function initializeNyuko() {
+    console.log('🔄 Initializing Nyuko system...');
+    
+    // Reset state
+    nyukoInputProducts = [];
+    currentNyukoProduct = null;
+    nyukoScanBuffer = '';
+    isNyukoModalOpen = false;
+    
+    // Show scanner area, hide summary list
+    document.getElementById('nyukoScannerArea').classList.remove('hidden');
+    document.getElementById('nyukoSummaryList').classList.add('hidden');
+    
+    // Close modal if open
+    document.getElementById('nyukoInputModal').classList.add('hidden');
+    
+    // Setup keyboard listener for HID mode QR scanner
+    setupNyukoKeyboardListener();
+    
+    console.log('✅ Nyuko system ready');
+}
+
+// Setup keyboard listener for QR scanner (HID mode)
+function setupNyukoKeyboardListener() {
+    // Remove existing listener if any
+    document.removeEventListener('keydown', nyukoKeyHandler);
+    
+    // Add new listener
+    document.addEventListener('keydown', nyukoKeyHandler);
+    
+    console.log('⌨️ Nyuko keyboard listener active');
+}
+
+// Keyboard handler for QR scanning
+function nyukoKeyHandler(event) {
+    // Only process if on nyuko screen
+    if (currentScreen !== 'nyuko') {
+        return;
+    }
+    
+    // Ignore if user is typing in an input field (except our modal state)
+    if (event.target.tagName === 'INPUT' && !isNyukoModalOpen) {
+        return;
+    }
+    
+    // Enter key - process the scanned data
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        
+        if (nyukoScanBuffer.trim() !== '') {
+            processNyukoScan(nyukoScanBuffer.trim());
+            nyukoScanBuffer = ''; // Clear buffer
+        }
+        
+        return;
+    }
+    
+    // Ignore special keys
+    if (event.key.length > 1 && event.key !== 'Enter') {
+        return;
+    }
+    
+    // Add character to buffer
+    nyukoScanBuffer += event.key;
+}
+
+// Process scanned QR code
+async function processNyukoScan(scanData) {
+    console.log('📦 Nyuko scan received:', scanData);
+    
+    // Parse QR code format: "GN519-10200,20"
+    const parts = scanData.split(',');
+    if (parts.length !== 2) {
+        showToast('❌ QRコード形式が無効です (形式: 品番,数量)', 'error');
+        return;
+    }
+    
+    const scannedProductNumber = parts[0].trim();
+    const scannedBoxQuantity = parseInt(parts[1].trim());
+    
+    if (!scannedProductNumber || isNaN(scannedBoxQuantity)) {
+        showToast('❌ QRコードデータが無効です', 'error');
+        return;
+    }
+    
+    // If no modal is open, this is the initial product scan
+    if (!isNyukoModalOpen) {
+        await startInputtingProduct(scannedProductNumber, scannedBoxQuantity);
+    } else {
+        // Modal is open, this is a box scan
+        await processNyukoBoxScan(scannedProductNumber, scannedBoxQuantity);
+    }
+}
+
+// Start inputting a new product
+async function startInputtingProduct(productNumber, referenceQuantity) {
+    try {
+        console.log(`🆕 Starting input for product: ${productNumber}`);
+        
+        // Fetch product data from API
+        showToast('🔍 製品情報を取得中...', 'info');
+        
+        const response = await fetch(`${API_BASE_URL}/nyuko/${productNumber}`);
+        
+        if (!response.ok) {
+            if (response.status === 404) {
+                showToast('❌ 製品が見つかりません', 'error');
+            } else {
+                showToast('❌ 製品情報の取得に失敗しました', 'error');
+            }
+            return;
+        }
+        
+        const productData = await response.json();
+        console.log('✅ Product data fetched:', productData);
+        
+        // Initialize current product object
+        currentNyukoProduct = {
+            品番: productData.品番,
+            品名: productData.品名,
+            背番号: productData.背番号,
+            収容数: productData.収容数,
+            imageURL: productData.imageURL,
+            inventoryExists: productData.inventoryExists,
+            currentPhysicalQuantity: productData.currentPhysicalQuantity,
+            currentReservedQuantity: productData.currentReservedQuantity,
+            countedBoxes: 0,
+            countedPieces: 0
+        };
+        
+        // Open input modal
+        openNyukoInputModal();
+        
+        showToast('✅ 入庫開始', 'success');
+        
+    } catch (error) {
+        console.error('Error starting product input:', error);
+        showToast('❌ エラーが発生しました', 'error');
+    }
+}
+
+// Open the input modal
+function openNyukoInputModal() {
+    if (!currentNyukoProduct) return;
+    
+    const modal = document.getElementById('nyukoInputModal');
+    const product = currentNyukoProduct;
+    
+    // Set product info
+    document.getElementById('nyukoModalProductNumber').textContent = product.品番;
+    document.getElementById('nyukoModalSebangou').textContent = product.背番号 || '-';
+    document.getElementById('nyukoModalProductName').textContent = product.品名 || '-';
+    
+    // Set product image
+    const imgElement = document.getElementById('nyukoModalProductImage');
+    if (product.imageURL) {
+        imgElement.src = product.imageURL;
+        imgElement.style.display = 'block';
+    } else {
+        imgElement.style.display = 'none';
+    }
+    
+    // Show current inventory if exists
+    const currentInventoryDiv = document.getElementById('nyukoCurrentInventory');
+    if (product.inventoryExists && product.currentPhysicalQuantity > 0) {
+        const currentBoxes = Math.ceil(product.currentPhysicalQuantity / product.収容数);
+        document.getElementById('nyukoCurrentPieces').textContent = `${product.currentPhysicalQuantity} 個`;
+        document.getElementById('nyukoCurrentBoxes').textContent = `= ${currentBoxes} 箱`;
+        currentInventoryDiv.classList.remove('hidden');
+    } else {
+        currentInventoryDiv.classList.add('hidden');
+    }
+    
+    // Set box info
+    document.getElementById('nyukoModalBoxInfo').textContent = `1箱 = ${product.収容数}個`;
+    
+    // Reset counter
+    updateNyukoCounter();
+    
+    // Show modal
+    modal.classList.remove('hidden');
+    isNyukoModalOpen = true;
+    
+    console.log('📋 Input modal opened');
+}
+
+// Process box scan (when modal is open)
+async function processNyukoBoxScan(scannedProductNumber, scannedBoxQuantity) {
+    if (!currentNyukoProduct) {
+        showToast('❌ エラー: 製品がありません', 'error');
+        return;
+    }
+    
+    // Validate product number matches
+    if (scannedProductNumber !== currentNyukoProduct.品番) {
+        showToast(`❌ 製品番号が異なります！ 期待: ${currentNyukoProduct.品番}`, 'error');
+        
+        // Flash red
+        const counterArea = document.getElementById('nyukoModalCounterArea');
+        counterArea.classList.add('bg-red-100', 'border-red-500');
+        setTimeout(() => {
+            counterArea.classList.remove('bg-red-100', 'border-red-500');
+            counterArea.classList.add('bg-gradient-to-br', 'from-purple-50', 'to-indigo-50', 'border-purple-200');
+        }, 1000);
+        
+        return;
+    }
+    
+    // Validate box quantity matches 収容数
+    if (scannedBoxQuantity !== currentNyukoProduct.収容数) {
+        showToast(`❌ 箱数量が異なります！ 期待: ${currentNyukoProduct.収容数}個/箱`, 'error');
+        return;
+    }
+    
+    // Increment count
+    currentNyukoProduct.countedBoxes += 1;
+    currentNyukoProduct.countedPieces += scannedBoxQuantity;
+    
+    // Update display
+    updateNyukoCounter();
+    
+    // Flash purple
+    const counterArea = document.getElementById('nyukoModalCounterArea');
+    counterArea.classList.add('bg-purple-200', 'border-purple-500');
+    setTimeout(() => {
+        counterArea.classList.remove('bg-purple-200', 'border-purple-500');
+        counterArea.classList.add('bg-gradient-to-br', 'from-purple-50', 'to-indigo-50', 'border-purple-200');
+    }, 300);
+    
+    console.log(`✅ Box scanned: ${currentNyukoProduct.countedBoxes} boxes (${currentNyukoProduct.countedPieces} pieces)`);
+}
+
+// Update counter display
+function updateNyukoCounter() {
+    if (!currentNyukoProduct) return;
+    
+    const countedBoxes = currentNyukoProduct.countedBoxes;
+    const countedPieces = currentNyukoProduct.countedPieces;
+    
+    // Update counter text
+    document.getElementById('nyukoModalCountedBoxes').textContent = `${countedBoxes} 箱`;
+    document.getElementById('nyukoModalCountedPieces').textContent = `(${countedPieces} 個)`;
+}
+
+// Manual adjustment (+/- buttons)
+function adjustNyukoCount(delta) {
+    if (!currentNyukoProduct) return;
+    
+    const newBoxCount = currentNyukoProduct.countedBoxes + delta;
+    
+    // Prevent negative count
+    if (newBoxCount < 0) {
+        showToast('❌ 箱数は0未満にできません', 'error');
+        return;
+    }
+    
+    currentNyukoProduct.countedBoxes = newBoxCount;
+    currentNyukoProduct.countedPieces = newBoxCount * currentNyukoProduct.収容数;
+    
+    updateNyukoCounter();
+    
+    console.log(`🔧 Manual adjustment: ${newBoxCount} boxes (${currentNyukoProduct.countedPieces} pieces)`);
+}
+
+// Complete input for current product
+async function completeNyukoInput() {
+    if (!currentNyukoProduct) return;
+    
+    const inputPieces = currentNyukoProduct.countedPieces;
+    
+    if (inputPieces === 0) {
+        showToast('❌ 入庫数量を入力してください', 'error');
+        return;
+    }
+    
+    const message = `${inputPieces}個 (${currentNyukoProduct.countedBoxes}箱) を入庫しますか？`;
+    
+    if (!confirm(message)) {
+        return;
+    }
+    
+    // Add to input products list
+    nyukoInputProducts.push({
+        品番: currentNyukoProduct.品番,
+        品名: currentNyukoProduct.品名,
+        背番号: currentNyukoProduct.背番号,
+        収容数: currentNyukoProduct.収容数,
+        imageURL: currentNyukoProduct.imageURL,
+        inventoryExists: currentNyukoProduct.inventoryExists,
+        oldPhysicalQuantity: currentNyukoProduct.currentPhysicalQuantity,
+        oldReservedQuantity: currentNyukoProduct.currentReservedQuantity,
+        inputQuantity: inputPieces,
+        inputBoxes: currentNyukoProduct.countedBoxes
+    });
+    
+    // Close modal
+    closeNyukoModal();
+    
+    // Update summary list
+    updateNyukoSummaryList();
+    
+    showToast('✅ 入庫完了', 'success');
+}
+
+// Close input modal
+function closeNyukoModal() {
+    document.getElementById('nyukoInputModal').classList.add('hidden');
+    isNyukoModalOpen = false;
+    currentNyukoProduct = null;
+    
+    console.log('📋 Input modal closed');
+}
+
+// Update summary list display
+function updateNyukoSummaryList() {
+    const summaryList = document.getElementById('nyukoSummaryList');
+    const itemsList = document.getElementById('nyukoItemsList');
+    const itemCount = document.getElementById('nyukoItemCount');
+    
+    // Show summary list
+    summaryList.classList.remove('hidden');
+    document.getElementById('nyukoScannerArea').classList.add('hidden');
+    
+    // Update count
+    itemCount.textContent = `(${nyukoInputProducts.length})`;
+    
+    // Clear and rebuild list
+    itemsList.innerHTML = '';
+    
+    nyukoInputProducts.forEach((product, index) => {
+        const row = createNyukoSummaryRow(product, index);
+        itemsList.appendChild(row);
+    });
+}
+
+// Create summary row element
+function createNyukoSummaryRow(product, index) {
+    const row = document.createElement('div');
+    row.className = 'p-4 hover:bg-gray-50 transition-colors';
+    
+    const oldBoxes = product.inventoryExists ? Math.ceil(product.oldPhysicalQuantity / product.収容数) : 0;
+    const newTotalPieces = product.oldPhysicalQuantity + product.inputQuantity;
+    const newTotalBoxes = Math.ceil(newTotalPieces / product.収容数);
+    
+    row.innerHTML = `
+        <div class="flex items-center justify-between">
+            <div class="flex items-center space-x-4 flex-1">
+                ${product.imageURL ? `
+                    <img src="${product.imageURL}" alt="${product.品番}" class="w-16 h-16 object-contain rounded border border-gray-200">
+                ` : `
+                    <div class="w-16 h-16 bg-gray-100 rounded border border-gray-200 flex items-center justify-center">
+                        <i class="fas fa-box text-gray-400"></i>
+                    </div>
+                `}
+                <div class="flex-1">
+                    <div class="flex items-center space-x-2">
+                        <h4 class="font-bold text-gray-900">${product.品番}</h4>
+                        ${!product.inventoryExists ? `
+                            <span class="px-2 py-1 bg-purple-100 text-purple-700 text-xs font-bold rounded">NEW</span>
+                        ` : ''}
+                    </div>
+                    <p class="text-sm text-gray-600">${product.品名 || '-'}</p>
+                    <div class="flex items-center space-x-4 mt-2">
+                        ${product.inventoryExists ? `
+                            <span class="text-sm">
+                                <span class="text-gray-600">${product.oldPhysicalQuantity}個 (${oldBoxes}箱)</span>
+                            </span>
+                            <i class="fas fa-arrow-right text-gray-400 text-xs"></i>
+                        ` : ''}
+                        <span class="text-sm">
+                            <span class="text-purple-600 font-bold">${newTotalPieces}個 (${newTotalBoxes}箱)</span>
+                        </span>
+                        <span class="text-xs text-green-600 font-medium">
+                            (+${product.inputQuantity}個)
+                        </span>
+                    </div>
+                </div>
+            </div>
+            <div class="flex items-center space-x-2">
+                <button onclick="editNyukoProduct(${index})" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors">
+                    <i class="fas fa-edit mr-1"></i>編集
+                </button>
+                <button onclick="deleteNyukoProduct(${index})" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors">
+                    <i class="fas fa-trash mr-1"></i>削除
+                </button>
+            </div>
+        </div>
+    `;
+    
+    return row;
+}
+
+// Edit input product
+function editNyukoProduct(index) {
+    const product = nyukoInputProducts[index];
+    
+    // Remove from list
+    nyukoInputProducts.splice(index, 1);
+    
+    // Set as current product and reopen modal
+    currentNyukoProduct = {
+        品番: product.品番,
+        品名: product.品名,
+        背番号: product.背番号,
+        収容数: product.収容数,
+        imageURL: product.imageURL,
+        inventoryExists: product.inventoryExists,
+        currentPhysicalQuantity: product.oldPhysicalQuantity,
+        currentReservedQuantity: product.oldReservedQuantity,
+        countedBoxes: product.inputBoxes,
+        countedPieces: product.inputQuantity
+    };
+    
+    openNyukoInputModal();
+    
+    // Update summary list
+    if (nyukoInputProducts.length === 0) {
+        // Reset to scanner area if no more products
+        document.getElementById('nyukoSummaryList').classList.add('hidden');
+        document.getElementById('nyukoScannerArea').classList.remove('hidden');
+    } else {
+        updateNyukoSummaryList();
+    }
+}
+
+// Delete input product
+function deleteNyukoProduct(index) {
+    const product = nyukoInputProducts[index];
+    
+    if (!confirm(`${product.品番} を削除しますか？`)) {
+        return;
+    }
+    
+    nyukoInputProducts.splice(index, 1);
+    
+    if (nyukoInputProducts.length === 0) {
+        // Reset to scanner area
+        document.getElementById('nyukoSummaryList').classList.add('hidden');
+        document.getElementById('nyukoScannerArea').classList.remove('hidden');
+    } else {
+        updateNyukoSummaryList();
+    }
+    
+    showToast('削除しました', 'info');
+}
+
+// Submit all input products
+async function submitNyukoInput() {
+    if (nyukoInputProducts.length === 0) {
+        showToast('❌ 入庫済み製品がありません', 'error');
+        return;
+    }
+    
+    if (!confirm(`${nyukoInputProducts.length}件の製品入庫を送信しますか？`)) {
+        return;
+    }
+    
+    try {
+        // Show loading toast
+        showToast('📤 送信中...', 'info');
+        
+        // Prepare data
+        const submissionData = {
+            inputProducts: nyukoInputProducts,
+            submittedBy: currentWorker || 'Tablet User'
+        };
+        
+        console.log('📤 Submitting nyuko:', submissionData);
+        
+        // Submit to API
+        const response = await fetch(`${API_BASE_URL}/nyuko/submit`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(submissionData)
+        });
+        
+        if (!response.ok) {
+            throw new Error('Submission failed');
+        }
+        
+        const result = await response.json();
+        console.log('✅ Submission result:', result);
+        
+        showToast(`✅ ${result.processedCount}件の製品を入庫しました`, 'success');
+        
+        // Reset system
+        setTimeout(() => {
+            initializeNyuko();
+        }, 2000);
+        
+    } catch (error) {
+        console.error('Error submitting nyuko:', error);
+        showToast('❌ 送信に失敗しました', 'error');
+    }
+}
+
+// ==================== END NYUKO SYSTEM ====================

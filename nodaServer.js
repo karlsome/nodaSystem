@@ -25,15 +25,13 @@ app.use(express.static('.'));
 
 // MongoDB connection with SSL options for local testing
 let db;
+
+// MongoDB options for local development (bypass SSL certificate verification)
 const mongoOptions = {
-    // SSL/TLS options for local testing
     tls: true,
     tlsAllowInvalidCertificates: true,
     tlsAllowInvalidHostnames: true,
-    // Connection pool settings
-    maxPoolSize: 10,
-    minPoolSize: 2,
-    serverSelectionTimeoutMS: 10000,
+    serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
 };
 
@@ -227,6 +225,40 @@ async function getActivePickingForDevice(deviceId) {
     }
 }
 
+// Helper function to calculate box quantity from piece quantity
+async function calculateBoxQuantity(品番, pieceQuantity) {
+    try {
+        const masterDB = client.db('Sasaki_Coating_MasterDB');
+        const masterCollection = masterDB.collection('masterDB');
+        
+        console.log(`🔍 Looking up 品番: "${品番}" in masterDB collection`);
+        const masterData = await masterCollection.findOne({ 品番 });
+        
+        if (!masterData) {
+            console.warn(`⚠️ No masterData found for ${品番} in masterDB collection`);
+            console.log(`   Defaulting to pieces: ${pieceQuantity}`);
+            return pieceQuantity;
+        }
+        
+        console.log(`✅ Found masterData for ${品番}:`, { 収容数: masterData.収容数, 品名: masterData.品名 });
+        
+        if (!masterData.収容数) {
+            console.warn(`⚠️ masterData exists but 収容数 is missing for ${品番}`);
+            console.log(`   Defaulting to pieces: ${pieceQuantity}`);
+            return pieceQuantity;
+        }
+        
+        const 収容数 = parseInt(masterData.収容数) || 1;
+        const boxQuantity = Math.ceil(pieceQuantity / 収容数);
+        
+        console.log(`📦 Box calculation for ${品番}: ${pieceQuantity} pieces ÷ ${収容数} = ${boxQuantity} boxes`);
+        return boxQuantity;
+    } catch (error) {
+        console.error(`❌ Error calculating box quantity for ${品番}:`, error);
+        return pieceQuantity; // Fallback to piece quantity on error
+    }
+}
+
 async function connectToMongoDB() {
     try {
         await client.connect();
@@ -283,7 +315,9 @@ function initializeMQTT() {
             payload: JSON.stringify({ status: 'offline', timestamp: Date.now() }),
             qos: 1,
             retain: true
-        }
+        },
+        // SSL/TLS options for HiveMQ Cloud
+        rejectUnauthorized: false  // Skip certificate verification (similar to MongoDB)
     };
     
     // Only add credentials if they're provided
@@ -478,7 +512,13 @@ async function handleDeviceCompletion(deviceId, data) {
     
     try {
         // Use existing completion logic
-        await completeLineItem(requestNumber, lineNumber, completedBy);
+        const result = await completeLineItem(requestNumber, lineNumber, completedBy);
+        
+        // Check if this was a duplicate completion
+        if (result.alreadyCompleted) {
+            console.log(`⚠️ Duplicate completion ignored for ${requestNumber} line ${lineNumber}`);
+            return; // Don't send notifications for duplicates
+        }
         
         // Send confirmation back to device (red screen)
         publishDeviceCommand(deviceId, {
@@ -558,10 +598,7 @@ io.on('connection', (socket) => {
             if (activePicking) {
                 // Device has active picking - restore green screen with box quantity
                 console.log(`🟢 Restoring active picking for device ${deviceId}: ${activePicking.requestNumber} - ${activePicking.品番} (${activePicking.quantity})`);
-                
-                // Calculate box quantity from master data
-                const boxQuantity = await getMasterDataAndCalculateBoxQuantity(activePicking.品番, activePicking.quantity);
-                
+                const boxQuantity = await calculateBoxQuantity(activePicking.品番, activePicking.quantity);
                 const displayUpdate = {
                     color: 'green',
                     quantity: boxQuantity,
@@ -606,7 +643,13 @@ io.on('connection', (socket) => {
         console.log(`Item completed by device ${deviceId}: ${requestNumber} line ${lineNumber}`);
         
         try {
-            await completeLineItem(requestNumber, lineNumber, completedBy);
+            const result = await completeLineItem(requestNumber, lineNumber, completedBy);
+            
+            // Check if this was a duplicate completion
+            if (result.alreadyCompleted) {
+                console.log(`⚠️ Duplicate completion ignored for ${requestNumber} line ${lineNumber}`);
+                return; // Don't send notifications for duplicates
+            }
             
             // Send red screen back to device
             socket.emit('display-update', {
@@ -787,14 +830,12 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
         // Broadcast to all IoT devices (MQTT + Socket.IO)
         console.log(`🚀 Broadcasting to both MQTT and Socket.IO devices`);
         
-        // Send to MQTT devices with box quantities (new hybrid approach)
+        // Send to MQTT devices (new hybrid approach) - with box quantities
         for (const item of updatedRequest.lineItems) {
             const deviceId = item.背番号;
             
             if (item.status === 'in-progress') {
-                // Calculate box quantity from master data
-                const boxQuantity = await getMasterDataAndCalculateBoxQuantity(item.品番, item.quantity);
-                
+                const boxQuantity = await calculateBoxQuantity(item.品番, item.quantity);
                 publishDeviceCommand(deviceId, {
                     color: 'green',
                     quantity: boxQuantity,
@@ -812,15 +853,13 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
             }
         }
 
-        // Send to Socket.IO devices with box quantities (existing functionality)
+        // Send to Socket.IO devices (existing functionality) - with box quantities
         for (const [deviceId, deviceSocket] of connectedDevices.entries()) {
             const deviceItem = updatedRequest.lineItems.find(item => item.背番号 === deviceId);
             
             if (deviceItem && deviceItem.status === 'in-progress') {
-                // Calculate box quantity from master data
-                const boxQuantity = await getMasterDataAndCalculateBoxQuantity(deviceItem.品番, deviceItem.quantity);
-                
-                // Device has items to pick - show green with box quantity
+                const boxQuantity = await calculateBoxQuantity(deviceItem.品番, deviceItem.quantity);
+                // Device has items to pick - show green with quantity
                 deviceSocket.emit('display-update', {
                     color: 'green',
                     quantity: boxQuantity,
@@ -865,11 +904,24 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         throw new Error('Line item not found');
     }
     
-    // Update the specific line item
+    // Check if line item is already completed - prevent duplicate processing
+    if (lineItem.status === 'completed') {
+        console.log(`⚠️ Line item ${lineNumber} for request ${requestNumber} is already completed. Ignoring duplicate completion.`);
+        return { allCompleted: true, request: request, alreadyCompleted: true };
+    }
+    
+    // Only process if status is 'in-progress'
+    if (lineItem.status !== 'in-progress') {
+        console.log(`⚠️ Line item ${lineNumber} for request ${requestNumber} has status '${lineItem.status}', cannot complete.`);
+        throw new Error(`Line item status is '${lineItem.status}', expected 'in-progress'`);
+    }
+    
+    // Update the specific line item - only if currently in-progress
     const updateResult = await collection.updateOne(
         { 
             requestNumber,
-            'lineItems.lineNumber': lineNumber
+            'lineItems.lineNumber': lineNumber,
+            'lineItems.status': 'in-progress'  // Only update if status is in-progress
         },
         {
             $set: {
@@ -883,10 +935,12 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
     );
     
     if (updateResult.matchedCount === 0) {
-        throw new Error('Line item not found');
+        console.log(`⚠️ Line item ${lineNumber} was already completed by another process.`);
+        return { allCompleted: true, request: request, alreadyCompleted: true };
     }
     
     // Create inventory transaction record to match admin backend structure
+    console.log(`✅ Processing completion for ${requestNumber} line ${lineNumber} - creating inventory transaction`);
     await createInventoryTransaction({
         背番号: lineItem.背番号,
         品番: lineItem.品番,
@@ -1062,17 +1116,18 @@ app.post('/api/picking-requests/:requestNumber/line/:lineNumber/start', async (r
             
             if (lineItem && lineItem.lineItems && lineItem.lineItems[0]) {
                 const item = lineItem.lineItems[0];
+                const boxQuantity = await calculateBoxQuantity(item.品番, item.quantity);
                 io.emit('display-update', {
                     deviceId: deviceId,
                     color: 'green',
-                    quantity: item.quantity,
-                    message: `Pick ${item.quantity}`,
+                    quantity: boxQuantity,
+                    message: `Pick ${boxQuantity}`,
                     requestNumber: requestNumber,
                     lineNumber: parseInt(lineNumber),
                     品番: item.品番
                 });
                 
-                console.log(`Picking started for ${requestNumber} line ${lineNumber} on device ${deviceId} by ${startedBy}`);
+                console.log(`Picking started for ${requestNumber} line ${lineNumber} on device ${deviceId} by ${startedBy} (${boxQuantity} boxes)`);
             }
         }
         
@@ -1116,9 +1171,7 @@ app.get('/api/device/:deviceId/status', async (req, res) => {
         console.log(`🌐 REST API: Active picking for ${deviceId}:`, activePicking);
         
         if (activePicking) {
-            // Calculate box quantity from master data
-            const boxQuantity = await getMasterDataAndCalculateBoxQuantity(activePicking.品番, activePicking.quantity);
-            
+            const boxQuantity = await calculateBoxQuantity(activePicking.品番, activePicking.quantity);
             const response = {
                 status: 'picking',
                 color: 'green',
@@ -1156,8 +1209,13 @@ app.put('/api/picking-requests/:requestNumber/line/:lineNumber/status', async (r
             return res.status(400).json({ error: 'Invalid status' });
         }
         
-        await completeLineItem(requestNumber, parseInt(lineNumber), completedBy);
-        res.json({ message: 'Line item status updated successfully' });
+        const result = await completeLineItem(requestNumber, parseInt(lineNumber), completedBy);
+        
+        if (result.alreadyCompleted) {
+            res.json({ message: 'Line item was already completed', alreadyCompleted: true });
+        } else {
+            res.json({ message: 'Line item status updated successfully' });
+        }
         
     } catch (error) {
         console.error('Error updating line item status:', error);
@@ -1276,9 +1334,8 @@ async function notifyDeviceStatusChange(deviceId, requestNumber, lineNumber, qua
     let command = null;
     
     if (newStatus === 'in-progress') {
-        // Calculate box quantity from master data
-        const boxQuantity = await getMasterDataAndCalculateBoxQuantity(品番, quantity);
-        
+        // Calculate box quantity for display
+        const boxQuantity = await calculateBoxQuantity(品番, quantity);
         command = {
             color: 'green',
             quantity: boxQuantity,
@@ -2031,6 +2088,406 @@ app.post('/api/inventory/count-submit', async (req, res) => {
 });
 
 // ==================== END INVENTORY COUNT API ENDPOINTS ====================
+
+// ==================== TANAOROSHI (棚卸し) API ENDPOINTS ====================
+
+// Get product info for tanaoroshi by 品番
+app.get('/api/tanaoroshi/:productNumber', async (req, res) => {
+    try {
+        const { productNumber } = req.params;
+        console.log(`📦 Fetching tanaoroshi data for: ${productNumber}`);
+
+        await client.connect();
+        
+        // Fetch master data
+        const masterDb = client.db("Sasaki_Coating_MasterDB");
+        const masterCollection = masterDb.collection("masterDB");
+        const masterData = await masterCollection.findOne({ 品番: productNumber });
+
+        if (!masterData) {
+            return res.status(404).json({ error: 'Product not found in master database' });
+        }
+
+        // Fetch current inventory data
+        const db = client.db("submittedDB");
+        const inventoryCollection = db.collection("nodaInventoryDB");
+        
+        // Get the latest inventory record for this product
+        const currentInventory = await inventoryCollection
+            .find({ 品番: productNumber })
+            .sort({ timeStamp: -1 })
+            .limit(1)
+            .toArray();
+
+        // Check if product exists in inventory
+        const isNewProduct = currentInventory.length === 0;
+        const latestRecord = isNewProduct ? null : currentInventory[0];
+
+        res.json({
+            // Master data
+            品番: masterData.品番,
+            品名: masterData.品名,
+            モデル: masterData.モデル,
+            背番号: masterData.背番号,
+            形状: masterData.形状,
+            色: masterData.色,
+            収容数: parseInt(masterData.収容数) || 1,
+            imageURL: masterData.imageURL || '',
+            
+            // Current inventory data (0 if new product)
+            isNewProduct: isNewProduct,
+            currentPhysicalQuantity: isNewProduct ? 0 : (latestRecord.physicalQuantity || 0),
+            currentReservedQuantity: isNewProduct ? 0 : (latestRecord.reservedQuantity || 0),
+            currentAvailableQuantity: isNewProduct ? 0 : (latestRecord.availableQuantity || 0),
+            currentRunningQuantity: isNewProduct ? 0 : (latestRecord.runningQuantity || 0)
+        });
+
+    } catch (error) {
+        console.error('Error fetching tanaoroshi data:', error);
+        res.status(500).json({ error: 'Failed to fetch tanaoroshi data', details: error.message });
+    }
+});
+
+// Submit tanaoroshi (棚卸し) count results
+app.post('/api/tanaoroshi/submit', async (req, res) => {
+    try {
+        const { countedProducts, submittedBy } = req.body;
+        
+        if (!countedProducts || !Array.isArray(countedProducts) || countedProducts.length === 0) {
+            return res.status(400).json({ error: 'No counted products provided' });
+        }
+
+        if (!submittedBy) {
+            return res.status(400).json({ error: 'Submitted by information required' });
+        }
+
+        console.log(`📦 Processing tanaoroshi submission from ${submittedBy} for ${countedProducts.length} products`);
+
+        await client.connect();
+        const db = client.db("submittedDB");
+        const inventoryCollection = db.collection("nodaInventoryDB");
+
+        const processedItems = [];
+        const errors = [];
+        const submissionTimestamp = new Date();
+
+        for (const product of countedProducts) {
+            try {
+                const { 品番, 背番号, newPhysicalQuantity, oldPhysicalQuantity, oldReservedQuantity, isNewProduct } = product;
+
+                if (!品番 || !背番号 || newPhysicalQuantity === undefined) {
+                    errors.push({ 品番, error: 'Missing required fields' });
+                    continue;
+                }
+
+                // Handle new products (not in inventory before)
+                if (isNewProduct) {
+                    const transactionRecord = {
+                        背番号: 背番号,
+                        品番: 品番,
+                        timeStamp: submissionTimestamp,
+                        Date: submissionTimestamp.toISOString().split('T')[0],
+                        
+                        physicalQuantity: newPhysicalQuantity,
+                        reservedQuantity: 0,
+                        availableQuantity: newPhysicalQuantity,
+                        runningQuantity: newPhysicalQuantity,
+                        lastQuantity: 0,
+                        
+                        action: `棚卸し (+${newPhysicalQuantity})`,
+                        source: `tablet 棚卸し - ${submittedBy}`,
+                        note: `added ${newPhysicalQuantity} because missing from inventory`
+                    };
+
+                    await inventoryCollection.insertOne(transactionRecord);
+
+                    processedItems.push({
+                        品番: 品番,
+                        背番号: 背番号,
+                        oldQuantity: 0,
+                        newQuantity: newPhysicalQuantity,
+                        difference: newPhysicalQuantity,
+                        isNew: true
+                    });
+
+                    console.log(`✅ New product added to inventory: ${品番} with ${newPhysicalQuantity} pieces`);
+                    continue;
+                }
+
+                // Handle existing products
+                // Calculate the difference
+                const difference = newPhysicalQuantity - oldPhysicalQuantity;
+                
+                // Calculate new available quantity (reservedQuantity stays the same)
+                const newAvailableQuantity = newPhysicalQuantity - oldReservedQuantity;
+                
+                // Get the previous running quantity to calculate new running quantity
+                const previousRecord = await inventoryCollection
+                    .find({ 品番: 品番 })
+                    .sort({ timeStamp: -1 })
+                    .limit(1)
+                    .toArray();
+                
+                const previousRunningQuantity = previousRecord.length > 0 ? previousRecord[0].runningQuantity : 0;
+                const newRunningQuantity = previousRunningQuantity + difference;
+
+                // Determine action and note
+                let action, note;
+                if (difference > 0) {
+                    action = `棚卸し (+${difference})`;
+                    note = `added ${difference} pieces because lacking`;
+                } else if (difference < 0) {
+                    action = `棚卸し (${difference})`;
+                    note = `deducted ${Math.abs(difference)} pieces because excess`;
+                } else {
+                    action = '棚卸し (±0)';
+                    note = 'count matches inventory';
+                }
+
+                // Create transaction record
+                const transactionRecord = {
+                    背番号: 背番号,
+                    品番: 品番,
+                    timeStamp: submissionTimestamp,
+                    Date: submissionTimestamp.toISOString().split('T')[0],
+                    
+                    physicalQuantity: newPhysicalQuantity,
+                    reservedQuantity: oldReservedQuantity, // Keep the same
+                    availableQuantity: newAvailableQuantity,
+                    runningQuantity: newRunningQuantity,
+                    lastQuantity: newPhysicalQuantity,
+                    
+                    action: action,
+                    source: `tablet 棚卸し - ${submittedBy}`,
+                    note: note
+                };
+
+                // Insert the new record
+                await inventoryCollection.insertOne(transactionRecord);
+
+                processedItems.push({
+                    品番: 品番,
+                    背番号: 背番号,
+                    oldQuantity: oldPhysicalQuantity,
+                    newQuantity: newPhysicalQuantity,
+                    difference: difference
+                });
+
+                console.log(`✅ Tanaoroshi processed for ${品番}: ${oldPhysicalQuantity} → ${newPhysicalQuantity} (${difference >= 0 ? '+' : ''}${difference})`);
+
+            } catch (itemError) {
+                console.error(`Error processing item ${product.品番}:`, itemError);
+                errors.push({ 品番: product.品番, error: itemError.message });
+            }
+        }
+
+        res.json({
+            success: true,
+            processedCount: processedItems.length,
+            errorCount: errors.length,
+            processedItems: processedItems,
+            errors: errors.length > 0 ? errors : undefined,
+            submittedBy: submittedBy,
+            submittedAt: submissionTimestamp.toISOString()
+        });
+
+    } catch (error) {
+        console.error('Error submitting tanaoroshi:', error);
+        res.status(500).json({ error: 'Failed to submit tanaoroshi', details: error.message });
+    }
+});
+
+// ==================== END TANAOROSHI API ENDPOINTS ====================
+
+// ==================== NYUKO (入庫) API ENDPOINTS ====================
+
+// Get product info for nyuko by 品番
+app.get('/api/nyuko/:productNumber', async (req, res) => {
+    try {
+        const { productNumber } = req.params;
+        console.log(`📦 Fetching nyuko data for: ${productNumber}`);
+
+        await client.connect();
+        
+        // Fetch master data
+        const masterDb = client.db("Sasaki_Coating_MasterDB");
+        const masterCollection = masterDb.collection("masterDB");
+        const masterData = await masterCollection.findOne({ 品番: productNumber });
+
+        if (!masterData) {
+            return res.status(404).json({ error: 'Product not found in master database' });
+        }
+
+        // Fetch current inventory data (if exists)
+        const db = client.db("submittedDB");
+        const inventoryCollection = db.collection("nodaInventoryDB");
+        
+        // Get the latest inventory record for this product
+        const currentInventory = await inventoryCollection
+            .find({ 品番: productNumber })
+            .sort({ timeStamp: -1 })
+            .limit(1)
+            .toArray();
+
+        // Check if product exists in inventory
+        const inventoryExists = currentInventory.length > 0;
+        const latestRecord = inventoryExists ? currentInventory[0] : null;
+
+        res.json({
+            // Master data
+            品番: masterData.品番,
+            品名: masterData.品名,
+            モデル: masterData.モデル,
+            背番号: masterData.背番号,
+            形状: masterData.形状,
+            色: masterData.色,
+            収容数: parseInt(masterData.収容数) || 1,
+            imageURL: masterData.imageURL || '',
+            
+            // Current inventory data (if exists)
+            inventoryExists: inventoryExists,
+            currentPhysicalQuantity: inventoryExists ? (latestRecord.physicalQuantity || 0) : 0,
+            currentReservedQuantity: inventoryExists ? (latestRecord.reservedQuantity || 0) : 0,
+            currentAvailableQuantity: inventoryExists ? (latestRecord.availableQuantity || 0) : 0,
+            currentRunningQuantity: inventoryExists ? (latestRecord.runningQuantity || 0) : 0
+        });
+
+    } catch (error) {
+        console.error('Error fetching nyuko data:', error);
+        res.status(500).json({ error: 'Failed to fetch nyuko data', details: error.message });
+    }
+});
+
+// Submit nyuko (入庫) input results
+app.post('/api/nyuko/submit', async (req, res) => {
+    try {
+        const { inputProducts, submittedBy } = req.body;
+        
+        if (!inputProducts || !Array.isArray(inputProducts) || inputProducts.length === 0) {
+            return res.status(400).json({ error: 'No input products provided' });
+        }
+
+        if (!submittedBy) {
+            return res.status(400).json({ error: 'Submitted by information required' });
+        }
+
+        console.log(`📦 Processing nyuko submission from ${submittedBy} for ${inputProducts.length} products`);
+
+        await client.connect();
+        const db = client.db("submittedDB");
+        const inventoryCollection = db.collection("nodaInventoryDB");
+
+        const processedItems = [];
+        const errors = [];
+        const submissionTimestamp = new Date();
+
+        for (const product of inputProducts) {
+            try {
+                const { 品番, 背番号, inputQuantity, inventoryExists, oldPhysicalQuantity, oldReservedQuantity } = product;
+
+                if (!品番 || !背番号 || inputQuantity === undefined) {
+                    errors.push({ 品番, error: 'Missing required fields' });
+                    continue;
+                }
+
+                let transactionRecord;
+
+                if (!inventoryExists) {
+                    // NEW PRODUCT: Create initial inventory record
+                    transactionRecord = {
+                        背番号: 背番号,
+                        品番: 品番,
+                        timeStamp: submissionTimestamp,
+                        Date: submissionTimestamp.toISOString().split('T')[0],
+                        
+                        physicalQuantity: inputQuantity,
+                        reservedQuantity: 0,
+                        availableQuantity: inputQuantity,
+                        runningQuantity: inputQuantity,
+                        lastQuantity: 0,
+                        
+                        action: `Warehouse Input (+${inputQuantity})`,
+                        source: `tablet 入庫 - ${submittedBy}`
+                    };
+
+                    processedItems.push({
+                        品番: 品番,
+                        背番号: 背番号,
+                        oldQuantity: 0,
+                        newQuantity: inputQuantity,
+                        inputQuantity: inputQuantity,
+                        isNew: true
+                    });
+
+                } else {
+                    // EXISTING PRODUCT: Add to current inventory
+                    const newPhysicalQuantity = oldPhysicalQuantity + inputQuantity;
+                    const newAvailableQuantity = newPhysicalQuantity - oldReservedQuantity;
+                    
+                    // Get previous running quantity
+                    const previousRecord = await inventoryCollection
+                        .find({ 品番: 品番 })
+                        .sort({ timeStamp: -1 })
+                        .limit(1)
+                        .toArray();
+                    
+                    const previousRunningQuantity = previousRecord.length > 0 ? previousRecord[0].runningQuantity : 0;
+                    const newRunningQuantity = previousRunningQuantity + inputQuantity;
+
+                    transactionRecord = {
+                        背番号: 背番号,
+                        品番: 品番,
+                        timeStamp: submissionTimestamp,
+                        Date: submissionTimestamp.toISOString().split('T')[0],
+                        
+                        physicalQuantity: newPhysicalQuantity,
+                        reservedQuantity: oldReservedQuantity,
+                        availableQuantity: newAvailableQuantity,
+                        runningQuantity: newRunningQuantity,
+                        lastQuantity: newPhysicalQuantity,
+                        
+                        action: `Warehouse Input (+${inputQuantity})`,
+                        source: `tablet 入庫 - ${submittedBy}`
+                    };
+
+                    processedItems.push({
+                        品番: 品番,
+                        背番号: 背番号,
+                        oldQuantity: oldPhysicalQuantity,
+                        newQuantity: newPhysicalQuantity,
+                        inputQuantity: inputQuantity,
+                        isNew: false
+                    });
+                }
+
+                // Insert the new record
+                await inventoryCollection.insertOne(transactionRecord);
+
+                console.log(`✅ Nyuko processed for ${品番}: ${inventoryExists ? `${oldPhysicalQuantity} → ${oldPhysicalQuantity + inputQuantity}` : `NEW → ${inputQuantity}`} (+${inputQuantity})`);
+
+            } catch (itemError) {
+                console.error(`Error processing item ${product.品番}:`, itemError);
+                errors.push({ 品番: product.品番, error: itemError.message });
+            }
+        }
+
+        res.json({
+            success: true,
+            processedCount: processedItems.length,
+            errorCount: errors.length,
+            processedItems: processedItems,
+            errors: errors.length > 0 ? errors : undefined,
+            submittedBy: submittedBy,
+            submittedAt: submissionTimestamp.toISOString()
+        });
+
+    } catch (error) {
+        console.error('Error submitting nyuko:', error);
+        res.status(500).json({ error: 'Failed to submit nyuko', details: error.message });
+    }
+});
+
+// ==================== END NYUKO API ENDPOINTS ====================
 
 // ==================== MASTER DATA API ENDPOINT ====================
 
