@@ -2644,6 +2644,76 @@ async function checkRecentStatusChanges() {
     }
 }
 
+// API endpoint to fetch unique factories from multiple collections
+app.post('/api/factories/batch', async (req, res) => {
+    try {
+        // Hardcoded collections - always fetch from kensaDB and pressDB
+        const collections = ['kensaDB', 'pressDB'];
+
+        console.log(`📋 Fetching unique factory values from collections: ${collections.join(', ')}`);
+
+        const db = client.db('submittedDB');
+        const results = {};
+
+        // Process each collection
+        for (const collectionName of collections) {
+            try {
+                const targetCollection = db.collection(collectionName);
+
+                const uniqueFactories = await targetCollection.aggregate([
+                    {
+                        $match: {
+                            '工場': { $exists: true, $ne: null, $ne: '' }
+                        }
+                    },
+                    {
+                        $group: {
+                            _id: '$工場'
+                        }
+                    },
+                    {
+                        $sort: { '_id': 1 }
+                    },
+                    {
+                        $project: {
+                            _id: 0,
+                            factory: '$_id'
+                        }
+                    }
+                ]).toArray();
+
+                results[collectionName] = {
+                    factories: uniqueFactories.map(item => item.factory),
+                    count: uniqueFactories.length
+                };
+
+                console.log(`✅ Found ${uniqueFactories.length} unique factories in ${collectionName}`);
+
+            } catch (collectionError) {
+                console.error(`❌ Error processing ${collectionName}:`, collectionError);
+                results[collectionName] = {
+                    error: collectionError.message,
+                    factories: [],
+                    count: 0
+                };
+            }
+        }
+
+        res.json({
+            success: true,
+            results: results,
+            totalCollections: collections.length
+        });
+
+    } catch (error) {
+        console.error('❌ Error in batch factory fetch:', error);
+        res.status(500).json({ 
+            error: 'Failed to fetch factory lists',
+            message: error.message
+        });
+    }
+});
+
 // Graceful shutdown
 process.on('SIGINT', async () => {
     console.log('Shutting down server...');

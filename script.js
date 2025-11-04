@@ -88,6 +88,129 @@ function extractFactoryFromURL() {
     }
 }
 
+// Open factory selector modal
+function openFactorySelector() {
+    const modal = document.getElementById('factorySelectorModal');
+    if (modal) {
+        modal.classList.remove('hidden');
+        loadFactoryList();
+    }
+}
+
+// Close factory selector modal
+function closeFactorySelector() {
+    const modal = document.getElementById('factorySelectorModal');
+    if (modal) {
+        modal.classList.add('hidden');
+    }
+}
+
+// Load factory list from API
+async function loadFactoryList() {
+    const loadingState = document.getElementById('factoryLoadingState');
+    const listContainer = document.getElementById('factoryListContainer');
+    const errorState = document.getElementById('factoryErrorState');
+    
+    // Show loading state
+    loadingState.classList.remove('hidden');
+    listContainer.classList.add('hidden');
+    errorState.classList.add('hidden');
+    
+    try {
+        console.log('📋 Fetching factory list from API...');
+        
+        const response = await fetch(`${API_BASE_URL}/factories/batch`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        if (!response.ok) {
+            throw new Error('Failed to fetch factory list');
+        }
+        
+        const data = await response.json();
+        console.log('✅ Factory list received:', data);
+        
+        // Collect all unique factories from all collections
+        const factorySet = new Set();
+        
+        // Add default factory
+        factorySet.add('野田倉庫');
+        
+        // Add factories from each collection
+        Object.values(data.results).forEach(result => {
+            if (result.factories && Array.isArray(result.factories)) {
+                result.factories.forEach(f => factorySet.add(f));
+            }
+        });
+        
+        // Convert to sorted array
+        const factories = Array.from(factorySet).sort();
+        
+        console.log('🏭 Unique factories:', factories);
+        
+        // Display factory list
+        displayFactoryList(factories);
+        
+    } catch (error) {
+        console.error('❌ Error loading factory list:', error);
+        loadingState.classList.add('hidden');
+        errorState.classList.remove('hidden');
+    }
+}
+
+// Display factory list in modal
+function displayFactoryList(factories) {
+    const loadingState = document.getElementById('factoryLoadingState');
+    const listContainer = document.getElementById('factoryListContainer');
+    
+    loadingState.classList.add('hidden');
+    listContainer.classList.remove('hidden');
+    listContainer.innerHTML = '';
+    
+    factories.forEach(factoryName => {
+        const button = document.createElement('button');
+        button.className = 'w-full px-4 py-3 text-left rounded-lg border-2 transition-all';
+        
+        // Highlight current factory
+        if (factoryName === factory) {
+            button.className += ' border-green-500 bg-green-50 text-green-800 font-semibold';
+            button.innerHTML = `
+                <div class="flex items-center justify-between">
+                    <span>
+                        <i class="fas fa-industry mr-2"></i>
+                        ${factoryName}
+                    </span>
+                    <i class="fas fa-check text-green-600"></i>
+                </div>
+            `;
+        } else {
+            button.className += ' border-gray-200 hover:border-green-300 hover:bg-green-50 text-gray-700';
+            button.innerHTML = `
+                <i class="fas fa-industry mr-2 text-gray-400"></i>
+                ${factoryName}
+            `;
+            button.onclick = () => selectFactory(factoryName);
+        }
+        
+        listContainer.appendChild(button);
+    });
+}
+
+// Select a factory and redirect with new parameter
+function selectFactory(factoryName) {
+    console.log('🏭 Factory selected:', factoryName);
+    
+    // Build new URL with factory parameter
+    const currentUrl = new URL(window.location.href);
+    currentUrl.searchParams.set('selected', encodeURIComponent(factoryName));
+    
+    // Redirect to new URL (this will reload the page)
+    window.location.href = currentUrl.toString();
+}
+
 // Socket.IO initialization
 function initializeSocket() {
     if (!socket) {
@@ -1603,6 +1726,12 @@ window.clearInventoryList = clearInventoryList;
 window.submitInventoryCount = submitInventoryCount;
 window.updateInventoryItemQuantity = updateInventoryItemQuantity;
 window.removeInventoryItem = removeInventoryItem;
+
+// Factory selector functions
+window.openFactorySelector = openFactorySelector;
+window.closeFactorySelector = closeFactorySelector;
+window.loadFactoryList = loadFactoryList;
+window.selectFactory = selectFactory;
 
 // Tanaoroshi (棚卸し) system functions
 window.adjustTanaoroshiCount = adjustTanaoroshiCount;
