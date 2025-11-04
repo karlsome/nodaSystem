@@ -2155,6 +2155,7 @@ app.get('/api/tanaoroshi/:productNumber', async (req, res) => {
 app.post('/api/tanaoroshi/submit', async (req, res) => {
     try {
         const { countedProducts, submittedBy } = req.body;
+        const factory = req.body.factory || '野田倉庫'; // Default to 野田倉庫 if not specified
         
         if (!countedProducts || !Array.isArray(countedProducts) || countedProducts.length === 0) {
             return res.status(400).json({ error: 'No counted products provided' });
@@ -2165,6 +2166,7 @@ app.post('/api/tanaoroshi/submit', async (req, res) => {
         }
 
         console.log(`📦 Processing tanaoroshi submission from ${submittedBy} for ${countedProducts.length} products`);
+        console.log(`🏭 Factory location: ${factory}`);
 
         await client.connect();
         const db = client.db("submittedDB");
@@ -2199,7 +2201,8 @@ app.post('/api/tanaoroshi/submit', async (req, res) => {
                         
                         action: `棚卸し (+${newPhysicalQuantity})`,
                         source: `tablet 棚卸し - ${submittedBy}`,
-                        note: `added ${newPhysicalQuantity} because missing from inventory`
+                        note: `added ${newPhysicalQuantity} because missing from inventory`,
+                        工場: factory
                     };
 
                     await inventoryCollection.insertOne(transactionRecord);
@@ -2262,7 +2265,8 @@ app.post('/api/tanaoroshi/submit', async (req, res) => {
                     
                     action: action,
                     source: `tablet 棚卸し - ${submittedBy}`,
-                    note: note
+                    note: note,
+                    工場: factory
                 };
 
                 // Insert the new record
@@ -2365,6 +2369,7 @@ app.get('/api/nyuko/:productNumber', async (req, res) => {
 app.post('/api/nyuko/submit', async (req, res) => {
     try {
         const { inputProducts, submittedBy } = req.body;
+        const factory = req.body.factory || '野田倉庫'; // Default to 野田倉庫 if not specified
         
         if (!inputProducts || !Array.isArray(inputProducts) || inputProducts.length === 0) {
             return res.status(400).json({ error: 'No input products provided' });
@@ -2375,6 +2380,7 @@ app.post('/api/nyuko/submit', async (req, res) => {
         }
 
         console.log(`📦 Processing nyuko submission from ${submittedBy} for ${inputProducts.length} products`);
+        console.log(`🏭 Factory location: ${factory}`);
 
         await client.connect();
         const db = client.db("submittedDB");
@@ -2410,7 +2416,8 @@ app.post('/api/nyuko/submit', async (req, res) => {
                         lastQuantity: 0,
                         
                         action: `Warehouse Input (+${inputQuantity})`,
-                        source: `tablet 入庫 - ${submittedBy}`
+                        source: `tablet 入庫 - ${submittedBy}`,
+                        工場: factory
                     };
 
                     processedItems.push({
@@ -2450,7 +2457,8 @@ app.post('/api/nyuko/submit', async (req, res) => {
                         lastQuantity: newPhysicalQuantity,
                         
                         action: `Warehouse Input (+${inputQuantity})`,
-                        source: `tablet 入庫 - ${submittedBy}`
+                        source: `tablet 入庫 - ${submittedBy}`,
+                        工場: factory
                     };
 
                     processedItems.push({

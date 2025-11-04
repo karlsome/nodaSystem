@@ -10,6 +10,7 @@ let currentWorker = null;
 let socket = null;
 let recentActivities = []; // Initialize empty array for activities
 let todaysTasks = []; // Initialize empty array for tasks
+let factory = null; // Factory location from URL parameter
 
 // API base URL - change this to your server URL
 const API_BASE_URL = 'http://localhost:3001/api';
@@ -30,6 +31,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
 function initializeApp() {
     console.log('🔄 Initializing app...');
+
+    // Extract factory from URL parameter
+    extractFactoryFromURL();
 
     // Initialize language system
     if (typeof initializeLanguage === 'function') {
@@ -53,6 +57,34 @@ function initializeApp() {
     } else {
         console.log('❌ No saved worker found, showing login screen');
         showScreen('login');
+    }
+}
+
+// Extract factory location from URL parameter
+function extractFactoryFromURL() {
+    try {
+        const urlParams = new URLSearchParams(window.location.search);
+        const selectedFactory = urlParams.get('selected');
+        
+        if (selectedFactory) {
+            factory = decodeURIComponent(selectedFactory);
+            console.log('🏭 Factory location set from URL:', factory);
+        } else {
+            // Default to 野田倉庫 if no parameter provided
+            factory = '野田倉庫';
+            console.log('🏭 No factory parameter found, using default:', factory);
+        }
+        
+        // Display factory name in header
+        const factoryDisplay = document.getElementById('factoryDisplay');
+        const factoryName = document.getElementById('factoryName');
+        if (factoryDisplay && factoryName) {
+            factoryName.textContent = factory;
+            factoryDisplay.style.display = 'block';
+        }
+    } catch (error) {
+        console.error('❌ Error extracting factory from URL:', error);
+        factory = '野田倉庫'; // Use default on error
     }
 }
 
@@ -3067,10 +3099,12 @@ async function submitTanaoroshiCount() {
         // Prepare data
         const submissionData = {
             countedProducts: tanaoroshiCountedProducts,
-            submittedBy: currentWorker || 'Tablet User'
+            submittedBy: currentWorker || 'Tablet User',
+            factory: factory // Include factory location
         };
         
         console.log('📤 Submitting tanaoroshi:', submissionData);
+        console.log('🏭 Factory location:', factory);
         
         // Submit to API
         const response = await fetch(`${API_BASE_URL}/tanaoroshi/submit`, {
@@ -3606,10 +3640,12 @@ async function submitNyukoInput() {
         // Prepare data
         const submissionData = {
             inputProducts: nyukoInputProducts,
-            submittedBy: currentWorker || 'Tablet User'
+            submittedBy: currentWorker || 'Tablet User',
+            factory: factory // Include factory location
         };
         
         console.log('📤 Submitting nyuko:', submissionData);
+        console.log('🏭 Factory location:', factory);
         
         // Submit to API
         const response = await fetch(`${API_BASE_URL}/nyuko/submit`, {
