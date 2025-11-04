@@ -2197,6 +2197,196 @@ app.post('/api/tanaoroshi/submit', async (req, res) => {
 
 // ==================== END TANAOROSHI API ENDPOINTS ====================
 
+// ==================== NYUKO (入庫) API ENDPOINTS ====================
+
+// Get product info for nyuko by 品番
+app.get('/api/nyuko/:productNumber', async (req, res) => {
+    try {
+        const { productNumber } = req.params;
+        console.log(`📦 Fetching nyuko data for: ${productNumber}`);
+
+        await client.connect();
+        
+        // Fetch master data
+        const masterDb = client.db("Sasaki_Coating_MasterDB");
+        const masterCollection = masterDb.collection("masterDB");
+        const masterData = await masterCollection.findOne({ 品番: productNumber });
+
+        if (!masterData) {
+            return res.status(404).json({ error: 'Product not found in master database' });
+        }
+
+        // Fetch current inventory data (if exists)
+        const db = client.db("submittedDB");
+        const inventoryCollection = db.collection("nodaInventoryDB");
+        
+        // Get the latest inventory record for this product
+        const currentInventory = await inventoryCollection
+            .find({ 品番: productNumber })
+            .sort({ timeStamp: -1 })
+            .limit(1)
+            .toArray();
+
+        // Check if product exists in inventory
+        const inventoryExists = currentInventory.length > 0;
+        const latestRecord = inventoryExists ? currentInventory[0] : null;
+
+        res.json({
+            // Master data
+            品番: masterData.品番,
+            品名: masterData.品名,
+            モデル: masterData.モデル,
+            背番号: masterData.背番号,
+            形状: masterData.形状,
+            色: masterData.色,
+            収容数: parseInt(masterData.収容数) || 1,
+            imageURL: masterData.imageURL || '',
+            
+            // Current inventory data (if exists)
+            inventoryExists: inventoryExists,
+            currentPhysicalQuantity: inventoryExists ? (latestRecord.physicalQuantity || 0) : 0,
+            currentReservedQuantity: inventoryExists ? (latestRecord.reservedQuantity || 0) : 0,
+            currentAvailableQuantity: inventoryExists ? (latestRecord.availableQuantity || 0) : 0,
+            currentRunningQuantity: inventoryExists ? (latestRecord.runningQuantity || 0) : 0
+        });
+
+    } catch (error) {
+        console.error('Error fetching nyuko data:', error);
+        res.status(500).json({ error: 'Failed to fetch nyuko data', details: error.message });
+    }
+});
+
+// Submit nyuko (入庫) input results
+app.post('/api/nyuko/submit', async (req, res) => {
+    try {
+        const { inputProducts, submittedBy } = req.body;
+        
+        if (!inputProducts || !Array.isArray(inputProducts) || inputProducts.length === 0) {
+            return res.status(400).json({ error: 'No input products provided' });
+        }
+
+        if (!submittedBy) {
+            return res.status(400).json({ error: 'Submitted by information required' });
+        }
+
+        console.log(`📦 Processing nyuko submission from ${submittedBy} for ${inputProducts.length} products`);
+
+        await client.connect();
+        const db = client.db("submittedDB");
+        const inventoryCollection = db.collection("nodaInventoryDB");
+
+        const processedItems = [];
+        const errors = [];
+        const submissionTimestamp = new Date();
+
+        for (const product of inputProducts) {
+            try {
+                const { 品番, 背番号, inputQuantity, inventoryExists, oldPhysicalQuantity, oldReservedQuantity } = product;
+
+                if (!品番 || !背番号 || inputQuantity === undefined) {
+                    errors.push({ 品番, error: 'Missing required fields' });
+                    continue;
+                }
+
+                let transactionRecord;
+
+                if (!inventoryExists) {
+                    // NEW PRODUCT: Create initial inventory record
+                    transactionRecord = {
+                        背番号: 背番号,
+                        品番: 品番,
+                        timeStamp: submissionTimestamp,
+                        Date: submissionTimestamp.toISOString().split('T')[0],
+                        
+                        physicalQuantity: inputQuantity,
+                        reservedQuantity: 0,
+                        availableQuantity: inputQuantity,
+                        runningQuantity: inputQuantity,
+                        lastQuantity: 0,
+                        
+                        action: `Warehouse Input (+${inputQuantity})`,
+                        source: `tablet 入庫 - ${submittedBy}`
+                    };
+
+                    processedItems.push({
+                        品番: 品番,
+                        背番号: 背番号,
+                        oldQuantity: 0,
+                        newQuantity: inputQuantity,
+                        inputQuantity: inputQuantity,
+                        isNew: true
+                    });
+
+                } else {
+                    // EXISTING PRODUCT: Add to current inventory
+                    const newPhysicalQuantity = oldPhysicalQuantity + inputQuantity;
+                    const newAvailableQuantity = newPhysicalQuantity - oldReservedQuantity;
+                    
+                    // Get previous running quantity
+                    const previousRecord = await inventoryCollection
+                        .find({ 品番: 品番 })
+                        .sort({ timeStamp: -1 })
+                        .limit(1)
+                        .toArray();
+                    
+                    const previousRunningQuantity = previousRecord.length > 0 ? previousRecord[0].runningQuantity : 0;
+                    const newRunningQuantity = previousRunningQuantity + inputQuantity;
+
+                    transactionRecord = {
+                        背番号: 背番号,
+                        品番: 品番,
+                        timeStamp: submissionTimestamp,
+                        Date: submissionTimestamp.toISOString().split('T')[0],
+                        
+                        physicalQuantity: newPhysicalQuantity,
+                        reservedQuantity: oldReservedQuantity,
+                        availableQuantity: newAvailableQuantity,
+                        runningQuantity: newRunningQuantity,
+                        lastQuantity: newPhysicalQuantity,
+                        
+                        action: `Warehouse Input (+${inputQuantity})`,
+                        source: `tablet 入庫 - ${submittedBy}`
+                    };
+
+                    processedItems.push({
+                        品番: 品番,
+                        背番号: 背番号,
+                        oldQuantity: oldPhysicalQuantity,
+                        newQuantity: newPhysicalQuantity,
+                        inputQuantity: inputQuantity,
+                        isNew: false
+                    });
+                }
+
+                // Insert the new record
+                await inventoryCollection.insertOne(transactionRecord);
+
+                console.log(`✅ Nyuko processed for ${品番}: ${inventoryExists ? `${oldPhysicalQuantity} → ${oldPhysicalQuantity + inputQuantity}` : `NEW → ${inputQuantity}`} (+${inputQuantity})`);
+
+            } catch (itemError) {
+                console.error(`Error processing item ${product.品番}:`, itemError);
+                errors.push({ 品番: product.品番, error: itemError.message });
+            }
+        }
+
+        res.json({
+            success: true,
+            processedCount: processedItems.length,
+            errorCount: errors.length,
+            processedItems: processedItems,
+            errors: errors.length > 0 ? errors : undefined,
+            submittedBy: submittedBy,
+            submittedAt: submissionTimestamp.toISOString()
+        });
+
+    } catch (error) {
+        console.error('Error submitting nyuko:', error);
+        res.status(500).json({ error: 'Failed to submit nyuko', details: error.message });
+    }
+});
+
+// ==================== END NYUKO API ENDPOINTS ====================
+
 // ==================== MASTER DATA API ENDPOINT ====================
 
 // Get master data by 品番
