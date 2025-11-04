@@ -229,13 +229,23 @@ async function getActivePickingForDevice(deviceId) {
 async function calculateBoxQuantity(品番, pieceQuantity) {
     try {
         const masterDB = client.db('Sasaki_Coating_MasterDB');
-        const masterCollection = masterDB.collection('products');
+        const masterCollection = masterDB.collection('masterDB');
         
+        console.log(`🔍 Looking up 品番: "${品番}" in masterDB collection`);
         const masterData = await masterCollection.findOne({ 品番 });
         
-        if (!masterData || !masterData.収容数) {
-            console.warn(`⚠️ No 収容数 found for ${品番}, defaulting to pieces`);
-            return pieceQuantity; // Fallback to piece quantity if no 収容数
+        if (!masterData) {
+            console.warn(`⚠️ No masterData found for ${品番} in masterDB collection`);
+            console.log(`   Defaulting to pieces: ${pieceQuantity}`);
+            return pieceQuantity;
+        }
+        
+        console.log(`✅ Found masterData for ${品番}:`, { 収容数: masterData.収容数, 品名: masterData.品名 });
+        
+        if (!masterData.収容数) {
+            console.warn(`⚠️ masterData exists but 収容数 is missing for ${品番}`);
+            console.log(`   Defaulting to pieces: ${pieceQuantity}`);
+            return pieceQuantity;
         }
         
         const 収容数 = parseInt(masterData.収容数) || 1;
