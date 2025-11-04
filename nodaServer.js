@@ -225,6 +225,30 @@ async function getActivePickingForDevice(deviceId) {
     }
 }
 
+// Helper function to calculate box quantity from piece quantity
+async function calculateBoxQuantity(品番, pieceQuantity) {
+    try {
+        const masterDB = client.db('Sasaki_Coating_MasterDB');
+        const masterCollection = masterDB.collection('products');
+        
+        const masterData = await masterCollection.findOne({ 品番 });
+        
+        if (!masterData || !masterData.収容数) {
+            console.warn(`⚠️ No 収容数 found for ${品番}, defaulting to pieces`);
+            return pieceQuantity; // Fallback to piece quantity if no 収容数
+        }
+        
+        const 収容数 = parseInt(masterData.収容数) || 1;
+        const boxQuantity = Math.ceil(pieceQuantity / 収容数);
+        
+        console.log(`📦 Box calculation for ${品番}: ${pieceQuantity} pieces ÷ ${収容数} = ${boxQuantity} boxes`);
+        return boxQuantity;
+    } catch (error) {
+        console.error(`❌ Error calculating box quantity for ${品番}:`, error);
+        return pieceQuantity; // Fallback to piece quantity on error
+    }
+}
+
 async function connectToMongoDB() {
     try {
         await client.connect();
@@ -449,7 +473,13 @@ async function handleDeviceCompletion(deviceId, data) {
     
     try {
         // Use existing completion logic
-        await completeLineItem(requestNumber, lineNumber, completedBy);
+        const result = await completeLineItem(requestNumber, lineNumber, completedBy);
+        
+        // Check if this was a duplicate completion
+        if (result.alreadyCompleted) {
+            console.log(`⚠️ Duplicate completion ignored for ${requestNumber} line ${lineNumber}`);
+            return; // Don't send notifications for duplicates
+        }
         
         // Send confirmation back to device (red screen)
         publishDeviceCommand(deviceId, {
@@ -527,12 +557,13 @@ io.on('connection', (socket) => {
             console.log(`📊 Active picking result for ${deviceId}:`, activePicking);
             
             if (activePicking) {
-                // Device has active picking - restore green screen
+                // Device has active picking - restore green screen with box quantity
                 console.log(`🟢 Restoring active picking for device ${deviceId}: ${activePicking.requestNumber} - ${activePicking.品番} (${activePicking.quantity})`);
+                const boxQuantity = await calculateBoxQuantity(activePicking.品番, activePicking.quantity);
                 const displayUpdate = {
                     color: 'green',
-                    quantity: activePicking.quantity,
-                    message: `Pick ${activePicking.quantity}`,
+                    quantity: boxQuantity,
+                    message: `Pick ${boxQuantity}`,
                     requestNumber: activePicking.requestNumber,
                     lineNumber: activePicking.lineNumber,
                     品番: activePicking.品番
@@ -573,7 +604,13 @@ io.on('connection', (socket) => {
         console.log(`Item completed by device ${deviceId}: ${requestNumber} line ${lineNumber}`);
         
         try {
-            await completeLineItem(requestNumber, lineNumber, completedBy);
+            const result = await completeLineItem(requestNumber, lineNumber, completedBy);
+            
+            // Check if this was a duplicate completion
+            if (result.alreadyCompleted) {
+                console.log(`⚠️ Duplicate completion ignored for ${requestNumber} line ${lineNumber}`);
+                return; // Don't send notifications for duplicates
+            }
             
             // Send red screen back to device
             socket.emit('display-update', {
@@ -754,15 +791,16 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
         // Broadcast to all IoT devices (MQTT + Socket.IO)
         console.log(`🚀 Broadcasting to both MQTT and Socket.IO devices`);
         
-        // Send to MQTT devices (new hybrid approach)
-        updatedRequest.lineItems.forEach(item => {
+        // Send to MQTT devices (new hybrid approach) - with box quantities
+        for (const item of updatedRequest.lineItems) {
             const deviceId = item.背番号;
             
             if (item.status === 'in-progress') {
+                const boxQuantity = await calculateBoxQuantity(item.品番, item.quantity);
                 publishDeviceCommand(deviceId, {
                     color: 'green',
-                    quantity: item.quantity,
-                    message: `Pick ${item.quantity}`,
+                    quantity: boxQuantity,
+                    message: `Pick ${boxQuantity}`,
                     requestNumber,
                     lineNumber: item.lineNumber,
                     品番: item.品番
@@ -774,18 +812,19 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
                     message: 'No Pick'
                 });
             }
-        });
+        }
 
-        // Send to Socket.IO devices (existing functionality)
-        connectedDevices.forEach((deviceSocket, deviceId) => {
+        // Send to Socket.IO devices (existing functionality) - with box quantities
+        for (const [deviceId, deviceSocket] of connectedDevices.entries()) {
             const deviceItem = updatedRequest.lineItems.find(item => item.背番号 === deviceId);
             
             if (deviceItem && deviceItem.status === 'in-progress') {
+                const boxQuantity = await calculateBoxQuantity(deviceItem.品番, deviceItem.quantity);
                 // Device has items to pick - show green with quantity
                 deviceSocket.emit('display-update', {
                     color: 'green',
-                    quantity: deviceItem.quantity,
-                    message: `Pick ${deviceItem.quantity}`,
+                    quantity: boxQuantity,
+                    message: `Pick ${boxQuantity}`,
                     requestNumber,
                     lineNumber: deviceItem.lineNumber,
                     品番: deviceItem.品番
@@ -798,7 +837,7 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
                     message: 'No Pick'
                 });
             }
-        });
+        }
         
         console.log(`Picking started for ${requestNumber} by ${startedBy}`);
         res.json({ message: 'Picking process started', pickingData });
@@ -826,11 +865,24 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         throw new Error('Line item not found');
     }
     
-    // Update the specific line item
+    // Check if line item is already completed - prevent duplicate processing
+    if (lineItem.status === 'completed') {
+        console.log(`⚠️ Line item ${lineNumber} for request ${requestNumber} is already completed. Ignoring duplicate completion.`);
+        return { allCompleted: true, request: request, alreadyCompleted: true };
+    }
+    
+    // Only process if status is 'in-progress'
+    if (lineItem.status !== 'in-progress') {
+        console.log(`⚠️ Line item ${lineNumber} for request ${requestNumber} has status '${lineItem.status}', cannot complete.`);
+        throw new Error(`Line item status is '${lineItem.status}', expected 'in-progress'`);
+    }
+    
+    // Update the specific line item - only if currently in-progress
     const updateResult = await collection.updateOne(
         { 
             requestNumber,
-            'lineItems.lineNumber': lineNumber
+            'lineItems.lineNumber': lineNumber,
+            'lineItems.status': 'in-progress'  // Only update if status is in-progress
         },
         {
             $set: {
@@ -844,10 +896,12 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
     );
     
     if (updateResult.matchedCount === 0) {
-        throw new Error('Line item not found');
+        console.log(`⚠️ Line item ${lineNumber} was already completed by another process.`);
+        return { allCompleted: true, request: request, alreadyCompleted: true };
     }
     
     // Create inventory transaction record to match admin backend structure
+    console.log(`✅ Processing completion for ${requestNumber} line ${lineNumber} - creating inventory transaction`);
     await createInventoryTransaction({
         背番号: lineItem.背番号,
         品番: lineItem.品番,
@@ -1023,17 +1077,18 @@ app.post('/api/picking-requests/:requestNumber/line/:lineNumber/start', async (r
             
             if (lineItem && lineItem.lineItems && lineItem.lineItems[0]) {
                 const item = lineItem.lineItems[0];
+                const boxQuantity = await calculateBoxQuantity(item.品番, item.quantity);
                 io.emit('display-update', {
                     deviceId: deviceId,
                     color: 'green',
-                    quantity: item.quantity,
-                    message: `Pick ${item.quantity}`,
+                    quantity: boxQuantity,
+                    message: `Pick ${boxQuantity}`,
                     requestNumber: requestNumber,
                     lineNumber: parseInt(lineNumber),
                     品番: item.品番
                 });
                 
-                console.log(`Picking started for ${requestNumber} line ${lineNumber} on device ${deviceId} by ${startedBy}`);
+                console.log(`Picking started for ${requestNumber} line ${lineNumber} on device ${deviceId} by ${startedBy} (${boxQuantity} boxes)`);
             }
         }
         
@@ -1077,11 +1132,12 @@ app.get('/api/device/:deviceId/status', async (req, res) => {
         console.log(`🌐 REST API: Active picking for ${deviceId}:`, activePicking);
         
         if (activePicking) {
+            const boxQuantity = await calculateBoxQuantity(activePicking.品番, activePicking.quantity);
             const response = {
                 status: 'picking',
                 color: 'green',
-                quantity: activePicking.quantity,
-                message: `Pick ${activePicking.quantity}`,
+                quantity: boxQuantity,
+                message: `Pick ${boxQuantity}`,
                 requestNumber: activePicking.requestNumber,
                 lineNumber: activePicking.lineNumber,
                 品番: activePicking.品番
@@ -1114,8 +1170,13 @@ app.put('/api/picking-requests/:requestNumber/line/:lineNumber/status', async (r
             return res.status(400).json({ error: 'Invalid status' });
         }
         
-        await completeLineItem(requestNumber, parseInt(lineNumber), completedBy);
-        res.json({ message: 'Line item status updated successfully' });
+        const result = await completeLineItem(requestNumber, parseInt(lineNumber), completedBy);
+        
+        if (result.alreadyCompleted) {
+            res.json({ message: 'Line item was already completed', alreadyCompleted: true });
+        } else {
+            res.json({ message: 'Line item status updated successfully' });
+        }
         
     } catch (error) {
         console.error('Error updating line item status:', error);
@@ -1234,10 +1295,12 @@ async function notifyDeviceStatusChange(deviceId, requestNumber, lineNumber, qua
     let command = null;
     
     if (newStatus === 'in-progress') {
+        // Calculate box quantity for display
+        const boxQuantity = await calculateBoxQuantity(品番, quantity);
         command = {
             color: 'green',
-            quantity: quantity,
-            message: `Pick ${quantity}`,
+            quantity: boxQuantity,
+            message: `Pick ${boxQuantity}`,
             requestNumber: requestNumber,
             lineNumber: lineNumber,
             品番: 品番
