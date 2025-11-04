@@ -2621,6 +2621,7 @@ function openTanaoroshiCountingModal() {
     
     // Set product info
     document.getElementById('modalProductNumber').textContent = product.品番;
+    document.getElementById('modalSebangou').textContent = product.背番号 || '-';
     document.getElementById('modalProductName').textContent = product.品名 || '-';
     
     // Set product image
@@ -3174,6 +3175,7 @@ function openNyukoInputModal() {
     
     // Set product info
     document.getElementById('nyukoModalProductNumber').textContent = product.品番;
+    document.getElementById('nyukoModalSebangou').textContent = product.背番号 || '-';
     document.getElementById('nyukoModalProductName').textContent = product.品名 || '-';
     
     // Set product image
