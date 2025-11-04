@@ -5,6 +5,7 @@ let pickingRequests = [];
 let currentRequest = null;
 let currentRequestNumber = null;
 let currentFilter = 'all';
+let currentDateFilter = null; // Date filter for picking requests
 let currentWorker = null;
 let socket = null;
 let recentActivities = []; // Initialize empty array for activities
@@ -294,6 +295,16 @@ function openPickingSystem() {
     if (window.audioManager) {
         audioManager.activateForMode('picking');
     }
+    
+    // Set date picker to today's date
+    const today = new Date();
+    const dateString = today.toISOString().split('T')[0]; // Format: YYYY-MM-DD
+    const dateInput = document.getElementById('pickingDateFilter');
+    if (dateInput) {
+        dateInput.value = dateString;
+        currentDateFilter = dateString;
+    }
+    
     showScreen('picking');
     loadPickingRequests();
 }
@@ -368,12 +379,31 @@ function displayPickingRequests() {
         return;
     }
     
-    // Filter requests based on current filter
-    const filteredRequests = currentFilter === 'all' 
-        ? pickingRequests 
-        : pickingRequests.filter(req => req.status === currentFilter);
+    // Filter requests based on current filter and date
+    let filteredRequests = pickingRequests;
+    
+    // Apply status filter
+    if (currentFilter !== 'all') {
+        filteredRequests = filteredRequests.filter(req => req.status === currentFilter);
+    }
+    
+    // Apply date filter
+    if (currentDateFilter) {
+        filteredRequests = filteredRequests.filter(req => {
+            if (!req.createdAt) return false;
+            
+            // Extract date part from createdAt (YYYY-MM-DD)
+            const requestDate = new Date(req.createdAt).toISOString().split('T')[0];
+            return requestDate === currentDateFilter;
+        });
+    }
     
     container.innerHTML = '';
+    
+    if (filteredRequests.length === 0) {
+        displayNoRequests();
+        return;
+    }
     
     filteredRequests.forEach(request => {
         const requestCard = createPickingRequestCard(request);
@@ -998,6 +1028,15 @@ function filterByStatus(status) {
     displayPickingRequests();
 }
 
+function filterByDate() {
+    const dateInput = document.getElementById('pickingDateFilter');
+    if (dateInput) {
+        currentDateFilter = dateInput.value;
+        console.log('📅 Date filter changed to:', currentDateFilter);
+        displayPickingRequests();
+    }
+}
+
 // Refresh function
 async function refreshPickingRequests() {
     await loadPickingRequests();
@@ -1487,6 +1526,7 @@ window.openPickingSystem = openPickingSystem;
 window.backToHome = backToHome;
 window.backToPickingList = backToPickingList;
 window.filterByStatus = filterByStatus;
+window.filterByDate = filterByDate;
 window.refreshPickingRequests = refreshPickingRequests;
 window.startPickingProcess = startPickingProcess;
 // window.startIndividualPicking = startIndividualPicking; // Removed - ESP32 handles picking automatically

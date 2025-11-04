@@ -159,6 +159,40 @@
                     </button>
                 </div>
 
+                <!-- Date Filter -->
+                <div class="mb-4">
+                    <div class="flex items-center space-x-6">
+                        <div class="flex items-center space-x-3">
+                            <label for="pickingDateFilter" class="text-sm font-medium text-gray-700">
+                                <i class="fas fa-calendar-alt mr-2"></i>日付:
+                            </label>
+                            <input type="date" id="pickingDateFilter" onchange="filterByDate()" 
+                                   class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm">
+                        </div>
+                        
+                        <!-- Order Number Legend -->
+                        <div class="flex items-center space-x-4 text-xs text-gray-600 bg-gray-50 px-4 py-2 rounded-lg border border-gray-200">
+                            <div class="flex items-center space-x-1">
+                                <span class="font-semibold text-blue-600">-001</span>
+                                <i class="fas fa-arrow-right text-gray-400 text-[10px]"></i>
+                                <span>AM</span>
+                            </div>
+                            <div class="w-px h-4 bg-gray-300"></div>
+                            <div class="flex items-center space-x-1">
+                                <span class="font-semibold text-blue-600">-002</span>
+                                <i class="fas fa-arrow-right text-gray-400 text-[10px]"></i>
+                                <span>PM</span>
+                            </div>
+                            <div class="w-px h-4 bg-gray-300"></div>
+                            <div class="flex items-center space-x-1">
+                                <span class="font-semibold text-blue-600">-003以上</span>
+                                <i class="fas fa-arrow-right text-gray-400 text-[10px]"></i>
+                                <span>追加品</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Status Filter -->
                 <div class="mb-4">
                     <div class="flex space-x-2">
