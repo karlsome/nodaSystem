@@ -420,15 +420,18 @@ async function handleDeviceStatusUpdate(deviceId, data) {
     console.log(`📊 Device ${deviceId} status update:`, data);
     
     // Track device online/offline status
+    const wasOffline = !mqttDevices.has(deviceId) || !mqttDevices.get(deviceId).isOnline;
+    
     mqttDevices.set(deviceId, {
         isOnline: data.status !== 'offline',
         lastSeen: new Date(),
         deviceStatus: data
     });
     
-    // If device just came online (status update after being offline), check for current assignments
-    if (data.status === 'standby' && data.online === true) {
-        console.log(`🔄 Device ${deviceId} came online, checking for current assignments...`);
+    // Only check for assignments if device was previously offline and is now coming back online
+    // Do NOT check when device transitions from picking to standby (that's just task completion)
+    if (wasOffline && data.status === 'standby' && data.online === true) {
+        console.log(`🔄 Device ${deviceId} came online from offline state, checking for current assignments...`);
         await checkDeviceAssignments(deviceId);
     }
     

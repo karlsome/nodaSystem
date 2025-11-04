@@ -82,13 +82,8 @@ function initializeSocket() {
             console.log('🎯 Item completed event received:', data);
             showToast(`${data.deviceId} がアイテムを完了しました`, 'success');
             
-            // Play a sound to alert the user
-            try {
-                const audio = new Audio('/alert.mp3');
-                audio.play().catch(e => console.log('Audio play failed:', e));
-            } catch (e) {
-                console.log('Audio creation failed:', e);
-            }
+            // No sound plays for individual row completion
+            // Sound only plays when ALL rows are complete (see updateProgressCounter)
             
             // Refresh current view if viewing the same request
             if (currentRequestNumber === data.requestNumber) {
@@ -287,10 +282,18 @@ function showScreen(screenName) {
 }
 
 function openInventorySystem() {
+    // Activate audio for inventory mode (beep + alert sounds)
+    if (window.audioManager) {
+        audioManager.activateForMode('inventory');
+    }
     showScreen('inventory');
 }
 
 function openPickingSystem() {
+    // Activate audio for picking mode (alert + success sounds)
+    if (window.audioManager) {
+        audioManager.activateForMode('picking');
+    }
     showScreen('picking');
     loadPickingRequests();
 }
@@ -920,6 +923,11 @@ function updateProgressCounter() {
         if (statusBadge) {
             statusBadge.textContent = '完了';
             statusBadge.className = 'status-badge bg-green-100 text-green-800 px-2 py-1 rounded-full text-xs font-medium';
+        }
+        
+        // Play success sound when picking request is completed
+        if (window.audioManager) {
+            audioManager.playSuccess();
         }
     }
 }
@@ -2655,6 +2663,11 @@ async function processBoxScan(scannedProductNumber, scannedBoxQuantity) {
     if (scannedProductNumber !== currentTanaoroshiProduct.品番) {
         showToast(`❌ 製品番号が異なります！ 期待: ${currentTanaoroshiProduct.品番}`, 'error');
         
+        // Play alert sound on error
+        if (window.audioManager) {
+            audioManager.playAlert();
+        }
+        
         // Flash red
         const counterArea = document.getElementById('modalCounterArea');
         counterArea.classList.add('bg-red-100', 'border-red-500');
@@ -2669,6 +2682,12 @@ async function processBoxScan(scannedProductNumber, scannedBoxQuantity) {
     // Validate box quantity matches 収容数
     if (scannedBoxQuantity !== currentTanaoroshiProduct.収容数) {
         showToast(`❌ 箱数量が異なります！ 期待: ${currentTanaoroshiProduct.収容数}個/箱`, 'error');
+        
+        // Play alert sound on error
+        if (window.audioManager) {
+            audioManager.playAlert();
+        }
+        
         return;
     }
     
@@ -2678,6 +2697,11 @@ async function processBoxScan(scannedProductNumber, scannedBoxQuantity) {
     
     // Update display
     updateTanaoroshiCounter();
+    
+    // Play beep sound on successful scan
+    if (window.audioManager) {
+        audioManager.playBeep();
+    }
     
     // Flash green
     const counterArea = document.getElementById('modalCounterArea');
@@ -2805,6 +2829,11 @@ function closeTanaoroshiModal() {
     document.getElementById('tanaoroshiCountingModal').classList.add('hidden');
     isTanaoroshiModalOpen = false;
     currentTanaoroshiProduct = null;
+    
+    // Stop any playing alert sounds when modal closes
+    if (window.audioManager) {
+        audioManager.stopAlert();
+    }
     
     console.log('📋 Counting modal closed');
 }
@@ -3009,6 +3038,10 @@ let isNyukoModalOpen = false; // Track if modal is open
 
 // Initialize nyuko when screen is shown
 function openNyukoSystem() {
+    // Activate audio for nyuko mode (beep + alert sounds)
+    if (window.audioManager) {
+        audioManager.activateForMode('nyuko');
+    }
     showScreen('nyuko');
     initializeNyuko();
 }
@@ -3210,6 +3243,11 @@ async function processNyukoBoxScan(scannedProductNumber, scannedBoxQuantity) {
     if (scannedProductNumber !== currentNyukoProduct.品番) {
         showToast(`❌ 製品番号が異なります！ 期待: ${currentNyukoProduct.品番}`, 'error');
         
+        // Play alert sound on error
+        if (window.audioManager) {
+            audioManager.playAlert();
+        }
+        
         // Flash red
         const counterArea = document.getElementById('nyukoModalCounterArea');
         counterArea.classList.add('bg-red-100', 'border-red-500');
@@ -3224,6 +3262,12 @@ async function processNyukoBoxScan(scannedProductNumber, scannedBoxQuantity) {
     // Validate box quantity matches 収容数
     if (scannedBoxQuantity !== currentNyukoProduct.収容数) {
         showToast(`❌ 箱数量が異なります！ 期待: ${currentNyukoProduct.収容数}個/箱`, 'error');
+        
+        // Play alert sound on error
+        if (window.audioManager) {
+            audioManager.playAlert();
+        }
+        
         return;
     }
     
@@ -3233,6 +3277,11 @@ async function processNyukoBoxScan(scannedProductNumber, scannedBoxQuantity) {
     
     // Update display
     updateNyukoCounter();
+    
+    // Play beep sound on successful scan
+    if (window.audioManager) {
+        audioManager.playBeep();
+    }
     
     // Flash purple
     const counterArea = document.getElementById('nyukoModalCounterArea');
@@ -3322,6 +3371,11 @@ function closeNyukoModal() {
     document.getElementById('nyukoInputModal').classList.add('hidden');
     isNyukoModalOpen = false;
     currentNyukoProduct = null;
+    
+    // Stop any playing alert sounds when modal closes
+    if (window.audioManager) {
+        audioManager.stopAlert();
+    }
     
     console.log('📋 Input modal closed');
 }
