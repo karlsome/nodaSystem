@@ -272,6 +272,7 @@ function showScreen(screenName) {
     document.getElementById('pickingScreen').classList.add('hidden');
     document.getElementById('pickingDetailScreen').classList.add('hidden');
     document.getElementById('inventoryScreen').classList.add('hidden');
+    document.getElementById('nyukoScreen').classList.add('hidden');
     
     // Show selected screen
     document.getElementById(screenName + 'Screen').classList.remove('hidden');
