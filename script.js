@@ -1506,79 +1506,8 @@ window.editNyukoProduct = editNyukoProduct;
 window.deleteNyukoProduct = deleteNyukoProduct;
 window.submitNyukoInput = submitNyukoInput;
 
-// Language translations
-const translations = {
-    ja: {
-        'scan-title': 'スキャンしてください',
-        'scan-subtitle': 'QRコードまたはバーコードをスキャン',
-        'start-scan': 'スキャン開始',
-        'voice-input': '音声入力 (QRなし)',
-        'available-tasks': '利用可能なタスク',
-        'help': 'ヘルプ',
-        'map': 'マップ',
-        'messages': 'メッセージ',
-        'stats': '統計',
-        'today-summary': '今日の概要',
-        'completed': '完了',
-        'in-progress': '進行中',
-        'pending': '待機中',
-        'scanner-title': 'スキャナー',
-        'position-code': 'コードを中央に配置してください',
-        'scan-instruction': 'QRコードまたはバーコードをスキャン',
-        'process': '処理',
-        'manual': '手動入力',
-        'voice-title': '音声入力',
-        'speak-item': '品番を話してください',
-        'voice-instruction': 'マイクボタンを押して品番を読み上げてください',
-        'heard': '聞き取り結果:',
-        'start-recording': '録音開始',
-        'stop-recording': '録音停止',
-        'confirm': '確認',
-        'start-task': 'タスク開始',
-        'cancel': 'キャンセル',
-        'messages-title': 'メッセージ',
-        'help-title': 'ヘルプ・サポート',
-        'call-supervisor': '監督者に連絡',
-        'report-problem': '問題を報告',
-        'maintenance': 'メンテナンス要請',
-        'instructions': '操作手順'
-    },
-    en: {
-        'scan-title': 'Please Scan',
-        'scan-subtitle': 'Scan QR code or barcode',
-        'start-scan': 'Start Scan',
-        'voice-input': 'Voice Input (No QR)',
-        'available-tasks': 'Available Tasks',
-        'help': 'Help',
-        'map': 'Map',
-        'messages': 'Messages',
-        'stats': 'Stats',
-        'today-summary': 'Today\'s Summary',
-        'completed': 'Completed',
-        'in-progress': 'In Progress',
-        'pending': 'Pending',
-        'scanner-title': 'Scanner',
-        'position-code': 'Position code in center',
-        'scan-instruction': 'Scan QR code or barcode',
-        'process': 'Process',
-        'manual': 'Manual Entry',
-        'voice-title': 'Voice Input',
-        'speak-item': 'Please speak item number',
-        'voice-instruction': 'Press microphone button and speak item number',
-        'heard': 'Heard:',
-        'start-recording': 'Start Recording',
-        'stop-recording': 'Stop Recording',
-        'confirm': 'Confirm',
-        'start-task': 'Start Task',
-        'cancel': 'Cancel',
-        'messages-title': 'Messages',
-        'help-title': 'Help & Support',
-        'call-supervisor': 'Call Supervisor',
-        'report-problem': 'Report Problem',
-        'maintenance': 'Request Maintenance',
-        'instructions': 'Instructions'
-    }
-};
+// Note: Language translations are defined in language.js which is loaded first in index.html
+// The translations object is already available globally from language.js
 
 // Available tasks data
 let availableTasks = [
