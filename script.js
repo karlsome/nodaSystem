@@ -462,11 +462,11 @@ function colorizeRequestNumber(requestNumber) {
     
     let colorClass = '';
     if (suffixNum === 1) {
-        colorClass = 'text-blue-600'; // -001 is blue
+        colorClass = 'text-blue-600 blink-suffix'; // -001 is blue and blinks
     } else if (suffixNum === 2) {
-        colorClass = 'text-purple-800'; // -002 is dark purple
+        colorClass = 'text-green-700 blink-suffix'; // -002 is dark green and blinks
     } else {
-        colorClass = 'text-red-600'; // -003 and above is red
+        colorClass = 'text-red-600 blink-suffix'; // -003 and above is red and blinks
     }
     
     return `${prefix}<span class="${colorClass}">${dash}${suffix}</span>`;

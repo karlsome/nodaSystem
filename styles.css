@@ -18,6 +18,16 @@
     100% { transform: scale(1); opacity: 1; }
 }
 
+@keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+
+/* Blinking suffix animation for order numbers */
+.blink-suffix {
+    animation: blink 1.5s ease-in-out infinite;
+}
+
 /* Global tablet touch styles */
 body {
     -webkit-touch-callout: none;
