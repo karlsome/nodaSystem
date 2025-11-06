@@ -2754,19 +2754,19 @@ function tanaoroshiKeyHandler(event) {
 // Process scanned QR code
 async function processTanaoroshiScan(scanData) {
     console.log('📦 Tanaoroshi scan received:', scanData);
-    
+
     // Parse QR code format: "GN519-10200,20"
     const parts = scanData.split(',');
     if (parts.length !== 2) {
-        showToast('❌ QRコード形式が無効です (形式: 品番,数量)', 'error');
+        showToast('❌ ' + t('qr-format-invalid'), 'error');
         return;
     }
-    
+
     const scannedProductNumber = parts[0].trim();
     const scannedBoxQuantity = parseInt(parts[1].trim());
-    
+
     if (!scannedProductNumber || isNaN(scannedBoxQuantity)) {
-        showToast('❌ QRコードデータが無効です', 'error');
+        showToast('❌ ' + t('qr-data-invalid'), 'error');
         return;
     }
     
@@ -2783,39 +2783,39 @@ async function processTanaoroshiScan(scanData) {
 async function startCountingProduct(productNumber, referenceQuantity) {
     try {
         console.log(`🆕 Starting count for product: ${productNumber}`);
-        
+
         // Fetch product data from API
-        showToast('🔍 製品情報を取得中...', 'info');
-        
+        showToast('🔍 ' + t('fetching-product-info'), 'info');
+
         const response = await fetch(`${API_BASE_URL}/tanaoroshi/${productNumber}`);
-        
+
         if (!response.ok) {
             if (response.status === 404) {
-                showToast('❌ 製品が見つかりません', 'error');
+                showToast('❌ ' + t('product-not-found-error'), 'error');
             } else {
-                showToast('❌ 製品情報の取得に失敗しました', 'error');
+                showToast('❌ ' + t('product-fetch-failed'), 'error');
             }
             return;
         }
-        
+
         const productData = await response.json();
         console.log('✅ Product data fetched:', productData);
-        
+
         // Check if this is a new product (not in inventory)
         if (productData.isNewProduct) {
             const confirmAdd = confirm(
-                `⚠️ このアイテムは在庫にありません。\n` +
-                `品番: ${productData.品番}\n` +
-                `品名: ${productData.品名 || '-'}\n\n` +
-                `追加しますか？`
+                `⚠️ ${t('item-not-in-inventory')}\n` +
+                `${t('product-number-label')}: ${productData.品番}\n` +
+                `${t('product-name') || '品名'}: ${productData.品名 || '-'}\n\n` +
+                `${t('item-not-in-inventory-detail').split('\n').pop()}`
             );
-            
+
             if (!confirmAdd) {
-                showToast('キャンセルしました', 'info');
+                showToast(t('cancelled'), 'info');
                 return;
             }
-            
-            showToast('📦 新規製品として追加します', 'info');
+
+            showToast('📦 ' + t('adding-new-product'), 'info');
         }
         
         // Initialize current product object
@@ -2835,12 +2835,12 @@ async function startCountingProduct(productNumber, referenceQuantity) {
         
         // Open counting modal
         openTanaoroshiCountingModal();
-        
-        showToast('✅ カウント開始', 'success');
-        
+
+        showToast('✅ ' + t('count-start'), 'success');
+
     } catch (error) {
         console.error('Error starting product count:', error);
-        showToast('❌ エラーが発生しました', 'error');
+        showToast('❌ ' + t('error-occurred'), 'error');
     }
 }
 
@@ -2891,13 +2891,13 @@ function openTanaoroshiCountingModal() {
 // Process box scan (when modal is open)
 async function processBoxScan(scannedProductNumber, scannedBoxQuantity) {
     if (!currentTanaoroshiProduct) {
-        showToast('❌ エラー: 製品がありません', 'error');
+        showToast('❌ ' + t('error-no-product'), 'error');
         return;
     }
-    
+
     // Validate product number matches
     if (scannedProductNumber !== currentTanaoroshiProduct.品番) {
-        showToast(`❌ 製品番号が異なります！ 期待: ${currentTanaoroshiProduct.品番}`, 'error');
+        showToast(`❌ ${t('product-number-mismatch')} ${currentTanaoroshiProduct.品番}`, 'error');
         
         // Play alert sound on error
         if (window.audioManager) {
@@ -2917,7 +2917,7 @@ async function processBoxScan(scannedProductNumber, scannedBoxQuantity) {
     
     // Validate box quantity matches 収容数
     if (scannedBoxQuantity !== currentTanaoroshiProduct.収容数) {
-        showToast(`❌ 箱数量が異なります！ 期待: ${currentTanaoroshiProduct.収容数}個/箱`, 'error');
+        showToast(`❌ ${t('box-quantity-mismatch')} ${currentTanaoroshiProduct.収容数}${t('box-quantity-suffix')}`, 'error');
         
         // Play alert sound on error
         if (window.audioManager) {
@@ -2985,12 +2985,12 @@ function updateTanaoroshiCounter() {
 // Manual adjustment (+/- buttons)
 function adjustTanaoroshiCount(delta) {
     if (!currentTanaoroshiProduct) return;
-    
+
     const newBoxCount = currentTanaoroshiProduct.countedBoxes + delta;
-    
+
     // Prevent negative count
     if (newBoxCount < 0) {
-        showToast('❌ 箱数は0未満にできません', 'error');
+        showToast('❌ ' + t('box-count-negative'), 'error');
         return;
     }
     
@@ -3005,21 +3005,24 @@ function adjustTanaoroshiCount(delta) {
 // Complete counting for current product
 async function completeTanaoroshiCount() {
     if (!currentTanaoroshiProduct) return;
-    
+
     const countedPieces = currentTanaoroshiProduct.countedPieces;
     const expectedPieces = currentTanaoroshiProduct.currentPhysicalQuantity;
     const difference = countedPieces - expectedPieces;
     const isNewProduct = currentTanaoroshiProduct.isNewProduct || false;
-    
+
     // For new products, show special confirmation
     if (isNewProduct) {
         if (countedPieces === 0) {
-            showToast('❌ カウント数を入力してください', 'error');
+            showToast('❌ ' + t('enter-count-quantity'), 'error');
             return;
         }
-        
-        const message = `新規製品を在庫に追加します。\n品番: ${currentTanaoroshiProduct.品番}\n数量: ${countedPieces}個 (${currentTanaoroshiProduct.countedBoxes}箱)\n\nよろしいですか？`;
-        
+
+        const message = `${t('add-new-product-confirm')
+            .replace('{0}', currentTanaoroshiProduct.品番)
+            .replace('{1}', countedPieces)
+            .replace('{2}', currentTanaoroshiProduct.countedBoxes)}`;
+
         if (!confirm(message)) {
             return;
         }
@@ -3027,9 +3030,12 @@ async function completeTanaoroshiCount() {
         // If there's a discrepancy, show confirmation
         if (difference !== 0) {
             const boxDifference = Math.ceil(Math.abs(difference) / currentTanaoroshiProduct.収容数);
-            const action = difference > 0 ? '追加' : '削減';
-            const message = `在庫が ${Math.abs(difference)}個 (${boxDifference}箱) ${action}されます。よろしいですか？`;
-            
+            const action = difference > 0 ? t('adjustment-add') : t('adjustment-reduce');
+            const message = `${t('inventory-adjustment-confirm')
+                .replace('{0}', Math.abs(difference))
+                .replace('{1}', boxDifference)
+                .replace('{2}', action)}`;
+
             if (!confirm(message)) {
                 return;
             }
@@ -3053,11 +3059,11 @@ async function completeTanaoroshiCount() {
     
     // Close modal
     closeTanaoroshiModal();
-    
+
     // Update summary list
     updateTanaoroshiSummaryList();
-    
-    showToast('✅ カウント完了', 'success');
+
+    showToast('✅ ' + t('count-complete'), 'success');
 }
 
 // Close counting modal
@@ -3192,13 +3198,13 @@ function editTanaoroshiProduct(index) {
 // Delete counted product
 function deleteTanaoroshiProduct(index) {
     const product = tanaoroshiCountedProducts[index];
-    
-    if (!confirm(`${product.品番} を削除しますか？`)) {
+
+    if (!confirm(t('delete-product-confirm').replace('{0}', product.品番))) {
         return;
     }
-    
+
     tanaoroshiCountedProducts.splice(index, 1);
-    
+
     if (tanaoroshiCountedProducts.length === 0) {
         // Reset to scanner area
         document.getElementById('tanaoroshiSummaryList').classList.add('hidden');
@@ -3206,24 +3212,24 @@ function deleteTanaoroshiProduct(index) {
     } else {
         updateTanaoroshiSummaryList();
     }
-    
-    showToast('削除しました', 'info');
+
+    showToast(t('deleted'), 'info');
 }
 
 // Submit all counted products
 async function submitTanaoroshiCount() {
     if (tanaoroshiCountedProducts.length === 0) {
-        showToast('❌ カウント済み製品がありません', 'error');
+        showToast('❌ ' + t('no-counted-products'), 'error');
         return;
     }
-    
-    if (!confirm(`${tanaoroshiCountedProducts.length}件の製品カウントを送信しますか？`)) {
+
+    if (!confirm(t('submit-count-confirm').replace('{0}', tanaoroshiCountedProducts.length))) {
         return;
     }
-    
+
     try {
         // Show loading toast
-        showToast('📤 送信中...', 'info');
+        showToast('📤 ' + t('submitting'), 'info');
         
         // Prepare data
         const submissionData = {
@@ -3250,17 +3256,17 @@ async function submitTanaoroshiCount() {
         
         const result = await response.json();
         console.log('✅ Submission result:', result);
-        
-        showToast(`✅ ${result.processedCount}件の製品を更新しました`, 'success');
-        
+
+        showToast(`✅ ${result.processedCount}${t('products-updated')}`, 'success');
+
         // Reset system
         setTimeout(() => {
             initializeTanaoroshi();
         }, 2000);
-        
+
     } catch (error) {
         console.error('Error submitting tanaoroshi:', error);
-        showToast('❌ 送信に失敗しました', 'error');
+        showToast('❌ ' + t('submit-failed'), 'error');
     }
 }
 
@@ -3353,19 +3359,19 @@ function nyukoKeyHandler(event) {
 // Process scanned QR code
 async function processNyukoScan(scanData) {
     console.log('📦 Nyuko scan received:', scanData);
-    
+
     // Parse QR code format: "GN519-10200,20"
     const parts = scanData.split(',');
     if (parts.length !== 2) {
-        showToast('❌ QRコード形式が無効です (形式: 品番,数量)', 'error');
+        showToast('❌ ' + t('qr-format-invalid'), 'error');
         return;
     }
-    
+
     const scannedProductNumber = parts[0].trim();
     const scannedBoxQuantity = parseInt(parts[1].trim());
-    
+
     if (!scannedProductNumber || isNaN(scannedBoxQuantity)) {
-        showToast('❌ QRコードデータが無効です', 'error');
+        showToast('❌ ' + t('qr-data-invalid'), 'error');
         return;
     }
     
@@ -3382,17 +3388,17 @@ async function processNyukoScan(scanData) {
 async function startInputtingProduct(productNumber, referenceQuantity) {
     try {
         console.log(`🆕 Starting input for product: ${productNumber}`);
-        
+
         // Fetch product data from API
-        showToast('🔍 製品情報を取得中...', 'info');
-        
+        showToast('🔍 ' + t('fetching-product-info'), 'info');
+
         const response = await fetch(`${API_BASE_URL}/nyuko/${productNumber}`);
-        
+
         if (!response.ok) {
             if (response.status === 404) {
-                showToast('❌ 製品が見つかりません', 'error');
+                showToast('❌ ' + t('product-not-found-error'), 'error');
             } else {
-                showToast('❌ 製品情報の取得に失敗しました', 'error');
+                showToast('❌ ' + t('product-fetch-failed'), 'error');
             }
             return;
         }
@@ -3416,12 +3422,12 @@ async function startInputtingProduct(productNumber, referenceQuantity) {
         
         // Open input modal
         openNyukoInputModal();
-        
-        showToast('✅ 入庫開始', 'success');
-        
+
+        showToast('✅ ' + t('nyuko-start'), 'success');
+
     } catch (error) {
         console.error('Error starting product input:', error);
-        showToast('❌ エラーが発生しました', 'error');
+        showToast('❌ ' + t('error-occurred'), 'error');
     }
 }
 
@@ -3473,13 +3479,13 @@ function openNyukoInputModal() {
 // Process box scan (when modal is open)
 async function processNyukoBoxScan(scannedProductNumber, scannedBoxQuantity) {
     if (!currentNyukoProduct) {
-        showToast('❌ エラー: 製品がありません', 'error');
+        showToast('❌ ' + t('error-no-product'), 'error');
         return;
     }
-    
+
     // Validate product number matches
     if (scannedProductNumber !== currentNyukoProduct.品番) {
-        showToast(`❌ 製品番号が異なります！ 期待: ${currentNyukoProduct.品番}`, 'error');
+        showToast(`❌ ${t('product-number-mismatch')} ${currentNyukoProduct.品番}`, 'error');
         
         // Play alert sound on error
         if (window.audioManager) {
@@ -3499,7 +3505,7 @@ async function processNyukoBoxScan(scannedProductNumber, scannedBoxQuantity) {
     
     // Validate box quantity matches 収容数
     if (scannedBoxQuantity !== currentNyukoProduct.収容数) {
-        showToast(`❌ 箱数量が異なります！ 期待: ${currentNyukoProduct.収容数}個/箱`, 'error');
+        showToast(`❌ ${t('box-quantity-mismatch')} ${currentNyukoProduct.収容数}${t('box-quantity-suffix')}`, 'error');
         
         // Play alert sound on error
         if (window.audioManager) {
@@ -3547,12 +3553,12 @@ function updateNyukoCounter() {
 // Manual adjustment (+/- buttons)
 function adjustNyukoCount(delta) {
     if (!currentNyukoProduct) return;
-    
+
     const newBoxCount = currentNyukoProduct.countedBoxes + delta;
-    
+
     // Prevent negative count
     if (newBoxCount < 0) {
-        showToast('❌ 箱数は0未満にできません', 'error');
+        showToast('❌ ' + t('box-count-negative'), 'error');
         return;
     }
     
@@ -3567,16 +3573,18 @@ function adjustNyukoCount(delta) {
 // Complete input for current product
 async function completeNyukoInput() {
     if (!currentNyukoProduct) return;
-    
+
     const inputPieces = currentNyukoProduct.countedPieces;
-    
+
     if (inputPieces === 0) {
-        showToast('❌ 入庫数量を入力してください', 'error');
+        showToast('❌ ' + t('enter-nyuko-quantity'), 'error');
         return;
     }
-    
-    const message = `${inputPieces}個 (${currentNyukoProduct.countedBoxes}箱) を入庫しますか？`;
-    
+
+    const message = t('nyuko-confirm')
+        .replace('{0}', inputPieces)
+        .replace('{1}', currentNyukoProduct.countedBoxes);
+
     if (!confirm(message)) {
         return;
     }
@@ -3597,11 +3605,11 @@ async function completeNyukoInput() {
     
     // Close modal
     closeNyukoModal();
-    
+
     // Update summary list
     updateNyukoSummaryList();
-    
-    showToast('✅ 入庫完了', 'success');
+
+    showToast('✅ ' + t('nyuko-complete'), 'success');
 }
 
 // Close input modal
@@ -3733,13 +3741,13 @@ function editNyukoProduct(index) {
 // Delete input product
 function deleteNyukoProduct(index) {
     const product = nyukoInputProducts[index];
-    
-    if (!confirm(`${product.品番} を削除しますか？`)) {
+
+    if (!confirm(t('delete-product-confirm').replace('{0}', product.品番))) {
         return;
     }
-    
+
     nyukoInputProducts.splice(index, 1);
-    
+
     if (nyukoInputProducts.length === 0) {
         // Reset to scanner area
         document.getElementById('nyukoSummaryList').classList.add('hidden');
@@ -3747,24 +3755,24 @@ function deleteNyukoProduct(index) {
     } else {
         updateNyukoSummaryList();
     }
-    
-    showToast('削除しました', 'info');
+
+    showToast(t('deleted'), 'info');
 }
 
 // Submit all input products
 async function submitNyukoInput() {
     if (nyukoInputProducts.length === 0) {
-        showToast('❌ 入庫済み製品がありません', 'error');
+        showToast('❌ ' + t('no-input-products'), 'error');
         return;
     }
-    
-    if (!confirm(`${nyukoInputProducts.length}件の製品入庫を送信しますか？`)) {
+
+    if (!confirm(t('submit-nyuko-confirm').replace('{0}', nyukoInputProducts.length))) {
         return;
     }
-    
+
     try {
         // Show loading toast
-        showToast('📤 送信中...', 'info');
+        showToast('📤 ' + t('submitting'), 'info');
         
         // Prepare data
         const submissionData = {
@@ -3791,17 +3799,17 @@ async function submitNyukoInput() {
         
         const result = await response.json();
         console.log('✅ Submission result:', result);
-        
-        showToast(`✅ ${result.processedCount}件の製品を入庫しました`, 'success');
-        
+
+        showToast(`✅ ${result.processedCount}${t('products-received')}`, 'success');
+
         // Reset system
         setTimeout(() => {
             initializeNyuko();
         }, 2000);
-        
+
     } catch (error) {
         console.error('Error submitting nyuko:', error);
-        showToast('❌ 送信に失敗しました', 'error');
+        showToast('❌ ' + t('submit-failed'), 'error');
     }
 }
 
