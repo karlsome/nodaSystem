@@ -668,6 +668,10 @@ async function viewPickingDetail(requestNumber) {
     try {
         currentRequestNumber = requestNumber;
         
+        // Show loading state immediately to prevent stale data display
+        showPickingDetailLoadingState(requestNumber);
+        showScreen('pickingDetail');
+        
         const response = await fetch(`${API_BASE_URL}/picking-requests/group/${requestNumber}`);
         if (!response.ok) {
             throw new Error('Failed to fetch picking request details');
@@ -676,17 +680,18 @@ async function viewPickingDetail(requestNumber) {
         const request = await response.json();
         currentRequest = request;
         displayPickingDetail(request);
-        showScreen('pickingDetail');
         
     } catch (error) {
         console.error('Error loading picking request details:', error);
         showToast('ピッキング詳細の読み込みに失敗しました', 'error');
+        hidePickingDetailLoadingState();
     }
 }
 
 async function displayPickingDetail(request) {
     if (!request) {
         console.error('No request provided to displayPickingDetail');
+        hidePickingDetailLoadingState();
         return;
     }
 
@@ -700,6 +705,9 @@ async function displayPickingDetail(request) {
     
     // Enrich line items with master data and box quantities
     await enrichLineItemsWithMasterData(request.lineItems);
+    
+    // Hide loading state and show actual content
+    hidePickingDetailLoadingState();
     
     // Update header
     document.getElementById('pickingDetailTitle').textContent = `${t('picking-detail')}: ${request.requestNumber}`;
@@ -979,6 +987,9 @@ async function refreshPickingDetail() {
     if (currentRequestNumber) {
         console.log('🔄 Refreshing picking detail for request:', currentRequestNumber);
         try {
+            // Show loading state during refresh
+            showPickingDetailLoadingState(currentRequestNumber);
+            
             // Add cache-busting parameter to ensure we get fresh data
             const timestamp = new Date().getTime();
             const response = await fetch(`${API_BASE_URL}/picking-requests/group/${currentRequestNumber}?_=${timestamp}`);
@@ -1001,6 +1012,7 @@ async function refreshPickingDetail() {
             console.log('✅ Refresh completed successfully');
         } catch (error) {
             console.error('❌ Error refreshing picking detail:', error);
+            hidePickingDetailLoadingState();
             showToast('更新に失敗しました', 'error');
         }
     } else {
@@ -1268,6 +1280,49 @@ function showLoading(show) {
         } else {
             loadingElement.classList.add('hidden');
         }
+    }
+}
+
+// Show loading state for picking detail screen
+function showPickingDetailLoadingState(requestNumber) {
+    // Update header with loading state
+    document.getElementById('pickingDetailTitle').textContent = `ピッキング詳細: ${requestNumber}`;
+    document.getElementById('pickingDetailSubtitle').textContent = '読み込み中...';
+    
+    // Show loading in request info area
+    const infoContainer = document.getElementById('pickingRequestInfo');
+    infoContainer.innerHTML = `
+        <div class="col-span-4 text-center py-8">
+            <div class="animate-spin w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full mx-auto mb-4"></div>
+            <p class="text-gray-600">データを読み込んでいます...</p>
+        </div>
+    `;
+    
+    // Show loading in items list
+    const itemsContainer = document.getElementById('pickingItemsList');
+    itemsContainer.innerHTML = `
+        <div class="p-12 text-center">
+            <div class="animate-spin w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full mx-auto mb-6"></div>
+            <p class="text-lg text-gray-600">ピッキング項目を読み込んでいます...</p>
+            <p class="text-sm text-gray-500 mt-2">しばらくお待ちください</p>
+        </div>
+    `;
+    
+    // Disable start button during loading
+    const startBtn = document.getElementById('startPickingBtn');
+    if (startBtn) {
+        startBtn.disabled = true;
+        startBtn.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i>読み込み中...`;
+    }
+}
+
+// Hide loading state for picking detail screen
+function hidePickingDetailLoadingState() {
+    // Loading state will be replaced by actual content in displayPickingDetail
+    // This function ensures the start button is re-enabled if there's an error
+    const startBtn = document.getElementById('startPickingBtn');
+    if (startBtn) {
+        startBtn.disabled = false;
     }
 }
 
