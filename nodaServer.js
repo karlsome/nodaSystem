@@ -760,7 +760,7 @@ app.get('/api/picking-requests/group/:requestNumber', async (req, res) => {
 app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
     try {
         const { requestNumber } = req.params;
-        const { startedBy } = req.body;
+        const { startedBy, factory } = req.body;
         
         // Check global picking lock
         await checkGlobalPickingLock();
@@ -791,6 +791,7 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
                     startedBy,
                     startedAt: new Date(),
                     updatedAt: new Date(),
+                    factory: factory || '野田倉庫', // Store factory information
                     'lineItems.$[elem].status': 'in-progress',
                     'lineItems.$[elem].startedAt': new Date()
                 }
@@ -955,10 +956,11 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         品番: lineItem.品番,
         pickedQuantity: lineItem.quantity,
         action: 'Picking',
-        source: `IoT Device ${lineItem.背番号} - ${completedBy}`,
+        source: `IoT Device ${lineItem.背番号} - ${request.startedBy || completedBy}`,
         requestNumber: requestNumber,
         lineNumber: lineNumber,
-        completedBy: completedBy
+        completedBy: completedBy,
+        工場: request.factory || '野田倉庫'  // Use factory from request or default
     });
     
     // Check if all line items are completed
@@ -1068,7 +1070,8 @@ async function createInventoryTransaction(transactionData) {
             // Optional picking-specific fields
             requestId: transactionData.requestNumber,
             lineNumber: transactionData.lineNumber,
-            note: `Picked ${pickedQuantity} units for request ${transactionData.requestNumber} line ${transactionData.lineNumber} by ${transactionData.completedBy}`
+            note: `Picked ${pickedQuantity} units for request ${transactionData.requestNumber} line ${transactionData.lineNumber} by ${transactionData.completedBy}`,
+            工場: transactionData.工場 || '野田倉庫'  // Factory field with default value
         };
         
         // Insert the new record

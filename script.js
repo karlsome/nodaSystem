@@ -899,7 +899,8 @@ async function startPickingProcess() {
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-                startedBy: currentWorker
+                startedBy: currentWorker,
+                factory: factory  // Include factory from dropdown selection
             })
         });
         
