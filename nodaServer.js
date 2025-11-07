@@ -922,18 +922,24 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
     // Update the specific line item - only if currently in-progress
     const updateResult = await collection.updateOne(
         { 
-            requestNumber,
-            'lineItems.lineNumber': lineNumber,
-            'lineItems.status': 'in-progress'  // Only update if status is in-progress
+            requestNumber
         },
         {
             $set: {
-                'lineItems.$.status': 'completed',
-                'lineItems.$.completedAt': now,
-                'lineItems.$.completedBy': completedBy,
-                'lineItems.$.updatedAt': now,
+                'lineItems.$[elem].status': 'completed',
+                'lineItems.$[elem].completedAt': now,
+                'lineItems.$[elem].completedBy': completedBy,
+                'lineItems.$[elem].updatedAt': now,
                 'updatedAt': now
             }
+        },
+        {
+            arrayFilters: [
+                { 
+                    'elem.lineNumber': lineNumber,
+                    'elem.status': 'in-progress'
+                }
+            ]
         }
     );
     
