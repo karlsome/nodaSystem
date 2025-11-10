@@ -560,19 +560,29 @@ function handleDeviceHeartbeat(deviceId, data) {
 
 // Publish command to specific device
 function publishDeviceCommand(deviceId, command) {
-    if (!mqttClient || !mqttClient.connected) {
-        console.error('❌ MQTT client not connected, cannot send command');
+    if (!mqttClient) {
+        console.error('❌ MQTT client is NULL - MQTT not initialized!');
+        console.error('❌ Check: MQTT_ENABLED in .env file');
+        return false;
+    }
+    
+    if (!mqttClient.connected) {
+        console.error('❌ MQTT client not connected to broker!');
+        console.error('❌ Device command for', deviceId, 'will NOT be delivered');
+        console.error('❌ Check: MQTT broker URL, username, password');
         return false;
     }
     
     const topic = `noda/device/${deviceId}/command`;
     const message = JSON.stringify(command);
     
+    console.log(`📡 Publishing to topic: ${topic}`);
+    
     mqttClient.publish(topic, message, { qos: 1, retain: true }, (err) => {
         if (err) {
             console.error(`❌ Failed to publish to ${deviceId}:`, err);
         } else {
-            console.log(`📤 Published command to ${deviceId}:`, command);
+            console.log(`✅ Successfully published command to ${deviceId}:`, command);
         }
     });
     
@@ -833,13 +843,21 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
         
         // Broadcast to all IoT devices (MQTT + Socket.IO)
         console.log(`🚀 Broadcasting to both MQTT and Socket.IO devices`);
+        console.log(`📋 Processing ${updatedRequest.lineItems.length} line items for device commands`);
         
         // Send to MQTT devices (new hybrid approach) - with box quantities
         for (const item of updatedRequest.lineItems) {
             const deviceId = item.背番号;
+            console.log(`\n🔍 Processing line ${item.lineNumber} for device ${deviceId}:`);
+            console.log(`   Status: ${item.status}`);
+            console.log(`   品番: ${item.品番}`);
+            console.log(`   Quantity: ${item.quantity}`);
             
             if (item.status === 'in-progress') {
                 const boxQuantity = await calculateBoxQuantity(item.品番, item.quantity);
+                console.log(`   📦 Calculated box quantity: ${boxQuantity}`);
+                console.log(`   🟢 Sending GREEN command to device ${deviceId}`);
+                
                 publishDeviceCommand(deviceId, {
                     color: 'green',
                     quantity: boxQuantity,
@@ -849,6 +867,8 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
                     品番: item.品番
                 });
             } else {
+                console.log(`   🔴 Sending RED command to device ${deviceId} (status: ${item.status})`);
+                
                 publishDeviceCommand(deviceId, {
                     color: 'red',
                     quantity: null,
@@ -856,6 +876,8 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
                 });
             }
         }
+        
+        console.log(`\n✅ Finished sending commands to all ${updatedRequest.lineItems.length} devices`);
 
         // Send to Socket.IO devices (existing functionality) - with box quantities
         for (const [deviceId, deviceSocket] of connectedDevices.entries()) {
