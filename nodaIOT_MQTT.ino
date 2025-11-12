@@ -25,6 +25,7 @@ void reconnectMQTT();
 
 // List of known SSIDs and passwords
 const char* ssidList[] = {
+  "Noda-ioT",
   "sasaki-host",
   "sasaki-host_EXT",
   "OZEKojo",
@@ -43,6 +44,7 @@ const char* ssidList[] = {
 };
 
 const char* passwordList[] = {
+  "6B0B7AC380",
   "6B0B7AC380",
   "6B0B7AC380",
   "65057995",
