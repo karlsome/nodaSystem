@@ -131,12 +131,16 @@ struct ConnectionState {
   unsigned long lastHeartbeat = 0;
   unsigned long lastConnectAttempt = 0;
   unsigned long lastMqttMessage = 0;
+  unsigned long lastWifiReconnectAttempt = 0;
   bool isReconnecting = false;
+  bool wasWifiConnected = false;
   const unsigned long HEARTBEAT_INTERVAL = 25000; // Send heartbeat every 25 seconds (before 30s keepalive)
   const unsigned long CONNECTION_TIMEOUT = 45000; // Consider disconnected after 45 seconds
   const unsigned long RECONNECT_DELAY = 10000; // Wait 10 seconds between reconnect attempts (longer for stability)
+  const unsigned long WIFI_RECONNECT_INTERVAL = 10000; // Try WiFi reconnection every 10 seconds
   const unsigned long MAX_RECONNECT_ATTEMPTS = 3; // Max consecutive attempts before longer delay
   unsigned int reconnectAttempts = 0;
+  unsigned int wifiReconnectAttempts = 0;
 } connectionState;
 
 // Screen power management
@@ -454,9 +458,58 @@ void onWiFiConnected() {
 void onWiFiDisconnected() {
   Serial.println("📶 WiFi disconnected!");
   deviceState.isConnected = false;
+  connectionState.wasWifiConnected = false;
   deviceState.currentMessage = "WiFi Disconnected";
   update_screen_activity(); // Reset timeout and wake screen
   update_screen_display();
+}
+
+void attemptWiFiReconnection() {
+  unsigned long now = millis();
+  
+  // Check if enough time has passed since last attempt
+  if (now - connectionState.lastWifiReconnectAttempt < connectionState.WIFI_RECONNECT_INTERVAL) {
+    return; // Too soon to retry
+  }
+  
+  connectionState.lastWifiReconnectAttempt = now;
+  connectionState.wifiReconnectAttempts++;
+  
+  Serial.printf("🔄 WiFi reconnection attempt #%d...\n", connectionState.wifiReconnectAttempts);
+  
+  deviceState.currentMessage = String("WiFi Reconnect #") + String(connectionState.wifiReconnectAttempts);
+  update_screen_activity();
+  update_screen_display();
+  
+  // First try simple reconnect (faster)
+  WiFi.reconnect();
+  
+  // Wait up to 10 seconds for reconnection
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println();
+    Serial.println("✅ WiFi reconnected successfully!");
+    connectionState.wifiReconnectAttempts = 0;
+    connectionState.wasWifiConnected = true;
+    onWiFiConnected();
+  } else {
+    Serial.println();
+    Serial.println("❌ Quick reconnect failed, will try full scan next cycle");
+    
+    // Every 3rd attempt, do a full network scan and reconnect
+    if (connectionState.wifiReconnectAttempts % 3 == 0) {
+      Serial.println("🔍 Performing full network scan...");
+      WiFi.disconnect(true, true);
+      delay(100);
+      connectToWiFi();
+    }
+  }
 }
 
 // REST API status check - backup method (kept for compatibility)
@@ -552,6 +605,7 @@ void connectToMQTT() {
 
 void reconnectMQTT() {
   if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("⚠️ MQTT reconnection skipped - WiFi not connected");
     return; // Don't attempt MQTT connection without WiFi
   }
 
@@ -568,6 +622,7 @@ void reconnectMQTT() {
   connectionState.lastConnectAttempt = now;
 
   Serial.print("🔄 Attempting MQTT connection...");
+  Serial.printf(" (Attempt #%d)\n", connectionState.reconnectAttempts + 1);
   
   // Create client ID with device ID
   String clientId = "NodaIoT_" + DEVICE_ID + "_" + String(random(0xffff), HEX);
@@ -684,11 +739,35 @@ void sendHeartbeat() {
 void checkConnectionHealth() {
   unsigned long now = millis();
   
+  // Check WiFi status first
+  if (WiFi.status() != WL_CONNECTED) {
+    if (connectionState.wasWifiConnected) {
+      Serial.println("⚠️ WiFi connection lost during operation!");
+      connectionState.wasWifiConnected = false;
+      if (deviceState.isConnected) {
+        deviceState.isConnected = false;
+        deviceState.currentMessage = "WiFi Lost";
+        update_screen_activity();
+        update_screen_display();
+      }
+    }
+    return; // Don't check MQTT if WiFi is down
+  }
+  
+  // WiFi is connected - check if it just recovered
+  if (!connectionState.wasWifiConnected) {
+    Serial.println("✅ WiFi connection recovered! Re-establishing MQTT...");
+    connectionState.wasWifiConnected = true;
+    connectionState.reconnectAttempts = 0; // Reset MQTT attempts on WiFi recovery
+    reconnectMQTT();
+    return;
+  }
+  
   // Check if MQTT connection is lost
   if (deviceState.isConnected && !mqttClient.connected()) {
     Serial.println("⚠️ MQTT connection lost, marking as disconnected");
     deviceState.isConnected = false;
-    deviceState.currentMessage = "Connection Lost";
+    deviceState.currentMessage = "MQTT Lost";
     update_screen_activity();
     update_screen_display();
   }
@@ -698,7 +777,7 @@ void checkConnectionHealth() {
     sendHeartbeat();
   }
   
-  // Attempt reconnection if needed
+  // Attempt MQTT reconnection if needed (WiFi is up but MQTT is down)
   if (!deviceState.isConnected && !connectionState.isReconnecting) {
     reconnectMQTT();
   }
@@ -843,50 +922,73 @@ void connectToWiFi() {
   WiFi.disconnect(true, true); // clear stale state
   delay(100);
 
-  Serial.println("📡 Scanning for available networks...");
-  int n = WiFi.scanNetworks();
-  Serial.printf("Found %d networks\n", n);
-
   bool connected = false;
+  int retryCount = 0;
+  const int MAX_RETRY_CYCLES = 5; // Try up to 5 full cycles before continuing
 
-  for (int i = 0; i < numNetworks && !connected; i++) {
-    for (int j = 0; j < n; j++) {
-      if (WiFi.SSID(j) == String(ssidList[i])) {
-        Serial.printf("🔌 Attempting to connect to: %s\n", ssidList[i]);
+  // Retry loop for initial connection
+  while (!connected && retryCount < MAX_RETRY_CYCLES) {
+    if (retryCount > 0) {
+      Serial.printf("🔄 WiFi connection retry cycle %d of %d...\n", retryCount + 1, MAX_RETRY_CYCLES);
+      delay(5000); // Wait 5 seconds between full retry cycles
+    }
 
-        deviceState.currentMessage = String("Connecting: ") + ssidList[i];
-        update_screen_activity(); // Wake screen during connection attempts
-        update_screen_display();
+    Serial.println("📡 Scanning for available networks...");
+    int n = WiFi.scanNetworks();
+    Serial.printf("Found %d networks\n", n);
 
-        WiFi.begin(ssidList[i], passwordList[i]);
+    for (int i = 0; i < numNetworks && !connected; i++) {
+      for (int j = 0; j < n; j++) {
+        if (WiFi.SSID(j) == String(ssidList[i])) {
+          Serial.printf("🔌 Attempting to connect to: %s\n", ssidList[i]);
 
-        int attempts = 0;
-        while (WiFi.status() != WL_CONNECTED && attempts < 40) { // ~20s
-          delay(500);
-          Serial.print(".");
-          attempts++;
-        }
+          deviceState.currentMessage = String("Connecting: ") + ssidList[i];
+          update_screen_activity(); // Wake screen during connection attempts
+          update_screen_display();
 
-        if (WiFi.status() == WL_CONNECTED) {
-          Serial.println();
-          Serial.printf("✅ Connected to: %s\n", ssidList[i]);
-          Serial.printf("IP address: %s\n", WiFi.localIP().toString().c_str());
-          connected = true;
-          onWiFiConnected();
+          WiFi.begin(ssidList[i], passwordList[i]);
+
+          int attempts = 0;
+          while (WiFi.status() != WL_CONNECTED && attempts < 40) { // ~20s
+            delay(500);
+            Serial.print(".");
+            attempts++;
+          }
+
+          if (WiFi.status() == WL_CONNECTED) {
+            Serial.println();
+            Serial.printf("✅ Connected to: %s\n", ssidList[i]);
+            Serial.printf("IP address: %s\n", WiFi.localIP().toString().c_str());
+            connected = true;
+            connectionState.wasWifiConnected = true;
+            connectionState.wifiReconnectAttempts = 0;
+            onWiFiConnected();
+            break;
+          } else {
+            Serial.println();
+            Serial.printf("❌ Failed to connect to: %s\n", ssidList[i]);
+            WiFi.disconnect();
+          }
           break;
-        } else {
-          Serial.println();
-          Serial.printf("❌ Failed to connect to: %s\n", ssidList[i]);
-          WiFi.disconnect();
         }
-        break;
+      }
+    }
+    
+    if (!connected) {
+      retryCount++;
+      if (retryCount < MAX_RETRY_CYCLES) {
+        deviceState.currentMessage = String("Retry ") + String(retryCount) + "/" + String(MAX_RETRY_CYCLES);
+        update_screen_activity();
+        update_screen_display();
       }
     }
   }
 
   if (!connected) {
-    Serial.println("❌ Could not connect to any known network!");
-    deviceState.currentMessage = "WiFi Failed!";
+    Serial.println("❌ Could not connect to any known network after all retries!");
+    Serial.println("🔄 Will continue trying in background (every 10 seconds)...");
+    deviceState.currentMessage = "WiFi Failed - Retrying...";
+    connectionState.lastWifiReconnectAttempt = millis(); // Initialize for background reconnection
     update_screen_activity(); // Wake screen for error message
     update_screen_display();
   }
@@ -978,28 +1080,24 @@ void loop() {
   check_screen_timeout(); // Check if screen should timeout during red/standby modes
   check_completed_timeout(); // Check if device should return from completed to standby
 
-  // MQTT and connection management
+  // MQTT message handling
   if (mqttClient.connected()) {
     mqttClient.loop(); // Handle MQTT messages and keep connection alive
   }
-  checkConnectionHealth(); // Monitor and maintain connection
+  
+  // Connection health monitoring and reconnection
+  checkConnectionHealth(); // Monitor WiFi and MQTT, handle reconnections
   ensureConnectionStability(); // Ensure we stay connected
 
-  // WiFi reconnection - enhanced to not interfere with MQTT
+  // WiFi reconnection handler - continuously monitor and attempt reconnection
   if (WiFi.status() != WL_CONNECTED) {
-    if (deviceState.isConnected) {
-      Serial.println("📶 WiFi disconnected - this will affect MQTT connection");
-      onWiFiDisconnected();
-    }
-    static unsigned long lastReconnectAttempt = 0;
-    if (millis() - lastReconnectAttempt > 10000) { // Try every 10 seconds
-      Serial.println("🔄 Attempting WiFi reconnection...");
-      WiFi.reconnect();
-      lastReconnectAttempt = millis();
-    }
+    // WiFi is down - attempt reconnection
+    attemptWiFiReconnection();
   } else {
-    // WiFi is connected, ensure MQTT connection is also up
-    ensureConnectionStability();
+    // WiFi is up - ensure MQTT is also connected
+    if (!mqttClient.connected() && !connectionState.isReconnecting) {
+      ensureConnectionStability();
+    }
   }
 
   delay(10); // Small delay to prevent watchdog issues
