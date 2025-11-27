@@ -464,6 +464,13 @@ function openPickingSystem() {
     loadPickingRequests();
 }
 
+function openGentanSystem() {
+    // Placeholder function for Gentan (原単) system
+    showToast('原単システムは開発中です', 'info');
+    // TODO: Implement Gentan system
+    // showScreen('gentan');
+}
+
 function backToHome() {
     showScreen('home');
 }
@@ -1776,6 +1783,7 @@ window.handleLogin = handleLogin;
 window.logout = logout;
 window.openInventorySystem = openInventorySystem;
 window.openPickingSystem = openPickingSystem;
+window.openGentanSystem = openGentanSystem;
 window.backToHome = backToHome;
 window.backToPickingList = backToPickingList;
 window.filterByStatus = filterByStatus;
