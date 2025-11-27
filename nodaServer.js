@@ -2571,6 +2571,182 @@ app.get('/api/master-data/:productNumber', async (req, res) => {
 
 // ==================== END MASTER DATA API ENDPOINT ====================
 
+// ==================== GENTAN (原単) IMAGE PROCESSING ENDPOINTS ====================
+
+// Store for pending image processing jobs
+const gentanProcessingJobs = new Map(); // jobId -> { socketId, status, result }
+
+// Endpoint: Tablet uploads image for processing
+app.post('/api/gentan/process-image', express.json({ limit: '50mb' }), express.raw({ limit: '50mb', type: 'image/*' }), async (req, res) => {
+    try {
+        const jobId = `gentan-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        const socketId = req.body.socketId || req.headers['x-socket-id'];
+        
+        console.log(`📸 Received image processing request. Job ID: ${jobId}, Socket: ${socketId}`);
+        
+        // Store job with pending status
+        gentanProcessingJobs.set(jobId, {
+            socketId: socketId,
+            status: 'processing',
+            result: null,
+            createdAt: new Date()
+        });
+        
+        // Immediately return job ID to tablet
+        res.json({ 
+            success: true, 
+            jobId: jobId,
+            message: '画像を処理中です...'
+        });
+        
+        // Forward image to n8n webhook asynchronously
+        const FormData = require('form-data');
+        const fetch = require('node-fetch');
+        const form = new FormData();
+        
+        // Get image from request
+        let imageBuffer;
+        if (req.body.image) {
+            // Base64 encoded image
+            imageBuffer = Buffer.from(req.body.image, 'base64');
+        } else if (Buffer.isBuffer(req.body)) {
+            // Raw image buffer
+            imageBuffer = req.body;
+        } else {
+            throw new Error('No image data found in request');
+        }
+        
+        form.append('image', imageBuffer, { filename: 'gentan-image.jpg' });
+        form.append('jobId', jobId);
+        
+        console.log(`🔄 Forwarding image to n8n webhook...`);
+        
+        // Don't await - process asynchronously
+        fetch('https://karlsome.app.n8n.cloud/webhook-test/7081d838-c11e-42f5-8c17-94c5ee557cf6', {
+            method: 'POST',
+            body: form,
+            headers: form.getHeaders()
+        }).then(async (n8nResponse) => {
+            if (!n8nResponse.ok) {
+                throw new Error(`n8n returned ${n8nResponse.status}`);
+            }
+            return n8nResponse.json();
+        }).then((n8nResult) => {
+            console.log(`✅ n8n processing complete for job ${jobId}`);
+            // Update will come through /api/gentan/n8n-callback endpoint
+        }).catch((error) => {
+            console.error(`❌ Error forwarding to n8n for job ${jobId}:`, error);
+            gentanProcessingJobs.set(jobId, {
+                ...gentanProcessingJobs.get(jobId),
+                status: 'error',
+                error: error.message
+            });
+            
+            // Notify tablet of error via Socket.IO
+            if (socketId) {
+                const targetSocket = Array.from(connectedTablets).find(s => s.id === socketId);
+                if (targetSocket) {
+                    targetSocket.emit('gentan-processing-error', {
+                        jobId: jobId,
+                        error: error.message
+                    });
+                }
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error in gentan/process-image:', error);
+        res.status(500).json({ error: 'Failed to process image', details: error.message });
+    }
+});
+
+// Endpoint: n8n sends back the processed result
+app.post('/api/gentan/n8n-callback', async (req, res) => {
+    try {
+        const { jobId, 品番, 品名, 納入数, 納入日, 色番 } = req.body;
+        
+        console.log(`📥 Received n8n callback for job ${jobId}:`, req.body);
+        
+        if (!jobId) {
+            return res.status(400).json({ error: 'Job ID is required' });
+        }
+        
+        const job = gentanProcessingJobs.get(jobId);
+        if (!job) {
+            console.warn(`⚠️ Job ${jobId} not found in processing jobs`);
+            return res.status(404).json({ error: 'Job not found' });
+        }
+        
+        // Update job with result
+        const result = { 品番, 品名, 納入数, 納入日, 色番 };
+        gentanProcessingJobs.set(jobId, {
+            ...job,
+            status: 'completed',
+            result: result
+        });
+        
+        console.log(`✅ Job ${jobId} completed. Notifying tablet via Socket.IO...`);
+        
+        // Send result to tablet via Socket.IO
+        const targetSocket = Array.from(connectedTablets).find(s => s.id === job.socketId);
+        if (targetSocket) {
+            targetSocket.emit('gentan-processing-complete', {
+                jobId: jobId,
+                data: result
+            });
+            console.log(`✅ Sent result to tablet socket ${job.socketId}`);
+        } else {
+            console.warn(`⚠️ Tablet socket ${job.socketId} not found`);
+        }
+        
+        // Clean up old jobs (older than 10 minutes)
+        const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+        for (const [id, jobData] of gentanProcessingJobs.entries()) {
+            if (jobData.createdAt < tenMinutesAgo) {
+                gentanProcessingJobs.delete(id);
+            }
+        }
+        
+        res.json({ success: true, message: 'Result received and forwarded to tablet' });
+        
+    } catch (error) {
+        console.error('Error in gentan/n8n-callback:', error);
+        res.status(500).json({ error: 'Failed to process callback', details: error.message });
+    }
+});
+
+// Endpoint: Submit gentan data to MongoDB
+app.post('/api/gentan/submit', async (req, res) => {
+    try {
+        const { documents } = req.body;
+        
+        if (!documents || !Array.isArray(documents) || documents.length === 0) {
+            return res.status(400).json({ error: 'Documents array is required' });
+        }
+        
+        const gentanDB = client.db('submittedDB');
+        const collection = gentanDB.collection('nodaRawMaterialDB');
+        
+        console.log(`📝 Inserting ${documents.length} gentan documents to MongoDB...`);
+        
+        const result = await collection.insertMany(documents);
+        
+        console.log(`✅ Successfully inserted ${result.insertedCount} documents`);
+        
+        res.json({ 
+            success: true, 
+            insertedCount: result.insertedCount,
+            insertedIds: result.insertedIds
+        });
+        
+    } catch (error) {
+        console.error('Error submitting gentan data:', error);
+        res.status(500).json({ error: 'Failed to submit data', details: error.message });
+    }
+});
+
+// ==================== END GENTAN ENDPOINTS ====================
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
     res.json({ status: 'OK', timestamp: new Date().toISOString() });

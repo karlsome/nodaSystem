@@ -269,6 +269,34 @@ function initializeSocket() {
             updateLockUI(lockStatus);
         });
         
+        // Gentan image processing complete
+        socket.on('gentan-processing-complete', (data) => {
+            console.log('✅ Gentan processing complete:', data);
+            
+            // Find the item by jobId
+            const itemIndex = gentanItems.findIndex(item => item.jobId === data.jobId);
+            if (itemIndex >= 0) {
+                gentanItems[itemIndex].data = data.data;
+                gentanItems[itemIndex].processed = true;
+                gentanItems[itemIndex].processing = false;
+                updateGentanLists();
+                showToast('画像データを抽出しました！', 'success');
+            }
+        });
+        
+        // Gentan image processing error
+        socket.on('gentan-processing-error', (data) => {
+            console.error('❌ Gentan processing error:', data);
+            
+            // Find the item by jobId
+            const itemIndex = gentanItems.findIndex(item => item.jobId === data.jobId);
+            if (itemIndex >= 0) {
+                gentanItems[itemIndex].processing = false;
+                updateGentanLists();
+            }
+            showToast('画像処理エラー: ' + data.error, 'error');
+        });
+        
         socket.on('error', (error) => {
             console.error('Socket error:', error);
             showToast(t('connection-error'), 'error');
@@ -589,7 +617,7 @@ async function processGentanBarcode(barcodeValue) {
     }
 }
 
-// Handle camera image capture
+// Handle camera image capture - AUTO PROCESS
 async function handleGentanImageCapture(event) {
     const file = event.target.files[0];
     if (!file) return;
@@ -598,13 +626,16 @@ async function handleGentanImageCapture(event) {
         // Create image preview URL
         const imageUrl = URL.createObjectURL(file);
         
+        const itemIndex = gentanItems.length;
+        
         // Store the file temporarily for processing
         const item = {
             id: Date.now(),
             type: 'image',
             source: imageUrl,
-            file: file, // Store the file for later processing
-            processed: false, // Flag to indicate if processed by n8n
+            file: file,
+            processed: false,
+            processing: true, // Flag for currently processing
             data: {
                 品番: '',
                 品名: '',
@@ -616,7 +647,10 @@ async function handleGentanImageCapture(event) {
         
         gentanItems.push(item);
         updateGentanLists();
-        showToast('写真を追加しました。「処理」ボタンをクリックしてデータを抽出してください', 'info');
+        showToast('画像を処理中...', 'info');
+        
+        // AUTO PROCESS - Send to server immediately
+        await processGentanImageAuto(itemIndex);
         
         // Reset file input
         event.target.value = '';
@@ -628,8 +662,8 @@ async function handleGentanImageCapture(event) {
     }
 }
 
-// Process image through n8n to extract data
-async function processGentanImage(index) {
+// Auto-process image through server and n8n
+async function processGentanImageAuto(index) {
     const item = gentanItems[index];
     
     if (!item || item.type !== 'image' || !item.file) {
@@ -637,46 +671,52 @@ async function processGentanImage(index) {
         return;
     }
     
-    if (item.processed) {
-        showToast('この画像は既に処理されています', 'info');
-        return;
-    }
-    
     try {
-        showToast('画像を処理中...', 'info');
+        // Convert file to base64
+        const reader = new FileReader();
+        reader.readAsDataURL(item.file);
         
-        // Create form data
-        const formData = new FormData();
-        formData.append('image', item.file);
-        
-        // Send to n8n webhook
-        const response = await fetch(N8N_WEBHOOK_URL, {
-            method: 'POST',
-            body: formData
-        });
-        
-        if (!response.ok) {
-            throw new Error('画像処理に失敗しました');
-        }
-        
-        const result = await response.json();
-        
-        // Update item with extracted data
-        gentanItems[index].data = {
-            品番: result.品番 || '',
-            品名: result.品名 || '',
-            納入数: result.納入数 || '',
-            納入日: result.納入日 || '',
-            色番: result.色番 || ''
+        reader.onload = async () => {
+            const base64Image = reader.result.split(',')[1]; // Remove data:image/jpeg;base64, prefix
+            
+            // Send to server with socket ID for callback
+            const response = await fetch(`${API_BASE_URL}/gentan/process-image`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Socket-Id': socket ? socket.id : null
+                },
+                body: JSON.stringify({
+                    image: base64Image,
+                    socketId: socket ? socket.id : null
+                })
+            });
+            
+            if (!response.ok) {
+                throw new Error('画像処理リクエストに失敗しました');
+            }
+            
+            const result = await response.json();
+            console.log(`✅ Job created: ${result.jobId}. Waiting for n8n callback via Socket.IO...`);
+            
+            // Store job ID with item
+            gentanItems[index].jobId = result.jobId;
+            gentanItems[index].processing = true;
+            updateGentanLists();
         };
-        gentanItems[index].processed = true;
         
-        updateGentanLists();
-        showToast('画像データを抽出しました！', 'success');
+        reader.onerror = (error) => {
+            console.error('Error reading file:', error);
+            showToast('ファイル読み込みエラー', 'error');
+            gentanItems[index].processing = false;
+            updateGentanLists();
+        };
         
     } catch (error) {
         console.error('Error processing image:', error);
         showToast('画像処理エラー: ' + error.message, 'error');
+        gentanItems[index].processing = false;
+        updateGentanLists();
     }
 }
 
@@ -722,9 +762,15 @@ function updateGentanInputList() {
                 </div>
             `;
         } else {
-            const processButton = item.processed 
-                ? '<span class="text-xs text-green-600 font-semibold"><i class="fas fa-check-circle mr-1"></i>処理済み</span>'
-                : `<button onclick="processGentanImage(${index})" class="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white text-xs rounded-lg transition-colors"><i class="fas fa-cog mr-1"></i>処理</button>`;
+            // Status badge for images
+            let statusBadge;
+            if (item.processing) {
+                statusBadge = '<span class="text-xs text-blue-600 font-semibold"><i class="fas fa-spinner fa-spin mr-1"></i>処理中...</span>';
+            } else if (item.processed) {
+                statusBadge = '<span class="text-xs text-green-600 font-semibold"><i class="fas fa-check-circle mr-1"></i>処理済み</span>';
+            } else {
+                statusBadge = '<span class="text-xs text-gray-600 font-semibold"><i class="fas fa-clock mr-1"></i>待機中</span>';
+            }
             
             div.innerHTML = `
                 <div class="flex items-start justify-between">
@@ -734,7 +780,7 @@ function updateGentanInputList() {
                                 <i class="fas fa-image text-blue-600 mr-2"></i>
                                 <span class="text-sm font-semibold text-gray-700">写真 #${index + 1}</span>
                             </div>
-                            ${processButton}
+                            ${statusBadge}
                         </div>
                         <img src="${item.source}" alt="Captured" class="w-full h-32 object-cover rounded border border-gray-200">
                     </div>
@@ -769,11 +815,16 @@ function updateGentanDataList() {
         const div = document.createElement('div');
         div.className = 'p-4 hover:bg-gray-50';
         
-        const statusBadge = item.type === 'barcode' 
-            ? '<span class="text-xs px-2 py-1 bg-orange-100 text-orange-800 rounded-full">バーコード</span>'
-            : item.processed
-                ? '<span class="text-xs px-2 py-1 bg-green-100 text-green-800 rounded-full"><i class="fas fa-check mr-1"></i>処理済み</span>'
-                : '<span class="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded-full"><i class="fas fa-clock mr-1"></i>未処理</span>';
+        let statusBadge;
+        if (item.type === 'barcode') {
+            statusBadge = '<span class="text-xs px-2 py-1 bg-orange-100 text-orange-800 rounded-full">バーコード</span>';
+        } else if (item.processing) {
+            statusBadge = '<span class="text-xs px-2 py-1 bg-blue-100 text-blue-800 rounded-full"><i class="fas fa-spinner fa-spin mr-1"></i>処理中</span>';
+        } else if (item.processed) {
+            statusBadge = '<span class="text-xs px-2 py-1 bg-green-100 text-green-800 rounded-full"><i class="fas fa-check mr-1"></i>処理済み</span>';
+        } else {
+            statusBadge = '<span class="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded-full"><i class="fas fa-clock mr-1"></i>待機中</span>';
+        }
         
         div.innerHTML = `
             <div class="space-y-3">
@@ -2254,7 +2305,6 @@ window.submitNyukoInput = submitNyukoInput;
 
 // Gentan (原単) system functions
 window.handleGentanImageCapture = handleGentanImageCapture;
-window.processGentanImage = processGentanImage;
 window.updateGentanItemData = updateGentanItemData;
 window.removeGentanItem = removeGentanItem;
 window.submitGentanData = submitGentanData;
