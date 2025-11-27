@@ -431,6 +431,7 @@ function showScreen(screenName) {
     document.getElementById('pickingDetailScreen').classList.add('hidden');
     document.getElementById('inventoryScreen').classList.add('hidden');
     document.getElementById('nyukoScreen').classList.add('hidden');
+    document.getElementById('gentanScreen').classList.add('hidden');
     
     // Show selected screen
     document.getElementById(screenName + 'Screen').classList.remove('hidden');
@@ -464,12 +465,442 @@ function openPickingSystem() {
     loadPickingRequests();
 }
 
+// ==================== GENTAN (原単) SYSTEM ====================
+
+// Global storage for gentan items
+let gentanItems = [];
+let gentanScanBuffer = '';
+const N8N_WEBHOOK_URL = 'https://karlsome.app.n8n.cloud/webhook-test/7081d838-c11e-42f5-8c17-94c5ee557cf6';
+
 function openGentanSystem() {
-    // Placeholder function for Gentan (原単) system
-    showToast('原単システムは開発中です', 'info');
-    // TODO: Implement Gentan system
-    // showScreen('gentan');
+    showScreen('gentan');
+    gentanItems = [];
+    updateGentanLists();
+    setupGentanScanListener();
 }
+
+// Set up keyboard listener for barcode scanning
+function setupGentanScanListener() {
+    console.log('🎧 Setting up Gentan barcode scanner');
+    
+    // Remove any existing listener
+    document.removeEventListener('keydown', handleGentanBarcodeScan);
+    
+    // Add new listener
+    document.addEventListener('keydown', handleGentanBarcodeScan);
+    
+    console.log('✅ Gentan scanner ready');
+}
+
+// Handle barcode scanning
+async function handleGentanBarcodeScan(e) {
+    // Only process when on gentan screen
+    if (currentScreen !== 'gentan') return;
+    
+    // Ignore if user is typing in an input field
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+        return;
+    }
+    
+    // Check if Enter key (delimiter)
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        console.log('✅ Enter key pressed - Processing barcode:', gentanScanBuffer);
+        
+        if (gentanScanBuffer.trim()) {
+            await processGentanBarcode(gentanScanBuffer.trim());
+            gentanScanBuffer = '';
+        }
+        return;
+    }
+    
+    // Ignore special keys
+    if (e.key.length > 1 && e.key !== 'Enter') {
+        return;
+    }
+    
+    // Add character to buffer
+    gentanScanBuffer += e.key;
+}
+
+// Process barcode data
+async function processGentanBarcode(barcodeValue) {
+    try {
+        console.log('Processing barcode:', barcodeValue);
+        
+        // Extract data from barcode
+        // Format: 4451 0N4D52M6HF ... 000000040.000000041.000000001.000000040.000 15D73 601002 2668452560102
+        
+        // Extract 品番 (starts after first space, 10 characters)
+        const parts = barcodeValue.trim().split(/\s+/);
+        let 品番 = '';
+        let 納入数 = '';
+        let 納入日 = '';
+        
+        // Find 品番 (10 character alphanumeric after first number)
+        for (let i = 0; i < parts.length; i++) {
+            if (parts[i].length === 10 && /^[A-Z0-9]+$/.test(parts[i])) {
+                品番 = parts[i];
+                break;
+            }
+        }
+        
+        // Extract 納入数 from the numeric section (Net Length)
+        const numericMatch = barcodeValue.match(/(\d{9}\.\d{9}\.\d{9}\.(\d{9})\.\d{3})/);
+        if (numericMatch) {
+            const netLength = parseFloat(numericMatch[2]);
+            納入数 = netLength.toFixed(1) + 'm';
+        }
+        
+        // Extract 納入日 from the end (remove last 2 digits)
+        const lastPart = parts[parts.length - 1];
+        if (lastPart && lastPart.length >= 7) {
+            // Remove last 2 digits
+            const dateCode = lastPart.slice(0, -2);
+            // Format: YYMMDD -> YY-MM-DD
+            if (dateCode.length >= 5) {
+                const yy = dateCode.slice(0, 2);
+                const mm = dateCode.slice(2, 4);
+                const dd = dateCode.slice(4, 6);
+                納入日 = `${yy}-${mm}-${dd}`;
+            }
+        }
+        
+        const item = {
+            id: Date.now(),
+            type: 'barcode',
+            source: barcodeValue,
+            data: {
+                品番: 品番,
+                品名: '',
+                納入数: 納入数,
+                納入日: 納入日,
+                色番: ''
+            }
+        };
+        
+        gentanItems.push(item);
+        updateGentanLists();
+        showToast('バーコードをスキャンしました', 'success');
+        
+    } catch (error) {
+        console.error('Error processing barcode:', error);
+        showToast('バーコード処理エラー', 'error');
+    }
+}
+
+// Handle camera image capture
+async function handleGentanImageCapture(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    try {
+        // Create image preview URL
+        const imageUrl = URL.createObjectURL(file);
+        
+        // Store the file temporarily for processing
+        const item = {
+            id: Date.now(),
+            type: 'image',
+            source: imageUrl,
+            file: file, // Store the file for later processing
+            processed: false, // Flag to indicate if processed by n8n
+            data: {
+                品番: '',
+                品名: '',
+                納入数: '',
+                納入日: '',
+                色番: ''
+            }
+        };
+        
+        gentanItems.push(item);
+        updateGentanLists();
+        showToast('写真を追加しました。「処理」ボタンをクリックしてデータを抽出してください', 'info');
+        
+        // Reset file input
+        event.target.value = '';
+        
+    } catch (error) {
+        console.error('Error capturing image:', error);
+        showToast('写真撮影エラー: ' + error.message, 'error');
+        event.target.value = '';
+    }
+}
+
+// Process image through n8n to extract data
+async function processGentanImage(index) {
+    const item = gentanItems[index];
+    
+    if (!item || item.type !== 'image' || !item.file) {
+        showToast('画像ファイルが見つかりません', 'error');
+        return;
+    }
+    
+    if (item.processed) {
+        showToast('この画像は既に処理されています', 'info');
+        return;
+    }
+    
+    try {
+        showToast('画像を処理中...', 'info');
+        
+        // Create form data
+        const formData = new FormData();
+        formData.append('image', item.file);
+        
+        // Send to n8n webhook
+        const response = await fetch(N8N_WEBHOOK_URL, {
+            method: 'POST',
+            body: formData
+        });
+        
+        if (!response.ok) {
+            throw new Error('画像処理に失敗しました');
+        }
+        
+        const result = await response.json();
+        
+        // Update item with extracted data
+        gentanItems[index].data = {
+            品番: result.品番 || '',
+            品名: result.品名 || '',
+            納入数: result.納入数 || '',
+            納入日: result.納入日 || '',
+            色番: result.色番 || ''
+        };
+        gentanItems[index].processed = true;
+        
+        updateGentanLists();
+        showToast('画像データを抽出しました！', 'success');
+        
+    } catch (error) {
+        console.error('Error processing image:', error);
+        showToast('画像処理エラー: ' + error.message, 'error');
+    }
+}
+
+// Update both lists
+function updateGentanLists() {
+    updateGentanInputList();
+    updateGentanDataList();
+}
+
+// Update input source list (left column)
+function updateGentanInputList() {
+    const container = document.getElementById('gentanInputList');
+    
+    if (gentanItems.length === 0) {
+        container.innerHTML = `
+            <div class="p-12 text-center text-gray-400">
+                <i class="fas fa-inbox text-6xl mb-4"></i>
+                <p>スキャンまたは写真をアップロードしてください</p>
+            </div>
+        `;
+        return;
+    }
+    
+    container.innerHTML = '';
+    
+    gentanItems.forEach((item, index) => {
+        const div = document.createElement('div');
+        div.className = 'p-4 hover:bg-gray-50';
+        
+        if (item.type === 'barcode') {
+            div.innerHTML = `
+                <div class="flex items-start justify-between">
+                    <div class="flex-1">
+                        <div class="flex items-center mb-2">
+                            <i class="fas fa-barcode text-orange-600 mr-2"></i>
+                            <span class="text-sm font-semibold text-gray-700">バーコード #${index + 1}</span>
+                        </div>
+                        <div class="bg-gray-100 p-2 rounded text-xs font-mono break-all">${item.source}</div>
+                    </div>
+                    <button onclick="removeGentanItem(${index})" class="ml-3 w-8 h-8 bg-red-100 hover:bg-red-200 text-red-600 rounded-lg">
+                        <i class="fas fa-trash text-sm"></i>
+                    </button>
+                </div>
+            `;
+        } else {
+            const processButton = item.processed 
+                ? '<span class="text-xs text-green-600 font-semibold"><i class="fas fa-check-circle mr-1"></i>処理済み</span>'
+                : `<button onclick="processGentanImage(${index})" class="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white text-xs rounded-lg transition-colors"><i class="fas fa-cog mr-1"></i>処理</button>`;
+            
+            div.innerHTML = `
+                <div class="flex items-start justify-between">
+                    <div class="flex-1">
+                        <div class="flex items-center justify-between mb-2">
+                            <div class="flex items-center">
+                                <i class="fas fa-image text-blue-600 mr-2"></i>
+                                <span class="text-sm font-semibold text-gray-700">写真 #${index + 1}</span>
+                            </div>
+                            ${processButton}
+                        </div>
+                        <img src="${item.source}" alt="Captured" class="w-full h-32 object-cover rounded border border-gray-200">
+                    </div>
+                    <button onclick="removeGentanItem(${index})" class="ml-3 w-8 h-8 bg-red-100 hover:bg-red-200 text-red-600 rounded-lg">
+                        <i class="fas fa-trash text-sm"></i>
+                    </button>
+                </div>
+            `;
+        }
+        
+        container.appendChild(div);
+    });
+}
+
+// Update extracted data list (right column)
+function updateGentanDataList() {
+    const container = document.getElementById('gentanDataList');
+    
+    if (gentanItems.length === 0) {
+        container.innerHTML = `
+            <div class="p-12 text-center text-gray-400">
+                <i class="fas fa-database text-6xl mb-4"></i>
+                <p>データがここに表示されます</p>
+            </div>
+        `;
+        return;
+    }
+    
+    container.innerHTML = '';
+    
+    gentanItems.forEach((item, index) => {
+        const div = document.createElement('div');
+        div.className = 'p-4 hover:bg-gray-50';
+        
+        const statusBadge = item.type === 'barcode' 
+            ? '<span class="text-xs px-2 py-1 bg-orange-100 text-orange-800 rounded-full">バーコード</span>'
+            : item.processed
+                ? '<span class="text-xs px-2 py-1 bg-green-100 text-green-800 rounded-full"><i class="fas fa-check mr-1"></i>処理済み</span>'
+                : '<span class="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded-full"><i class="fas fa-clock mr-1"></i>未処理</span>';
+        
+        div.innerHTML = `
+            <div class="space-y-3">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="text-sm font-bold text-gray-700">${item.type === 'barcode' ? 'バーコード' : '写真'} #${index + 1}</span>
+                    ${statusBadge}
+                </div>
+                
+                <div class="grid grid-cols-2 gap-2">
+                    <div>
+                        <label class="text-xs text-gray-600">品番</label>
+                        <input type="text" value="${item.data.品番}" onchange="updateGentanItemData(${index}, '品番', this.value)"
+                               class="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500">
+                    </div>
+                    <div>
+                        <label class="text-xs text-gray-600">品名</label>
+                        <input type="text" value="${item.data.品名}" onchange="updateGentanItemData(${index}, '品名', this.value)"
+                               class="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500">
+                    </div>
+                    <div>
+                        <label class="text-xs text-gray-600">納入数</label>
+                        <input type="text" value="${item.data.納入数}" onchange="updateGentanItemData(${index}, '納入数', this.value)"
+                               class="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500">
+                    </div>
+                    <div>
+                        <label class="text-xs text-gray-600">納入日</label>
+                        <input type="text" value="${item.data.納入日}" onchange="updateGentanItemData(${index}, '納入日', this.value)"
+                               class="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500">
+                    </div>
+                    <div class="col-span-2">
+                        <label class="text-xs text-gray-600">色番</label>
+                        <input type="text" value="${item.data.色番}" onchange="updateGentanItemData(${index}, '色番', this.value)"
+                               class="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500">
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        container.appendChild(div);
+    });
+}
+
+// Update item data
+function updateGentanItemData(index, field, value) {
+    if (gentanItems[index]) {
+        gentanItems[index].data[field] = value;
+    }
+}
+
+// Remove item
+function removeGentanItem(index) {
+    gentanItems.splice(index, 1);
+    updateGentanLists();
+    showToast('アイテムを削除しました', 'info');
+}
+
+// Submit all data to MongoDB
+async function submitGentanData() {
+    if (!currentWorker) {
+        showToast('ログインが必要です', 'error');
+        return;
+    }
+    
+    if (gentanItems.length === 0) {
+        showToast('送信するデータがありません', 'error');
+        return;
+    }
+    
+    if (!confirm(`${gentanItems.length}件のデータを送信しますか？`)) {
+        return;
+    }
+    
+    try {
+        const submitBtn = document.getElementById('submitGentanBtn');
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>送信中...';
+        }
+        
+        // Prepare data for MongoDB
+        const documentsToSubmit = gentanItems.map(item => ({
+            ...item.data,
+            submittedBy: currentWorker,
+            submittedAt: new Date().toISOString(),
+            sourceType: item.type
+        }));
+        
+        const response = await fetch(`${API_BASE_URL}/gentan/submit`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                documents: documentsToSubmit
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error('データ送信に失敗しました');
+        }
+        
+        const result = await response.json();
+        
+        showToast(`${result.insertedCount || gentanItems.length}件のデータを送信しました！`, 'success');
+        
+        // Clear the lists
+        gentanItems = [];
+        updateGentanLists();
+        
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<i class="fas fa-check mr-2"></i>データ送信';
+        }
+        
+    } catch (error) {
+        console.error('Error submitting gentan data:', error);
+        showToast(`送信エラー: ${error.message}`, 'error');
+        
+        const submitBtn = document.getElementById('submitGentanBtn');
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<i class="fas fa-check mr-2"></i>データ送信';
+        }
+    }
+}
+
+// ==================== END GENTAN SYSTEM ====================
 
 function backToHome() {
     showScreen('home');
@@ -1820,6 +2251,13 @@ window.closeNyukoModal = closeNyukoModal;
 window.editNyukoProduct = editNyukoProduct;
 window.deleteNyukoProduct = deleteNyukoProduct;
 window.submitNyukoInput = submitNyukoInput;
+
+// Gentan (原単) system functions
+window.handleGentanImageCapture = handleGentanImageCapture;
+window.processGentanImage = processGentanImage;
+window.updateGentanItemData = updateGentanItemData;
+window.removeGentanItem = removeGentanItem;
+window.submitGentanData = submitGentanData;
 
 // Note: Language translations are defined in language.js which is loaded first in index.html
 // The translations object is already available globally from language.js
