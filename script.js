@@ -553,6 +553,13 @@ function displayPickingRequests() {
         });
     }
     
+    // Sort requests: oldest first (ascending by createdAt)
+    filteredRequests.sort((a, b) => {
+        const dateA = new Date(a.createdAt || 0);
+        const dateB = new Date(b.createdAt || 0);
+        return dateA - dateB; // Ascending order (oldest first)
+    });
+    
     container.innerHTML = '';
     
     if (filteredRequests.length === 0) {
