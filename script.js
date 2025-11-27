@@ -241,15 +241,19 @@ function initializeSocket() {
             // No sound plays for individual row completion
             // Sound only plays when ALL rows are complete (see updateProgressCounter)
             
-            // Refresh current view if viewing the same request
+            // Update only the specific line item - NO FULL REFRESH to prevent race conditions
             if (currentRequestNumber === data.requestNumber) {
-                console.log('🔄 Refreshing picking detail for request:', currentRequestNumber);
-                refreshPickingDetail();
+                console.log('✅ Updating line item without full refresh to prevent race conditions');
                 
-                // Force-update the specific line item without full refresh if possible
+                // Incrementally update the specific line item
                 updateLineItemStatus(data.requestNumber, data.lineNumber, 'completed');
+                
+                // Update progress counter
+                updateProgressCounter();
+                
+                console.log('✅ Incremental update completed - no refresh triggered');
             } else {
-                console.log('ℹ️ Not refreshing - current request is:', currentRequestNumber, 'but completed request is:', data.requestNumber);
+                console.log('ℹ️ Not updating - current request is:', currentRequestNumber, 'but completed request is:', data.requestNumber);
             }
         });
         
