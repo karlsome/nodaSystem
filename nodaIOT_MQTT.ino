@@ -25,41 +25,14 @@ void reconnectMQTT();
 
 // List of known SSIDs and passwords
 const char* ssidList[] = {
-  "Noda-ioT",
-  "sasaki-host",
-  "sasaki-host_EXT",
-  "OZEKojo",
-  "Sasaki_Hidase_2.4GHz",
-  "Sasaki_Hidase_Guest_5G",
-  "Sasaki-Coating",
-  "HR02a-0A5D3E (2.4GHz)",
-  "HR02b-0A5D3E (5GHz)",
-  "HR02a-0A5D3E_EXT (2.4GHz)",
-  "HR02b-0A5D3F_EXT (5GHz)",
-  "HR02a-0A5D3E",
-  "HR02a-0A5D3E_EXT",
-  "TP-Link_30B8",
-  "106F3F36FD33",
-  "106F3F36FD33_5GEXT"
+  "TP-Link_IoT_8678",
+  "Noda-ioT"
+  
 };
 
 const char* passwordList[] = {
   "6B0B7AC380",
-  "6B0B7AC380",
-  "6B0B7AC380",
-  "65057995",
-  "58677728a",
-  "Hidase1757",
-  "SasAkic0aTinG",
-  "SafxxmWt1F",
-  "SafxxmWt1F",
-  "SafxxmWt1F",
-  "SafxxmWt1F",
-  "SafxxmWt1F",
-  "SafxxmWt1F",
-  "93312585",
-  "jdbxjrck1wggp",
-  "jdbxjrck1wggp"
+  "6B0B7AC380"
 };
 
 const int numNetworks = sizeof(ssidList) / sizeof(ssidList[0]);
@@ -472,6 +445,21 @@ void attemptWiFiReconnection() {
     return; // Too soon to retry
   }
   
+  // Check if WiFi is currently in connecting state - avoid calling reconnect during connection
+  wl_status_t wifiStatus = WiFi.status();
+  if (wifiStatus == WL_DISCONNECTED || wifiStatus == WL_NO_SHIELD || wifiStatus == WL_IDLE_STATUS) {
+    // Safe to attempt reconnection
+  } else if (wifiStatus == WL_CONNECT_FAILED || wifiStatus == WL_CONNECTION_LOST) {
+    // Connection failed, need to disconnect first
+    Serial.println("⚠️ Connection failed/lost, disconnecting before retry...");
+    WiFi.disconnect(true, false);
+    delay(1000);
+  } else {
+    // Still trying to connect, skip this attempt
+    Serial.println("⏳ WiFi still attempting connection, skipping this cycle...");
+    return;
+  }
+  
   connectionState.lastWifiReconnectAttempt = now;
   connectionState.wifiReconnectAttempts++;
   
@@ -481,15 +469,29 @@ void attemptWiFiReconnection() {
   update_screen_activity();
   update_screen_display();
   
-  // First try simple reconnect (faster)
-  WiFi.reconnect();
+  // Always do full network scan to allow connecting to range extender (OneMesh)
+  // WiFi.reconnect() locks to BSSID (MAC) of original AP, preventing extender connection
+  Serial.println("🔍 Performing full network scan to find best AP (router/extender)...");
+  WiFi.disconnect(true, true);
+  delay(500);
+  connectToWiFi();
+  return; // connectToWiFi handles the connection attempt
   
-  // Wait up to 10 seconds for reconnection
+  // Non-blocking wait - check status periodically
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) { // ~10s
     delay(500);
     Serial.print(".");
     attempts++;
+    
+    // Check if connection failed early
+    wl_status_t status = WiFi.status();
+    if (status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL) {
+      Serial.println();
+      Serial.println("❌ Connection failed early, will try full scan next cycle");
+      WiFi.disconnect(true, false);
+      return;
+    }
   }
   
   if (WiFi.status() == WL_CONNECTED) {
@@ -500,15 +502,8 @@ void attemptWiFiReconnection() {
     onWiFiConnected();
   } else {
     Serial.println();
-    Serial.println("❌ Quick reconnect failed, will try full scan next cycle");
-    
-    // Every 3rd attempt, do a full network scan and reconnect
-    if (connectionState.wifiReconnectAttempts % 3 == 0) {
-      Serial.println("🔍 Performing full network scan...");
-      WiFi.disconnect(true, true);
-      delay(100);
-      connectToWiFi();
-    }
+    Serial.printf("❌ Quick reconnect failed (status: %d), will retry\n", WiFi.status());
+    WiFi.disconnect(true, false); // Disconnect for next attempt
   }
 }
 
@@ -787,8 +782,12 @@ void ensureConnectionStability() {
   // Make sure we maintain MQTT connection regardless of device state
   if (WiFi.status() == WL_CONNECTED) {
     if (!mqttClient.connected() && !connectionState.isReconnecting) {
-      Serial.println("📡 MQTT not connected but WiFi is up - initiating connection");
-      checkConnectionHealth();
+      // Only print message and check if enough time has passed since last attempt
+      unsigned long now = millis();
+      if (now - connectionState.lastConnectAttempt >= connectionState.RECONNECT_DELAY) {
+        Serial.println("📡 MQTT not connected but WiFi is up - initiating connection");
+        checkConnectionHealth();
+      }
     }
   }
 }
@@ -1087,17 +1086,11 @@ void loop() {
   
   // Connection health monitoring and reconnection
   checkConnectionHealth(); // Monitor WiFi and MQTT, handle reconnections
-  ensureConnectionStability(); // Ensure we stay connected
 
   // WiFi reconnection handler - continuously monitor and attempt reconnection
   if (WiFi.status() != WL_CONNECTED) {
     // WiFi is down - attempt reconnection
     attemptWiFiReconnection();
-  } else {
-    // WiFi is up - ensure MQTT is also connected
-    if (!mqttClient.connected() && !connectionState.isReconnecting) {
-      ensureConnectionStability();
-    }
   }
 
   delay(10); // Small delay to prevent watchdog issues
