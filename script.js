@@ -1138,6 +1138,50 @@ function updateGentanItemData(index, field, value) {
     }
 }
 
+// Compress base64 image for Firebase upload (target: 400-700KB)
+function compressBase64Image(base64String, maxWidth = 1024, quality = 0.7) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        
+        // Handle both with and without data URI prefix
+        const src = base64String.startsWith('data:') ? base64String : `data:image/jpeg;base64,${base64String}`;
+        img.src = src;
+        
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            let width = img.width;
+            let height = img.height;
+            
+            // Resize if wider than maxWidth
+            if (width > maxWidth) {
+                height = (height * maxWidth) / width;
+                width = maxWidth;
+            }
+            
+            // Also check height
+            if (height > maxWidth) {
+                width = (width * maxWidth) / height;
+                height = maxWidth;
+            }
+            
+            canvas.width = width;
+            canvas.height = height;
+            
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, width, height);
+            
+            // Convert to base64 with compression
+            const compressedBase64 = canvas.toDataURL('image/jpeg', quality);
+            resolve(compressedBase64);
+        };
+        
+        img.onerror = () => {
+            console.error('Failed to load image for compression');
+            resolve(base64String); // Return original if compression fails
+        };
+    });
+}
+
 // Remove item
 function removeGentanItem(index) {
     gentanItems.splice(index, 1);
@@ -1169,8 +1213,8 @@ async function submitGentanData() {
             submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>送信中...';
         }
         
-        // Prepare data for MongoDB (include imageSource for image types)
-        const documentsToSubmit = gentanItems.map(item => {
+        // Prepare data for MongoDB (include compressed imageSource for image types)
+        const documentsToSubmit = await Promise.all(gentanItems.map(async (item) => {
             const doc = {
                 ...item.data,
                 submittedBy: currentWorker,
@@ -1178,13 +1222,20 @@ async function submitGentanData() {
                 sourceType: item.type
             };
             
-            // Include base64 image source for image types (will be uploaded to Firebase)
+            // Compress and include base64 image for Firebase upload (target: 400-700KB)
             if (item.type === 'image' && item.source) {
-                doc.imageSource = item.source;
+                console.log('📸 Compressing image for Firebase upload...');
+                const compressedImage = await compressBase64Image(item.source, 1024, 0.7);
+                doc.imageSource = compressedImage;
+                
+                // Log size reduction
+                const originalSize = (item.source.length * 0.75 / 1024).toFixed(0);
+                const compressedSize = (compressedImage.length * 0.75 / 1024).toFixed(0);
+                console.log(`📉 Image compressed: ${originalSize}KB → ${compressedSize}KB`);
             }
             
             return doc;
-        });
+        }));
         
         const response = await fetch(`${API_BASE_URL}/gentan/submit`, {
             method: 'POST',
