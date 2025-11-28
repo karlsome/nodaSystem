@@ -283,6 +283,7 @@ function initializeSocket() {
                 gentanItems[itemIndex].data = data.data;
                 gentanItems[itemIndex].processed = true;
                 gentanItems[itemIndex].processing = false;
+                saveGentanToStorage(); // Persist processed data
                 updateGentanLists();
                 showToast('画像データを抽出しました！', 'success');
             }
@@ -296,6 +297,7 @@ function initializeSocket() {
             const itemIndex = gentanItems.findIndex(item => item.jobId === data.jobId);
             if (itemIndex >= 0) {
                 gentanItems[itemIndex].processing = false;
+                saveGentanToStorage(); // Persist error state
                 updateGentanLists();
             }
             showToast('画像処理エラー: ' + data.error, 'error');
@@ -503,10 +505,77 @@ function openPickingSystem() {
 let gentanItems = [];
 let gentanScanBuffer = '';
 const N8N_WEBHOOK_URL = 'https://karlsome.app.n8n.cloud/webhook/7081d838-c11e-42f5-8c17-94c5ee557cf6';
+const GENTAN_STORAGE_KEY = 'nodaSystem_gentanItems';
+
+// Load saved gentan data from localStorage
+function loadGentanFromStorage() {
+    try {
+        const saved = localStorage.getItem(GENTAN_STORAGE_KEY);
+        if (saved) {
+            const parsed = JSON.parse(saved);
+            // Filter out items with blob URLs (they won't work after refresh)
+            gentanItems = parsed.filter(item => {
+                if (item.type === 'image' && item.source.startsWith('blob:')) {
+                    return false; // Skip blob URLs
+                }
+                return true;
+            });
+            console.log(`📂 Loaded ${gentanItems.length} items from storage`);
+        }
+    } catch (error) {
+        console.error('Error loading gentan data from storage:', error);
+        gentanItems = [];
+    }
+}
+
+// Save gentan data to localStorage
+function saveGentanToStorage() {
+    try {
+        // Save items with base64 data for images (not blob URLs)
+        localStorage.setItem(GENTAN_STORAGE_KEY, JSON.stringify(gentanItems));
+        console.log(`💾 Saved ${gentanItems.length} items to storage`);
+    } catch (error) {
+        console.error('Error saving gentan data to storage:', error);
+        // If storage is full, try to clear old data
+        if (error.name === 'QuotaExceededError') {
+            showToast('ストレージ容量不足です', 'error');
+        }
+    }
+}
+
+// Reset all gentan data
+function resetGentanData() {
+    if (gentanItems.length === 0) {
+        showToast('データがありません', 'info');
+        return;
+    }
+    
+    if (confirm('すべてのデータをリセットしますか？\n写真とバーコードデータが削除されます。')) {
+        gentanItems = [];
+        saveGentanToStorage();
+        updateGentanLists();
+        showToast('データをリセットしました', 'info');
+    }
+}
+
+// Image preview modal functions
+function openImagePreview(imageSrc) {
+    const modal = document.getElementById('imagePreviewModal');
+    const img = document.getElementById('imagePreviewImg');
+    img.src = imageSrc;
+    modal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden'; // Prevent background scroll
+}
+
+function closeImagePreview() {
+    const modal = document.getElementById('imagePreviewModal');
+    modal.classList.add('hidden');
+    document.body.style.overflow = ''; // Restore scroll
+}
 
 function openGentanSystem() {
     showScreen('gentan');
-    gentanItems = [];
+    loadGentanFromStorage(); // Load saved data
     updateGentanLists();
     setupGentanScanListener();
 }
@@ -612,6 +681,7 @@ async function processGentanBarcode(barcodeValue) {
         };
         
         gentanItems.push(item);
+        saveGentanToStorage(); // Persist data
         updateGentanLists();
         showToast('バーコードをスキャンしました', 'success');
         
@@ -627,8 +697,8 @@ async function handleGentanImageCapture(event) {
     if (!file) return;
     
     try {
-        // Create image preview URL
-        const imageUrl = URL.createObjectURL(file);
+        // Convert to base64 for persistence (instead of blob URL)
+        const base64Image = await fileToBase64(file);
         
         const itemIndex = gentanItems.length;
         
@@ -636,7 +706,7 @@ async function handleGentanImageCapture(event) {
         const item = {
             id: Date.now(),
             type: 'image',
-            source: imageUrl,
+            source: base64Image, // Use base64 for persistence
             file: file,
             processed: false,
             processing: true, // Flag for currently processing
@@ -650,6 +720,7 @@ async function handleGentanImageCapture(event) {
         };
         
         gentanItems.push(item);
+        saveGentanToStorage(); // Persist data
         updateGentanLists();
         showToast('画像を処理中...', 'info');
         
@@ -664,6 +735,16 @@ async function handleGentanImageCapture(event) {
         showToast('写真撮影エラー: ' + error.message, 'error');
         event.target.value = '';
     }
+}
+
+// Convert file to base64 for persistence
+function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = error => reject(error);
+    });
 }
 
 // Compress image to reduce payload size
@@ -833,7 +914,10 @@ function updateGentanLists() {
                                 </div>
                                 ${statusBadge}
                             </div>
-                            <img src="${item.source}" alt="Captured" class="w-full h-28 lg:h-32 object-cover rounded border border-gray-200">
+                            <img src="${item.source}" alt="Captured" 
+                                 class="w-full h-28 lg:h-32 object-cover rounded border border-gray-200 cursor-pointer hover:opacity-90 transition-opacity"
+                                 onclick="openImagePreview('${item.source.replace(/'/g, "\\'")}')">
+                            <p class="text-[10px] text-gray-400 mt-1 text-center"><i class="fas fa-search-plus mr-1"></i>タップで拡大</p>
                         </div>
                         <button onclick="removeGentanItem(${index})" class="ml-2 w-7 h-7 bg-red-100 hover:bg-red-200 text-red-600 rounded-lg flex-shrink-0 flex items-center justify-center">
                             <i class="fas fa-trash text-xs"></i>
@@ -896,12 +980,14 @@ function updateGentanLists() {
 function updateGentanItemData(index, field, value) {
     if (gentanItems[index]) {
         gentanItems[index].data[field] = value;
+        saveGentanToStorage(); // Persist changes
     }
 }
 
 // Remove item
 function removeGentanItem(index) {
     gentanItems.splice(index, 1);
+    saveGentanToStorage(); // Persist changes
     updateGentanLists();
     showToast('アイテムを削除しました', 'info');
 }
@@ -955,8 +1041,9 @@ async function submitGentanData() {
         
         showToast(`${result.insertedCount || gentanItems.length}件のデータを送信しました！`, 'success');
         
-        // Clear the lists
+        // Clear the lists and storage
         gentanItems = [];
+        saveGentanToStorage(); // Clear persisted data after successful submit
         updateGentanLists();
         
         if (submitBtn) {
@@ -2309,6 +2396,9 @@ window.logout = logout;
 window.openInventorySystem = openInventorySystem;
 window.openPickingSystem = openPickingSystem;
 window.openGentanSystem = openGentanSystem;
+window.resetGentanData = resetGentanData;
+window.openImagePreview = openImagePreview;
+window.closeImagePreview = closeImagePreview;
 window.backToHome = backToHome;
 window.backToPickingList = backToPickingList;
 window.filterByStatus = filterByStatus;

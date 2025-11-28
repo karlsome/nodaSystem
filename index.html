@@ -422,9 +422,14 @@
                             <p class="text-xs lg:text-sm text-gray-600 hidden sm:block">原材料管理 - バーコードまたは写真で入力</p>
                         </div>
                     </div>
-                    <button onclick="submitGentanData()" id="submitGentanBtn" class="px-4 lg:px-8 py-2 lg:py-3 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors text-sm lg:text-lg font-medium shadow-md">
-                        <i class="fas fa-check mr-1 lg:mr-2"></i><span class="hidden sm:inline">データ</span>送信
-                    </button>
+                    <div class="flex items-center space-x-2">
+                        <button onclick="resetGentanData()" class="px-3 lg:px-6 py-2 lg:py-3 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors text-sm lg:text-base font-medium">
+                            <i class="fas fa-undo mr-1"></i><span class="hidden sm:inline">リセット</span>
+                        </button>
+                        <button onclick="submitGentanData()" id="submitGentanBtn" class="px-4 lg:px-8 py-2 lg:py-3 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors text-sm lg:text-lg font-medium shadow-md">
+                            <i class="fas fa-check mr-1 lg:mr-2"></i><span class="hidden sm:inline">データ</span>送信
+                        </button>
+                    </div>
                 </div>
 
                 <!-- Input Methods - Compact for tablet -->
@@ -663,6 +668,16 @@
                     </button>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- Image Preview Modal -->
+    <div id="imagePreviewModal" class="fixed inset-0 bg-black bg-opacity-80 z-50 hidden flex items-center justify-center p-4" onclick="closeImagePreview()">
+        <div class="relative max-w-full max-h-full">
+            <button onclick="closeImagePreview()" class="absolute -top-12 right-0 text-white text-xl hover:text-gray-300">
+                <i class="fas fa-times text-2xl"></i>
+            </button>
+            <img id="imagePreviewImg" src="" alt="Preview" class="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl">
         </div>
     </div>
 
