@@ -558,11 +558,27 @@ function resetGentanData() {
     }
 }
 
-// Image preview modal functions
-function openImagePreview(imageSrc) {
+// Track which item is being edited in modal
+let currentEditingIndex = -1;
+
+// Image preview modal functions with edit form
+function openImagePreview(imageSrc, itemIndex) {
     const modal = document.getElementById('imagePreviewModal');
     const img = document.getElementById('imagePreviewImg');
+    
     img.src = imageSrc;
+    currentEditingIndex = itemIndex;
+    
+    // Populate form with current data
+    if (itemIndex >= 0 && gentanItems[itemIndex]) {
+        const item = gentanItems[itemIndex];
+        document.getElementById('modalEdit_品番').value = item.data.品番 || '';
+        document.getElementById('modalEdit_品名').value = item.data.品名 || '';
+        document.getElementById('modalEdit_納入数').value = item.data.納入数 || '';
+        document.getElementById('modalEdit_納入日').value = item.data.納入日 || '';
+        document.getElementById('modalEdit_色番').value = item.data.色番 || '';
+    }
+    
     modal.classList.remove('hidden');
     document.body.style.overflow = 'hidden'; // Prevent background scroll
 }
@@ -571,6 +587,23 @@ function closeImagePreview() {
     const modal = document.getElementById('imagePreviewModal');
     modal.classList.add('hidden');
     document.body.style.overflow = ''; // Restore scroll
+    currentEditingIndex = -1;
+}
+
+// Save data from modal edit form
+function saveModalEditData() {
+    if (currentEditingIndex >= 0 && gentanItems[currentEditingIndex]) {
+        gentanItems[currentEditingIndex].data.品番 = document.getElementById('modalEdit_品番').value;
+        gentanItems[currentEditingIndex].data.品名 = document.getElementById('modalEdit_品名').value;
+        gentanItems[currentEditingIndex].data.納入数 = document.getElementById('modalEdit_納入数').value;
+        gentanItems[currentEditingIndex].data.納入日 = document.getElementById('modalEdit_納入日').value;
+        gentanItems[currentEditingIndex].data.色番 = document.getElementById('modalEdit_色番').value;
+        
+        saveGentanToStorage();
+        updateGentanLists();
+        showToast('データを保存しました', 'success');
+    }
+    closeImagePreview();
 }
 
 function openGentanSystem() {
@@ -916,7 +949,7 @@ function updateGentanLists() {
                             </div>
                             <img src="${item.source}" alt="Captured" 
                                  class="w-full h-28 lg:h-32 object-cover rounded border border-gray-200 cursor-pointer hover:opacity-90 transition-opacity"
-                                 onclick="openImagePreview('${item.source.replace(/'/g, "\\'")}')">
+                                 onclick="openImagePreview('${item.source.replace(/'/g, "\\'")}', ${index})">
                             <p class="text-[10px] text-gray-400 mt-1 text-center"><i class="fas fa-search-plus mr-1"></i>タップで拡大</p>
                         </div>
                         <button onclick="removeGentanItem(${index})" class="ml-2 w-7 h-7 bg-red-100 hover:bg-red-200 text-red-600 rounded-lg flex-shrink-0 flex items-center justify-center">
@@ -2399,6 +2432,7 @@ window.openGentanSystem = openGentanSystem;
 window.resetGentanData = resetGentanData;
 window.openImagePreview = openImagePreview;
 window.closeImagePreview = closeImagePreview;
+window.saveModalEditData = saveModalEditData;
 window.backToHome = backToHome;
 window.backToPickingList = backToPickingList;
 window.filterByStatus = filterByStatus;

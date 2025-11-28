@@ -670,13 +670,55 @@
         </div>
     </div>
 
-    <!-- Image Preview Modal -->
-    <div id="imagePreviewModal" class="fixed inset-0 bg-black bg-opacity-80 z-50 hidden flex items-center justify-center p-4" onclick="closeImagePreview()">
-        <div class="relative max-w-full max-h-full">
-            <button onclick="closeImagePreview()" class="absolute -top-12 right-0 text-white text-xl hover:text-gray-300">
-                <i class="fas fa-times text-2xl"></i>
-            </button>
-            <img id="imagePreviewImg" src="" alt="Preview" class="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl">
+    <!-- Image Preview Modal with Edit Form -->
+    <div id="imagePreviewModal" class="fixed inset-0 bg-black bg-opacity-90 z-50 hidden flex items-center justify-center p-2 lg:p-4">
+        <div class="relative bg-white rounded-xl shadow-2xl w-full max-w-6xl max-h-[95vh] overflow-hidden" onclick="event.stopPropagation()">
+            <!-- Header -->
+            <div class="flex items-center justify-between p-3 border-b bg-gray-50">
+                <h3 class="text-lg font-bold text-gray-900"><i class="fas fa-edit mr-2 text-blue-600"></i>画像とデータ編集</h3>
+                <button onclick="closeImagePreview()" class="w-8 h-8 bg-gray-200 hover:bg-gray-300 rounded-lg flex items-center justify-center">
+                    <i class="fas fa-times text-gray-600"></i>
+                </button>
+            </div>
+            
+            <!-- Content: Image + Form -->
+            <div class="flex flex-col lg:flex-row max-h-[calc(95vh-60px)] overflow-auto">
+                <!-- Left: Full Image -->
+                <div class="lg:w-3/5 p-3 bg-gray-100 flex items-center justify-center min-h-[200px]">
+                    <img id="imagePreviewImg" src="" alt="Preview" class="max-w-full max-h-[70vh] object-contain rounded-lg shadow-lg">
+                </div>
+                
+                <!-- Right: Edit Form -->
+                <div class="lg:w-2/5 p-4 bg-white overflow-y-auto">
+                    <div class="space-y-3">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">品番</label>
+                            <input type="text" id="modalEdit_品番" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">品名</label>
+                            <input type="text" id="modalEdit_品名" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">納入数</label>
+                            <input type="text" id="modalEdit_納入数" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">納入日</label>
+                            <input type="text" id="modalEdit_納入日" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">色番</label>
+                            <input type="text" id="modalEdit_色番" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                        </div>
+                        
+                        <!-- Save Button -->
+                        <button onclick="saveModalEditData()" class="w-full mt-4 px-4 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors font-medium">
+                            <i class="fas fa-save mr-2"></i>保存して閉じる
+                        </button>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
