@@ -450,18 +450,17 @@
                         </div>
                     </div>
 
-                    <!-- Camera Capture -->
-                    <div class="flex-1 bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl shadow p-3 border-2 border-blue-200">
+                    <!-- Camera Capture - Whole card is clickable -->
+                    <div class="flex-1 bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl shadow p-3 border-2 border-blue-200 cursor-pointer hover:border-blue-400 hover:shadow-md transition-all active:scale-[0.98]"
+                         onclick="document.getElementById('gentanImageInput').click()">
+                        <input type="file" id="gentanImageInput" accept="image/*" capture class="hidden" onchange="handleGentanImageCapture(event)">
                         <div class="flex items-center space-x-3">
                             <div class="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center flex-shrink-0">
                                 <i class="fas fa-camera text-xl text-blue-600"></i>
                             </div>
                             <div class="flex-1 min-w-0">
                                 <h3 class="text-base font-bold text-gray-900">写真撮影</h3>
-                                <input type="file" id="gentanImageInput" accept="image/*" capture class="hidden" onchange="handleGentanImageCapture(event)">
-                                <button onclick="document.getElementById('gentanImageInput').click()" class="mt-1 px-3 py-1.5 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm font-medium">
-                                    <i class="fas fa-camera mr-1"></i>撮影
-                                </button>
+                                <p class="text-xs text-blue-600 font-medium"><i class="fas fa-hand-pointer mr-1"></i>タップして撮影</p>
                             </div>
                         </div>
                     </div>
