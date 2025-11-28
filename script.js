@@ -1230,10 +1230,10 @@ async function submitGentanData() {
                 sourceType: item.type
             };
             
-            // Compress and include base64 image for Firebase upload (target: 400-700KB)
+            // Compress and include base64 image for Firebase upload (target: 150-250KB)
             if (item.type === 'image' && item.source) {
                 console.log('📸 Compressing image for Firebase upload...');
-                const compressedImage = await compressBase64Image(item.source, 1024, 0.7);
+                const compressedImage = await compressBase64Image(item.source, 800, 0.6);
                 doc.imageSource = compressedImage;
                 
                 // Log size reduction
