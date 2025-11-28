@@ -666,6 +666,49 @@ async function handleGentanImageCapture(event) {
     }
 }
 
+// Compress image to reduce payload size
+function compressImage(file, maxWidth = 1024, quality = 0.8) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        
+        reader.onload = (e) => {
+            const img = new Image();
+            img.src = e.target.result;
+            
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                let width = img.width;
+                let height = img.height;
+                
+                // Resize if wider than maxWidth
+                if (width > maxWidth) {
+                    height = (height * maxWidth) / width;
+                    width = maxWidth;
+                }
+                
+                canvas.width = width;
+                canvas.height = height;
+                
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, width, height);
+                
+                // Convert to blob with compression
+                canvas.toBlob((blob) => {
+                    resolve(new File([blob], file.name, {
+                        type: 'image/jpeg',
+                        lastModified: Date.now()
+                    }));
+                }, 'image/jpeg', quality);
+            };
+            
+            img.onerror = reject;
+        };
+        
+        reader.onerror = reject;
+    });
+}
+
 // Auto-process image through server and n8n
 async function processGentanImageAuto(index) {
     const item = gentanItems[index];
@@ -676,9 +719,12 @@ async function processGentanImageAuto(index) {
     }
     
     try {
-        // Convert file to base64
+        // Compress image before upload
+        const compressedFile = await compressImage(item.file, 1024, 0.8); // Max 1024px, 80% quality
+        
+        // Convert compressed file to base64
         const reader = new FileReader();
-        reader.readAsDataURL(item.file);
+        reader.readAsDataURL(compressedFile);
         
         reader.onload = async () => {
             const base64Image = reader.result.split(',')[1]; // Remove data:image/jpeg;base64, prefix
