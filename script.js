@@ -1650,12 +1650,30 @@ function updateProgressCounter() {
         progressElement.textContent = `${completedItems}/${totalItems}`;
     }
     
-    // If all items are completed, update the request status
+    // If all items are completed, update the request status and button
     if (completedItems === totalItems) {
+        console.log('✅ All items completed! Activating 完了 button...');
+        
         const statusBadge = document.querySelector('#requestStatusBadge');
         if (statusBadge) {
             statusBadge.textContent = '完了';
             statusBadge.className = 'status-badge bg-green-100 text-green-800 px-2 py-1 rounded-full text-xs font-medium';
+        }
+        
+        // Update the start button to 完了 button
+        const startBtn = document.getElementById('startPickingBtn');
+        if (startBtn) {
+            const t = window.t || ((key) => key);
+            startBtn.disabled = false;
+            startBtn.onclick = completeAndBackToList;
+            startBtn.innerHTML = `<i class="fas fa-check mr-2"></i>${t('completed-button')}`;
+            startBtn.className = 'px-8 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors text-lg font-medium';
+            console.log('✅ 完了 button activated - no refresh needed!');
+        }
+        
+        // Update currentRequest status in memory
+        if (currentRequest) {
+            currentRequest.status = 'completed';
         }
         
         // Play success sound when picking request is completed
