@@ -2807,22 +2807,19 @@ app.post('/api/gentan/submit', async (req, res) => {
                     
                     const file = firebaseBucket.file(filePath);
                     
+                    // Save file with only contentType (no custom metadata to avoid preview issues)
                     await file.save(buffer, {
+                        contentType: mimeType
+                    });
+                    
+                    // Set the download token metadata to use our fixed token
+                    await file.setMetadata({
                         metadata: {
-                            contentType: mimeType,
-                            metadata: {
-                                品番: hinban,
-                                納入日: nounyubi,
-                                工場: factory || 'unknown',
-                                uploadedAt: new Date().toISOString()
-                            }
+                            firebaseStorageDownloadTokens: 'masterDBToken69'
                         }
                     });
                     
-                    // Make the file publicly accessible
-                    await file.makePublic();
-                    
-                    // Generate the public URL with the custom token
+                    // Generate the public URL with the fixed token
                     const bucketName = process.env.FIREBASE_STORAGE_BUCKET;
                     const encodedPath = encodeURIComponent(filePath);
                     const imageURL = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodedPath}?alt=media&token=masterDBToken69`;
