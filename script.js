@@ -772,13 +772,7 @@ async function processGentanImageAuto(index) {
 
 // Update both lists
 function updateGentanLists() {
-    updateGentanInputList();
-    updateGentanDataList();
-}
-
-// Update input source list (left column)
-function updateGentanInputList() {
-    const container = document.getElementById('gentanInputList');
+    const container = document.getElementById('gentanCombinedList');
     
     if (gentanItems.length === 0) {
         container.innerHTML = `
@@ -793,127 +787,108 @@ function updateGentanInputList() {
     container.innerHTML = '';
     
     gentanItems.forEach((item, index) => {
-        const div = document.createElement('div');
-        div.className = 'p-4 hover:bg-gray-50';
+        const row = document.createElement('div');
+        row.className = 'grid grid-cols-1 lg:grid-cols-2 border-b border-gray-200 last:border-b-0';
         
-        if (item.type === 'barcode') {
-            div.innerHTML = `
-                <div class="flex items-start justify-between">
-                    <div class="flex-1">
-                        <div class="flex items-center mb-2">
-                            <i class="fas fa-barcode text-orange-600 mr-2"></i>
-                            <span class="text-sm font-semibold text-gray-700">バーコード #${index + 1}</span>
-                        </div>
-                        <div class="bg-gray-100 p-2 rounded text-xs font-mono break-all">${item.source}</div>
-                    </div>
-                    <button onclick="removeGentanItem(${index})" class="ml-3 w-8 h-8 bg-red-100 hover:bg-red-200 text-red-600 rounded-lg">
-                        <i class="fas fa-trash text-sm"></i>
-                    </button>
-                </div>
-            `;
-        } else {
-            // Status badge for images
-            let statusBadge;
-            if (item.processing) {
-                statusBadge = '<span class="text-xs text-blue-600 font-semibold"><i class="fas fa-spinner fa-spin mr-1"></i>処理中...</span>';
-            } else if (item.processed) {
-                statusBadge = '<span class="text-xs text-green-600 font-semibold"><i class="fas fa-check-circle mr-1"></i>処理済み</span>';
-            } else {
-                statusBadge = '<span class="text-xs text-gray-600 font-semibold"><i class="fas fa-clock mr-1"></i>待機中</span>';
-            }
-            
-            div.innerHTML = `
-                <div class="flex items-start justify-between">
-                    <div class="flex-1">
-                        <div class="flex items-center justify-between mb-2">
-                            <div class="flex items-center">
-                                <i class="fas fa-image text-blue-600 mr-2"></i>
-                                <span class="text-sm font-semibold text-gray-700">写真 #${index + 1}</span>
-                            </div>
-                            ${statusBadge}
-                        </div>
-                        <img src="${item.source}" alt="Captured" class="w-full h-32 object-cover rounded border border-gray-200">
-                    </div>
-                    <button onclick="removeGentanItem(${index})" class="ml-3 w-8 h-8 bg-red-100 hover:bg-red-200 text-red-600 rounded-lg">
-                        <i class="fas fa-trash text-sm"></i>
-                    </button>
-                </div>
-            `;
-        }
-        
-        container.appendChild(div);
-    });
-}
-
-// Update extracted data list (right column)
-function updateGentanDataList() {
-    const container = document.getElementById('gentanDataList');
-    
-    if (gentanItems.length === 0) {
-        container.innerHTML = `
-            <div class="p-12 text-center text-gray-400">
-                <i class="fas fa-database text-6xl mb-4"></i>
-                <p>データがここに表示されます</p>
-            </div>
-        `;
-        return;
-    }
-    
-    container.innerHTML = '';
-    
-    gentanItems.forEach((item, index) => {
-        const div = document.createElement('div');
-        div.className = 'p-4 hover:bg-gray-50';
-        
+        // Status badge - compact for tablet
         let statusBadge;
         if (item.type === 'barcode') {
-            statusBadge = '<span class="text-xs px-2 py-1 bg-orange-100 text-orange-800 rounded-full">バーコード</span>';
+            statusBadge = '<span class="text-[10px] px-1.5 py-0.5 bg-orange-100 text-orange-800 rounded-full">バーコード</span>';
         } else if (item.processing) {
-            statusBadge = '<span class="text-xs px-2 py-1 bg-blue-100 text-blue-800 rounded-full"><i class="fas fa-spinner fa-spin mr-1"></i>処理中</span>';
+            statusBadge = '<span class="text-[10px] px-1.5 py-0.5 bg-blue-100 text-blue-800 rounded-full"><i class="fas fa-spinner fa-spin mr-1"></i>処理中</span>';
         } else if (item.processed) {
-            statusBadge = '<span class="text-xs px-2 py-1 bg-green-100 text-green-800 rounded-full"><i class="fas fa-check mr-1"></i>処理済み</span>';
+            statusBadge = '<span class="text-[10px] px-1.5 py-0.5 bg-green-100 text-green-800 rounded-full"><i class="fas fa-check mr-1"></i>処理済み</span>';
         } else {
-            statusBadge = '<span class="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded-full"><i class="fas fa-clock mr-1"></i>待機中</span>';
+            statusBadge = '<span class="text-[10px] px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded-full"><i class="fas fa-clock mr-1"></i>待機中</span>';
         }
         
-        div.innerHTML = `
-            <div class="space-y-3">
-                <div class="flex items-center justify-between mb-3">
-                    <span class="text-sm font-bold text-gray-700">${item.type === 'barcode' ? 'バーコード' : '写真'} #${index + 1}</span>
-                    ${statusBadge}
+        // Left side - Input source
+        let leftContent;
+        if (item.type === 'barcode') {
+            leftContent = `
+                <div class="p-3 lg:border-r border-gray-200 hover:bg-gray-50">
+                    <div class="flex items-start justify-between">
+                        <div class="flex-1">
+                            <div class="flex items-center mb-1">
+                                <i class="fas fa-barcode text-orange-600 mr-2 text-sm"></i>
+                                <span class="text-xs font-semibold text-gray-700">バーコード #${index + 1}</span>
+                            </div>
+                            <div class="bg-gray-100 p-1.5 rounded text-xs font-mono break-all">${item.source}</div>
+                        </div>
+                        <button onclick="removeGentanItem(${index})" class="ml-2 w-7 h-7 bg-red-100 hover:bg-red-200 text-red-600 rounded-lg flex-shrink-0 flex items-center justify-center">
+                            <i class="fas fa-trash text-xs"></i>
+                        </button>
+                    </div>
                 </div>
-                
-                <div class="grid grid-cols-2 gap-2">
-                    <div>
-                        <label class="text-xs text-gray-600">品番</label>
-                        <input type="text" value="${item.data.品番}" onchange="updateGentanItemData(${index}, '品番', this.value)"
-                               class="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500">
+            `;
+        } else {
+            leftContent = `
+                <div class="p-3 lg:border-r border-gray-200 hover:bg-gray-50">
+                    <div class="flex items-start justify-between">
+                        <div class="flex-1">
+                            <div class="flex items-center justify-between mb-1">
+                                <div class="flex items-center">
+                                    <i class="fas fa-image text-blue-600 mr-1 text-sm"></i>
+                                    <span class="text-xs font-semibold text-gray-700">写真 #${index + 1}</span>
+                                </div>
+                                ${statusBadge}
+                            </div>
+                            <img src="${item.source}" alt="Captured" class="w-full h-28 lg:h-32 object-cover rounded border border-gray-200">
+                        </div>
+                        <button onclick="removeGentanItem(${index})" class="ml-2 w-7 h-7 bg-red-100 hover:bg-red-200 text-red-600 rounded-lg flex-shrink-0 flex items-center justify-center">
+                            <i class="fas fa-trash text-xs"></i>
+                        </button>
                     </div>
-                    <div>
-                        <label class="text-xs text-gray-600">品名</label>
-                        <input type="text" value="${item.data.品名}" onchange="updateGentanItemData(${index}, '品名', this.value)"
-                               class="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500">
+                </div>
+            `;
+        }
+        
+        // Right side - Extracted data
+        const rightContent = `
+            <div class="p-3 hover:bg-gray-50">
+                <div class="space-y-2">
+                    <div class="flex items-center justify-between lg:hidden">
+                        <span class="text-xs font-bold text-gray-700">${item.type === 'barcode' ? 'バーコード' : '写真'} #${index + 1} データ</span>
+                        ${statusBadge}
                     </div>
-                    <div>
-                        <label class="text-xs text-gray-600">納入数</label>
-                        <input type="text" value="${item.data.納入数}" onchange="updateGentanItemData(${index}, '納入数', this.value)"
-                               class="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500">
+                    <div class="hidden lg:flex items-center justify-between">
+                        <span class="text-xs font-bold text-gray-700">写真 #${index + 1}</span>
+                        ${statusBadge}
                     </div>
-                    <div>
-                        <label class="text-xs text-gray-600">納入日</label>
-                        <input type="text" value="${item.data.納入日}" onchange="updateGentanItemData(${index}, '納入日', this.value)"
-                               class="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500">
-                    </div>
-                    <div class="col-span-2">
-                        <label class="text-xs text-gray-600">色番</label>
-                        <input type="text" value="${item.data.色番}" onchange="updateGentanItemData(${index}, '色番', this.value)"
-                               class="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-orange-500">
+                    
+                    <div class="grid grid-cols-2 gap-1.5">
+                        <div>
+                            <label class="text-[10px] text-gray-500">品番</label>
+                            <input type="text" value="${item.data.品番}" onchange="updateGentanItemData(${index}, '品番', this.value)"
+                                   class="w-full px-1.5 py-1 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-orange-500">
+                        </div>
+                        <div>
+                            <label class="text-[10px] text-gray-500">品名</label>
+                            <input type="text" value="${item.data.品名}" onchange="updateGentanItemData(${index}, '品名', this.value)"
+                                   class="w-full px-1.5 py-1 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-orange-500">
+                        </div>
+                        <div>
+                            <label class="text-[10px] text-gray-500">納入数</label>
+                            <input type="text" value="${item.data.納入数}" onchange="updateGentanItemData(${index}, '納入数', this.value)"
+                                   class="w-full px-1.5 py-1 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-orange-500">
+                        </div>
+                        <div>
+                            <label class="text-[10px] text-gray-500">納入日</label>
+                            <input type="text" value="${item.data.納入日}" onchange="updateGentanItemData(${index}, '納入日', this.value)"
+                                   class="w-full px-1.5 py-1 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-orange-500">
+                        </div>
+                        <div class="col-span-2">
+                            <label class="text-[10px] text-gray-500">色番</label>
+                            <input type="text" value="${item.data.色番}" onchange="updateGentanItemData(${index}, '色番', this.value)"
+                                   class="w-full px-1.5 py-1 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-orange-500">
+                        </div>
                     </div>
                 </div>
             </div>
         `;
         
-        container.appendChild(div);
+        row.innerHTML = leftContent + rightContent;
+        container.appendChild(row);
     });
 }
 

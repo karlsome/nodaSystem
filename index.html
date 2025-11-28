@@ -411,80 +411,77 @@
             </div>
 
             <!-- Gentan (原単) Screen -->
-            <div id="gentanScreen" class="hidden max-w-7xl mx-auto">
-                <div class="flex items-center justify-between mb-6">
-                    <div class="flex items-center space-x-4">
-                        <button onclick="backToHome()" class="w-12 h-12 bg-gray-200 hover:bg-gray-300 rounded-lg flex items-center justify-center transition-colors">
-                            <i class="fas fa-arrow-left text-xl text-gray-700"></i>
+            <div id="gentanScreen" class="hidden max-w-7xl mx-auto px-2">
+                <div class="flex items-center justify-between mb-3">
+                    <div class="flex items-center space-x-3">
+                        <button onclick="backToHome()" class="w-10 h-10 bg-gray-200 hover:bg-gray-300 rounded-lg flex items-center justify-center transition-colors">
+                            <i class="fas fa-arrow-left text-lg text-gray-700"></i>
                         </button>
                         <div>
-                            <h2 class="text-3xl font-bold text-gray-900">原単システム</h2>
-                            <p class="text-lg text-gray-600">原材料管理 - バーコードまたは写真で入力</p>
+                            <h2 class="text-xl lg:text-2xl font-bold text-gray-900">原単システム</h2>
+                            <p class="text-xs lg:text-sm text-gray-600 hidden sm:block">原材料管理 - バーコードまたは写真で入力</p>
                         </div>
                     </div>
-                    <button onclick="submitGentanData()" id="submitGentanBtn" class="px-8 py-3 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors text-lg font-medium shadow-md">
-                        <i class="fas fa-check mr-2"></i>データ送信
+                    <button onclick="submitGentanData()" id="submitGentanBtn" class="px-4 lg:px-8 py-2 lg:py-3 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors text-sm lg:text-lg font-medium shadow-md">
+                        <i class="fas fa-check mr-1 lg:mr-2"></i><span class="hidden sm:inline">データ</span>送信
                     </button>
                 </div>
 
-                <!-- Input Methods -->
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                <!-- Input Methods - Compact for tablet -->
+                <div class="flex flex-row gap-3 mb-4">
                     <!-- Barcode Scanner -->
-                    <div class="bg-gradient-to-br from-orange-50 to-amber-50 rounded-xl shadow-lg p-6 border-2 border-orange-200">
-                        <div class="text-center">
-                            <div class="w-16 h-16 bg-orange-100 rounded-full flex items-center justify-center mx-auto mb-3">
-                                <i class="fas fa-barcode text-3xl text-orange-600"></i>
+                    <div class="flex-1 bg-gradient-to-br from-orange-50 to-amber-50 rounded-xl shadow p-3 border-2 border-orange-200">
+                        <div class="flex items-center space-x-3">
+                            <div class="w-12 h-12 bg-orange-100 rounded-full flex items-center justify-center flex-shrink-0">
+                                <i class="fas fa-barcode text-xl text-orange-600"></i>
                             </div>
-                            <h3 class="text-xl font-bold text-gray-900 mb-2">バーコードスキャン</h3>
-                            <p class="text-gray-600 text-sm">バーコードをスキャンしてください</p>
-                            <div class="flex items-center justify-center space-x-2 mt-3">
-                                <div class="w-3 h-3 bg-green-400 rounded-full animate-pulse"></div>
-                                <span class="text-sm text-gray-600 font-medium">スキャナー準備完了</span>
+                            <div class="flex-1 min-w-0">
+                                <h3 class="text-base font-bold text-gray-900">バーコードスキャン</h3>
+                                <div class="flex items-center space-x-1">
+                                    <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                                    <span class="text-xs text-gray-600">準備完了</span>
+                                </div>
                             </div>
                         </div>
                     </div>
 
                     <!-- Camera Capture -->
-                    <div class="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl shadow-lg p-6 border-2 border-blue-200">
-                        <div class="text-center">
-                            <div class="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-3">
-                                <i class="fas fa-camera text-3xl text-blue-600"></i>
+                    <div class="flex-1 bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl shadow p-3 border-2 border-blue-200">
+                        <div class="flex items-center space-x-3">
+                            <div class="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center flex-shrink-0">
+                                <i class="fas fa-camera text-xl text-blue-600"></i>
                             </div>
-                            <h3 class="text-xl font-bold text-gray-900 mb-2">写真撮影</h3>
-                            <input type="file" id="gentanImageInput" accept="image/*" capture class="hidden" onchange="handleGentanImageCapture(event)">
-                            <button onclick="document.getElementById('gentanImageInput').click()" class="mt-2 px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors font-medium">
-                                <i class="fas fa-camera mr-2"></i>写真を撮る
-                            </button>
+                            <div class="flex-1 min-w-0">
+                                <h3 class="text-base font-bold text-gray-900">写真撮影</h3>
+                                <input type="file" id="gentanImageInput" accept="image/*" capture class="hidden" onchange="handleGentanImageCapture(event)">
+                                <button onclick="document.getElementById('gentanImageInput').click()" class="mt-1 px-3 py-1.5 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm font-medium">
+                                    <i class="fas fa-camera mr-1"></i>撮影
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
 
-                <!-- Two Column Layout -->
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <!-- Left Column: Input Source -->
-                    <div class="bg-white rounded-xl shadow-lg">
-                        <div class="p-4 border-b border-gray-200 bg-gray-50">
-                            <h3 class="text-lg font-bold text-gray-900">入力ソース</h3>
-                            <p class="text-sm text-gray-600">バーコード値または写真</p>
+                <!-- Two Column Layout - Scrolls Together -->
+                <div class="bg-white rounded-xl shadow-lg overflow-hidden">
+                    <div class="grid grid-cols-1 lg:grid-cols-2">
+                        <!-- Headers Row -->
+                        <div class="p-3 border-b border-gray-200 bg-gray-50 lg:border-r">
+                            <h3 class="text-base font-bold text-gray-900">入力ソース</h3>
+                            <p class="text-xs text-gray-600">バーコード値または写真</p>
                         </div>
-                        <div id="gentanInputList" class="divide-y divide-gray-200 max-h-[600px] overflow-y-auto">
-                            <div class="p-12 text-center text-gray-400">
-                                <i class="fas fa-inbox text-6xl mb-4"></i>
-                                <p>スキャンまたは写真をアップロードしてください</p>
-                            </div>
+                        <div class="p-3 border-b border-gray-200 bg-gray-50 hidden lg:block">
+                            <h3 class="text-base font-bold text-gray-900">抽出データ</h3>
+                            <p class="text-xs text-gray-600">編集可能な製品情報</p>
                         </div>
                     </div>
-
-                    <!-- Right Column: Extracted Data -->
-                    <div class="bg-white rounded-xl shadow-lg">
-                        <div class="p-4 border-b border-gray-200 bg-gray-50">
-                            <h3 class="text-lg font-bold text-gray-900">抽出データ</h3>
-                            <p class="text-sm text-gray-600">編集可能な製品情報</p>
-                        </div>
-                        <div id="gentanDataList" class="divide-y divide-gray-200 max-h-[600px] overflow-y-auto">
-                            <div class="p-12 text-center text-gray-400">
-                                <i class="fas fa-database text-6xl mb-4"></i>
-                                <p>データがここに表示されます</p>
+                    
+                    <!-- Scrollable Content Area - Dynamic height for tablet -->
+                    <div class="overflow-y-auto" style="max-height: calc(100vh - 280px); min-height: 200px;">
+                        <div id="gentanCombinedList">
+                            <div class="p-8 text-center text-gray-400">
+                                <i class="fas fa-inbox text-4xl mb-3"></i>
+                                <p class="text-sm">スキャンまたは写真をアップロード</p>
                             </div>
                         </div>
                     </div>
