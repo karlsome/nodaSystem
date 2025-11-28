@@ -46,7 +46,7 @@ const char* mqtt_user = "nodasims";  // HiveMQ Cloud username
 const char* mqtt_password = "Sasaki1234";  // HiveMQ Cloud password
 
 // Device configuration
-const String DEVICE_ID = "C74"; // 背番号 - Change for each device
+const String DEVICE_ID = "2PD"; // 背番号 - Change for each device
 
 // MQTT Topics
 const String TOPIC_COMMAND = "noda/device/" + DEVICE_ID + "/command";
@@ -940,23 +940,37 @@ void connectToWiFi() {
       for (int j = 0; j < n; j++) {
         if (WiFi.SSID(j) == String(ssidList[i])) {
           Serial.printf("🔌 Attempting to connect to: %s\n", ssidList[i]);
+          Serial.printf("📶 Signal strength: %d dBm\n", WiFi.RSSI(j));
+          Serial.printf("🔐 Encryption: %d\n", WiFi.encryptionType(j));
+          Serial.printf("📍 BSSID: %s\n", WiFi.BSSIDstr(j).c_str());
 
           deviceState.currentMessage = String("Connecting: ") + ssidList[i];
           update_screen_activity(); // Wake screen during connection attempts
           update_screen_display();
 
+          // Force disconnect any existing connection and clear BSSID lock
+          WiFi.disconnect(true, false);
+          delay(100);
+          
           WiFi.begin(ssidList[i], passwordList[i]);
 
           int attempts = 0;
-          while (WiFi.status() != WL_CONNECTED && attempts < 40) { // ~20s
+          while (WiFi.status() != WL_CONNECTED && attempts < 60) { // Increase to 30s for extenders
             delay(500);
             Serial.print(".");
             attempts++;
+            
+            // Print status every 5 seconds for debugging
+            if (attempts % 10 == 0) {
+              Serial.printf("\n🔄 Status: %d (after %ds) ", WiFi.status(), attempts / 2);
+            }
           }
 
           if (WiFi.status() == WL_CONNECTED) {
             Serial.println();
             Serial.printf("✅ Connected to: %s\n", ssidList[i]);
+            Serial.printf("📍 Connected BSSID: %s\n", WiFi.BSSIDstr().c_str());
+            Serial.printf("📶 Signal: %d dBm\n", WiFi.RSSI());
             Serial.printf("IP address: %s\n", WiFi.localIP().toString().c_str());
             connected = true;
             connectionState.wasWifiConnected = true;
@@ -965,7 +979,7 @@ void connectToWiFi() {
             break;
           } else {
             Serial.println();
-            Serial.printf("❌ Failed to connect to: %s\n", ssidList[i]);
+            Serial.printf("❌ Failed to connect to: %s (Status: %d)\n", ssidList[i], WiFi.status());
             WiFi.disconnect();
           }
           break;
