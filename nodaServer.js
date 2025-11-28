@@ -389,7 +389,7 @@ async function handleMQTTMessage(topic, message) {
         const deviceId = topicParts[2];
         const messageType = topicParts[3];
         
-        console.log(`📨 MQTT message from ${deviceId} (${messageType}):`, data);
+        //console.log(`📨 MQTT message from ${deviceId} (${messageType}):`, data);
         
         // Update device tracking
         mqttConnectedDevices.set(deviceId, Date.now());
@@ -418,7 +418,7 @@ async function handleMQTTMessage(topic, message) {
 
 // Handle device status updates
 async function handleDeviceStatusUpdate(deviceId, data) {
-    console.log(`📊 Device ${deviceId} status update:`, data);
+    //console.log(`📊 Device ${deviceId} status update:`, data);
     
     // Track device online/offline status
     const wasOffline = !mqttDevices.has(deviceId) || !mqttDevices.get(deviceId).isOnline;
@@ -2600,57 +2600,69 @@ app.post('/api/gentan/process-image', express.json({ limit: '50mb' }), express.r
             message: '画像を処理中です...'
         });
         
-        // Forward image to n8n webhook asynchronously
-        const FormData = require('form-data');
-        const fetch = require('node-fetch');
-        const form = new FormData();
-        
-        // Get image from request
-        let imageBuffer;
-        if (req.body.image) {
-            // Base64 encoded image
-            imageBuffer = Buffer.from(req.body.image, 'base64');
-        } else if (Buffer.isBuffer(req.body)) {
-            // Raw image buffer
-            imageBuffer = req.body;
-        } else {
-            throw new Error('No image data found in request');
-        }
-        
-        form.append('image', imageBuffer, { filename: 'gentan-image.jpg' });
-        form.append('jobId', jobId);
-        
-        console.log(`🔄 Forwarding image to n8n webhook...`);
-        
-        // Don't await - process asynchronously
-        fetch('https://karlsome.app.n8n.cloud/webhook-test/7081d838-c11e-42f5-8c17-94c5ee557cf6', {
-            method: 'POST',
-            body: form,
-            headers: form.getHeaders()
-        }).then(async (n8nResponse) => {
-            if (!n8nResponse.ok) {
-                throw new Error(`n8n returned ${n8nResponse.status}`);
-            }
-            return n8nResponse.json();
-        }).then((n8nResult) => {
-            console.log(`✅ n8n processing complete for job ${jobId}`);
-            // Update will come through /api/gentan/n8n-callback endpoint
-        }).catch((error) => {
-            console.error(`❌ Error forwarding to n8n for job ${jobId}:`, error);
-            gentanProcessingJobs.set(jobId, {
-                ...gentanProcessingJobs.get(jobId),
-                status: 'error',
-                error: error.message
-            });
-            
-            // Notify tablet of error via Socket.IO
-            if (socketId) {
-                const targetSocket = Array.from(connectedTablets).find(s => s.id === socketId);
-                if (targetSocket) {
-                    targetSocket.emit('gentan-processing-error', {
-                        jobId: jobId,
-                        error: error.message
-                    });
+        // Forward image to n8n webhook asynchronously (after response sent)
+        setImmediate(async () => {
+            try {
+                const FormData = require('form-data');
+                const fetch = require('node-fetch');
+                const https = require('https');
+                
+                // Create HTTPS agent that bypasses SSL verification (for local development)
+                const httpsAgent = new https.Agent({
+                    rejectUnauthorized: false
+                });
+                
+                const form = new FormData();
+                
+                // Get image from request
+                let imageBuffer;
+                if (req.body.image) {
+                    // Base64 encoded image
+                    imageBuffer = Buffer.from(req.body.image, 'base64');
+                } else if (Buffer.isBuffer(req.body)) {
+                    // Raw image buffer
+                    imageBuffer = req.body;
+                } else {
+                    throw new Error('No image data found in request');
+                }
+                
+                form.append('image', imageBuffer, { filename: 'gentan-image.jpg' });
+                form.append('jobId', jobId);
+                
+                console.log(`🔄 Forwarding image to n8n webhook...`);
+                
+                const n8nResponse = await fetch('https://karlsome.app.n8n.cloud/webhook-test/7081d838-c11e-42f5-8c17-94c5ee557cf6', {
+                    method: 'POST',
+                    body: form,
+                    headers: form.getHeaders(),
+                    agent: httpsAgent
+                });
+                
+                if (!n8nResponse.ok) {
+                    throw new Error(`n8n returned ${n8nResponse.status}`);
+                }
+                
+                const n8nResult = await n8nResponse.json();
+                console.log(`✅ n8n processing complete for job ${jobId}`);
+                // Update will come through /api/gentan/n8n-callback endpoint
+                
+            } catch (error) {
+                console.error(`❌ Error forwarding to n8n for job ${jobId}:`, error);
+                gentanProcessingJobs.set(jobId, {
+                    ...gentanProcessingJobs.get(jobId),
+                    status: 'error',
+                    error: error.message
+                });
+                
+                // Notify tablet of error via Socket.IO
+                if (socketId) {
+                    const targetSocket = Array.from(connectedTablets).find(s => s.id === socketId);
+                    if (targetSocket) {
+                        targetSocket.emit('gentan-processing-error', {
+                            jobId: jobId,
+                            error: error.message
+                        });
+                    }
                 }
             }
         });
