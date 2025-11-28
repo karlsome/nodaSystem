@@ -74,13 +74,21 @@ const String TOPIC_HEARTBEAT = "noda/device/" + DEVICE_ID + "/heartbeat";
 #define EXAMPLE_LCD_V_RES     320
 
 // Relays / outputs
-#define PIN_RELAY_A 2   // RED when HIGH
-#define PIN_RELAY_B 4   // GREEN when HIGH
+#define PIN_RELAY_A 2   // RED when HIGH (LED negative side)
+#define PIN_RELAY_B 4   // GREEN when HIGH (LED positive side)
 
 // --- Single N.O. button bridging GPIO6 <-> GPIO16 ---
 #define PIN_BRIDGE_DRIVE   6    // OUTPUT LOW
 #define PIN_BRIDGE_SENSE   16   // INPUT_PULLUP we read
 const unsigned long BTN_DEBOUNCE_MS = 30;
+
+// LED blinking configuration for picking mode
+struct LEDState {
+  bool isBlinking = false;
+  bool ledOn = false;
+  unsigned long lastBlinkTime = 0;
+  const unsigned long BLINK_INTERVAL_MS = 500; // 500ms on, 500ms off
+} ledState;
 
 // MQTT client
 WiFiClientSecure wifiClient;  // Use WiFiClientSecure for TLS/SSL MQTT (HiveMQ Cloud)
@@ -148,8 +156,37 @@ void my_print(const char *buf) { Serial.printf("%s", buf); Serial.flush(); }
 static bool displayGreen = false;  // true => GREEN (picking), false => RED (standby)
 
 static void apply_relays() {
-  digitalWrite(PIN_RELAY_A, displayGreen ? LOW : HIGH);   // GPIO2 - RED when not picking
-  digitalWrite(PIN_RELAY_B, displayGreen ? HIGH : LOW);   // GPIO4 - GREEN when picking
+  if (ledState.isBlinking) {
+    // During picking mode - LED blinks (controlled by handle_led_blinking)
+    // Don't override the blinking state here
+    return;
+  } else {
+    // During standby/completed mode - LED stays solid based on mode
+    digitalWrite(PIN_RELAY_A, displayGreen ? LOW : HIGH);   // GPIO2 - LED negative
+    digitalWrite(PIN_RELAY_B, displayGreen ? HIGH : LOW);   // GPIO4 - LED positive
+  }
+}
+
+static void handle_led_blinking() {
+  if (!ledState.isBlinking) {
+    return; // Not in blinking mode
+  }
+  
+  unsigned long now = millis();
+  if (now - ledState.lastBlinkTime >= ledState.BLINK_INTERVAL_MS) {
+    ledState.lastBlinkTime = now;
+    ledState.ledOn = !ledState.ledOn; // Toggle LED state
+    
+    if (ledState.ledOn) {
+      // LED ON - positive HIGH, negative LOW
+      digitalWrite(PIN_RELAY_B, HIGH);  // GPIO4 - positive
+      digitalWrite(PIN_RELAY_A, LOW);   // GPIO2 - negative
+    } else {
+      // LED OFF - both LOW
+      digitalWrite(PIN_RELAY_B, LOW);   // GPIO4 - positive
+      digitalWrite(PIN_RELAY_A, LOW);   // GPIO2 - negative
+    }
+  }
 }
 
 static void turn_screen_off() {
@@ -223,6 +260,11 @@ static void check_completed_timeout() {
       deviceState.isInCompletedMode = false;
       deviceState.completedTime = 0;
       deviceState.currentMessage = "Standby";
+      
+      // Ensure LED stays solid red in standby
+      ledState.isBlinking = false;
+      displayGreen = false;
+      apply_relays();
       
       Serial.println("💤 Device now in STANDBY mode - ready for new assignments");
       update_screen_activity(); // Wake screen and reset timeout
@@ -335,6 +377,8 @@ static void complete_picking_task() {
   deviceState.completedTime = millis(); // Record completion time
   deviceState.isInCompletedMode = true; // Set completed flag
 
+  // Stop LED blinking and turn on solid red
+  ledState.isBlinking = false;
   displayGreen = false;
   apply_relays();
   update_screen_activity(); // Reset screen timeout and wake up if needed
@@ -860,8 +904,14 @@ void handleDisplayUpdate(String jsonData) {
     deviceState.isInCompletedMode = false; // Clear completed flag
     deviceState.completedTime = 0; // Clear completion time
     
+    // Start LED blinking for picking mode
+    ledState.isBlinking = true;
+    ledState.ledOn = true;
+    ledState.lastBlinkTime = millis();
+    
     displayGreen = true;
     Serial.println("🟢 Green screen activated with quantity: " + String(quantity));
+    Serial.println("💡 LED blinking started to indicate active picking request");
     update_screen_activity(); // Wake screen immediately for new picking task
   } else if (color == "red" || message == "Completed") {
     Serial.println("🔴 ===== RED/COMPLETED COMMAND RECEIVED =====");
@@ -880,8 +930,11 @@ void handleDisplayUpdate(String jsonData) {
       deviceState.completedTime = millis(); // Set completion time
       deviceState.isInCompletedMode = true; // Set completed flag
       
+      // Stop LED blinking and turn on solid red
+      ledState.isBlinking = false;
       displayGreen = false;
       Serial.println("🔴 Red screen activated with message: " + message);
+      Serial.println("💡 LED blinking stopped - solid red for completed/standby");
       update_screen_activity(); // Reset timeout for completed mode
     }
   } else {
@@ -898,6 +951,8 @@ void handleDisplayUpdate(String jsonData) {
     deviceState.isInCompletedMode = false;
     deviceState.completedTime = 0;
     
+    // Stop LED blinking for unknown commands
+    ledState.isBlinking = false;
     displayGreen = false;
     update_screen_activity();
   }
@@ -1092,6 +1147,7 @@ void loop() {
   check_bridge_button();
   check_screen_timeout(); // Check if screen should timeout during red/standby modes
   check_completed_timeout(); // Check if device should return from completed to standby
+  handle_led_blinking(); // Handle LED blinking during picking mode
 
   // MQTT message handling
   if (mqttClient.connected()) {
