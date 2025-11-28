@@ -628,12 +628,20 @@ function showFieldSuggestion(field, suggestion) {
     const existingSuggestion = input.parentElement.querySelector('.ocr-suggestion');
     if (existingSuggestion) existingSuggestion.remove();
     
+    // Determine match type styling
+    const isExact = suggestion.matchType === 'exact';
+    const matchLabel = isExact ? '完全一致' : `類似 ${suggestion.similarity}%`;
+    const matchColor = isExact ? 'text-green-600' : 'text-orange-500';
+    const bgColor = isExact ? 'bg-green-50 border-green-300' : 'bg-yellow-50 border-yellow-300';
+    const iconColor = isExact ? 'text-green-500' : 'text-yellow-500';
+    
     // Create suggestion element
     const suggestionDiv = document.createElement('div');
-    suggestionDiv.className = 'ocr-suggestion flex items-center gap-2 mt-1 p-2 bg-yellow-50 border border-yellow-300 rounded-lg text-sm';
+    suggestionDiv.className = `ocr-suggestion flex items-center gap-2 mt-1 p-2 ${bgColor} rounded-lg text-sm`;
     suggestionDiv.innerHTML = `
-        <i class="fas fa-lightbulb text-yellow-500"></i>
+        <i class="fas fa-lightbulb ${iconColor}"></i>
         <span class="text-gray-700">提案: <strong class="text-blue-600">${suggestion.suggested}</strong></span>
+        <span class="${matchColor} text-xs">(${matchLabel})</span>
         <button onclick="applySuggestion('${field}', '${suggestion.suggested.replace(/'/g, "\\'")}')" 
                 class="ml-auto px-2 py-1 bg-blue-500 text-white text-xs rounded hover:bg-blue-600 transition-colors">
             適用

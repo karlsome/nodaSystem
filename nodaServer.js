@@ -2859,7 +2859,49 @@ app.post('/api/gentan/submit', async (req, res) => {
 
 // ==================== OCR LEARNING ENDPOINTS ====================
 
-// Get suggestions for OCR values
+// Levenshtein distance for fuzzy matching
+function levenshteinDistance(str1, str2) {
+    const m = str1.length;
+    const n = str2.length;
+    
+    // Create a matrix
+    const dp = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
+    
+    // Initialize first row and column
+    for (let i = 0; i <= m; i++) dp[i][0] = i;
+    for (let j = 0; j <= n; j++) dp[0][j] = j;
+    
+    // Fill the matrix
+    for (let i = 1; i <= m; i++) {
+        for (let j = 1; j <= n; j++) {
+            if (str1[i - 1] === str2[j - 1]) {
+                dp[i][j] = dp[i - 1][j - 1];
+            } else {
+                dp[i][j] = 1 + Math.min(
+                    dp[i - 1][j],     // deletion
+                    dp[i][j - 1],     // insertion
+                    dp[i - 1][j - 1]  // substitution
+                );
+            }
+        }
+    }
+    
+    return dp[m][n];
+}
+
+// Calculate similarity percentage (0-100)
+function calculateSimilarity(str1, str2) {
+    if (!str1 || !str2) return 0;
+    if (str1 === str2) return 100;
+    
+    const maxLen = Math.max(str1.length, str2.length);
+    if (maxLen === 0) return 100;
+    
+    const distance = levenshteinDistance(str1.toLowerCase(), str2.toLowerCase());
+    return Math.round((1 - distance / maxLen) * 100);
+}
+
+// Get suggestions for OCR values (with fuzzy matching)
 app.post('/api/ocr-learning/suggest', async (req, res) => {
     try {
         const { ocrValues } = req.body;
@@ -2872,21 +2914,52 @@ app.post('/api/ocr-learning/suggest', async (req, res) => {
         const collection = learningDB.collection('ocrLearningDB');
         
         const suggestions = {};
+        const SIMILARITY_THRESHOLD = 75; // Minimum 75% similarity to suggest
         
         // Find suggestions for each field
         for (const [field, ocrValue] of Object.entries(ocrValues)) {
             if (ocrValue && ocrValue.trim()) {
-                const learned = await collection.findOne({
+                // First, try exact match
+                const exactMatch = await collection.findOne({
                     field: field,
                     ocrValue: ocrValue
                 });
                 
-                if (learned && learned.correctedValue !== ocrValue) {
+                if (exactMatch && exactMatch.correctedValue !== ocrValue) {
                     suggestions[field] = {
                         original: ocrValue,
-                        suggested: learned.correctedValue,
-                        useCount: learned.useCount || 1
+                        suggested: exactMatch.correctedValue,
+                        useCount: exactMatch.useCount || 1,
+                        matchType: 'exact',
+                        similarity: 100
                     };
+                } else {
+                    // No exact match - try fuzzy matching
+                    const allLearned = await collection.find({ field: field }).toArray();
+                    
+                    let bestMatch = null;
+                    let bestSimilarity = 0;
+                    
+                    for (const learned of allLearned) {
+                        const similarity = calculateSimilarity(ocrValue, learned.ocrValue);
+                        
+                        if (similarity >= SIMILARITY_THRESHOLD && similarity > bestSimilarity) {
+                            bestSimilarity = similarity;
+                            bestMatch = learned;
+                        }
+                    }
+                    
+                    if (bestMatch && bestMatch.correctedValue !== ocrValue) {
+                        suggestions[field] = {
+                            original: ocrValue,
+                            suggested: bestMatch.correctedValue,
+                            useCount: bestMatch.useCount || 1,
+                            matchType: 'fuzzy',
+                            similarity: bestSimilarity,
+                            matchedOcr: bestMatch.ocrValue // What OCR text it matched with
+                        };
+                        console.log(`🔍 Fuzzy match for ${field}: "${ocrValue}" ~ "${bestMatch.ocrValue}" (${bestSimilarity}%) → "${bestMatch.correctedValue}"`);
+                    }
                 }
             }
         }
