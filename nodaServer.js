@@ -2857,6 +2857,130 @@ app.post('/api/gentan/submit', async (req, res) => {
     }
 });
 
+// ==================== OCR LEARNING ENDPOINTS ====================
+
+// Get suggestions for OCR values
+app.post('/api/ocr-learning/suggest', async (req, res) => {
+    try {
+        const { ocrValues } = req.body;
+        
+        if (!ocrValues || typeof ocrValues !== 'object') {
+            return res.status(400).json({ error: 'ocrValues object is required' });
+        }
+        
+        const learningDB = client.db('submittedDB');
+        const collection = learningDB.collection('ocrLearningDB');
+        
+        const suggestions = {};
+        
+        // Find suggestions for each field
+        for (const [field, ocrValue] of Object.entries(ocrValues)) {
+            if (ocrValue && ocrValue.trim()) {
+                const learned = await collection.findOne({
+                    field: field,
+                    ocrValue: ocrValue
+                });
+                
+                if (learned && learned.correctedValue !== ocrValue) {
+                    suggestions[field] = {
+                        original: ocrValue,
+                        suggested: learned.correctedValue,
+                        useCount: learned.useCount || 1
+                    };
+                }
+            }
+        }
+        
+        res.json({ suggestions });
+        
+    } catch (error) {
+        console.error('Error getting OCR suggestions:', error);
+        res.status(500).json({ error: 'Failed to get suggestions', details: error.message });
+    }
+});
+
+// Learn from user correction
+app.post('/api/ocr-learning/learn', async (req, res) => {
+    try {
+        const { corrections, learnedBy } = req.body;
+        
+        if (!corrections || !Array.isArray(corrections)) {
+            return res.status(400).json({ error: 'corrections array is required' });
+        }
+        
+        const learningDB = client.db('submittedDB');
+        const collection = learningDB.collection('ocrLearningDB');
+        
+        let learnedCount = 0;
+        
+        for (const correction of corrections) {
+            const { field, ocrValue, correctedValue } = correction;
+            
+            // Only learn if there was an actual correction (values are different)
+            if (field && ocrValue && correctedValue && ocrValue !== correctedValue) {
+                // Upsert: update if exists, insert if not
+                await collection.updateOne(
+                    { field: field, ocrValue: ocrValue },
+                    {
+                        $set: {
+                            correctedValue: correctedValue,
+                            lastLearnedAt: new Date().toISOString(),
+                            lastLearnedBy: learnedBy || 'Unknown'
+                        },
+                        $inc: { useCount: 1 },
+                        $setOnInsert: {
+                            createdAt: new Date().toISOString()
+                        }
+                    },
+                    { upsert: true }
+                );
+                learnedCount++;
+                console.log(`🧠 Learned: ${field} "${ocrValue}" → "${correctedValue}"`);
+            }
+        }
+        
+        res.json({ 
+            success: true, 
+            learnedCount,
+            message: learnedCount > 0 ? `Learned ${learnedCount} correction(s)` : 'No new corrections to learn'
+        });
+        
+    } catch (error) {
+        console.error('Error learning OCR correction:', error);
+        res.status(500).json({ error: 'Failed to learn correction', details: error.message });
+    }
+});
+
+// Get learning statistics (optional - for debugging/admin)
+app.get('/api/ocr-learning/stats', async (req, res) => {
+    try {
+        const learningDB = client.db('submittedDB');
+        const collection = learningDB.collection('ocrLearningDB');
+        
+        const totalLearnings = await collection.countDocuments();
+        const byField = await collection.aggregate([
+            { $group: { _id: '$field', count: { $sum: 1 }, totalUses: { $sum: '$useCount' } } }
+        ]).toArray();
+        
+        const recentLearnings = await collection.find()
+            .sort({ lastLearnedAt: -1 })
+            .limit(10)
+            .toArray();
+        
+        res.json({
+            totalLearnings,
+            byField,
+            recentLearnings
+        });
+        
+    } catch (error) {
+        console.error('Error getting OCR learning stats:', error);
+        res.status(500).json({ error: 'Failed to get stats', details: error.message });
+    }
+});
+
+// ==================== END OCR LEARNING ENDPOINTS ====================
+
 // ==================== END GENTAN ENDPOINTS ====================
 
 // Health check endpoint

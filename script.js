@@ -283,6 +283,8 @@ function initializeSocket() {
                 gentanItems[itemIndex].data = data.data;
                 gentanItems[itemIndex].processed = true;
                 gentanItems[itemIndex].processing = false;
+                // Store original OCR data for learning (deep copy)
+                gentanItems[itemIndex].originalOcrData = JSON.parse(JSON.stringify(data.data));
                 saveGentanToStorage(); // Persist processed data
                 updateGentanLists();
                 showToast('画像データを抽出しました！', 'success');
@@ -560,14 +562,19 @@ function resetGentanData() {
 
 // Track which item is being edited in modal
 let currentEditingIndex = -1;
+let currentOcrSuggestions = {}; // Store suggestions for current item
 
 // Image preview modal functions with edit form
-function openImagePreview(imageSrc, itemIndex) {
+async function openImagePreview(imageSrc, itemIndex) {
     const modal = document.getElementById('imagePreviewModal');
     const img = document.getElementById('imagePreviewImg');
     
     img.src = imageSrc;
     currentEditingIndex = itemIndex;
+    currentOcrSuggestions = {};
+    
+    // Clear any previous suggestions
+    clearAllSuggestions();
     
     // Populate form with current data
     if (itemIndex >= 0 && gentanItems[itemIndex]) {
@@ -577,10 +584,81 @@ function openImagePreview(imageSrc, itemIndex) {
         document.getElementById('modalEdit_納入数').value = item.data.納入数 || '';
         document.getElementById('modalEdit_納入日').value = item.data.納入日 || '';
         document.getElementById('modalEdit_色番').value = item.data.色番 || '';
+        
+        // Fetch OCR suggestions if this is an image type
+        if (item.type === 'image' && item.originalOcrData) {
+            await fetchOcrSuggestions(item.originalOcrData);
+        }
     }
     
     modal.classList.remove('hidden');
     document.body.style.overflow = 'hidden'; // Prevent background scroll
+}
+
+// Fetch OCR suggestions from server
+async function fetchOcrSuggestions(ocrValues) {
+    try {
+        const response = await fetch(`${API_BASE_URL}/ocr-learning/suggest`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ocrValues })
+        });
+        
+        if (response.ok) {
+            const result = await response.json();
+            currentOcrSuggestions = result.suggestions || {};
+            
+            // Display suggestions for each field
+            for (const [field, suggestion] of Object.entries(currentOcrSuggestions)) {
+                showFieldSuggestion(field, suggestion);
+            }
+        }
+    } catch (error) {
+        console.error('Error fetching OCR suggestions:', error);
+    }
+}
+
+// Show suggestion for a specific field
+function showFieldSuggestion(field, suggestion) {
+    const inputId = `modalEdit_${field}`;
+    const input = document.getElementById(inputId);
+    if (!input) return;
+    
+    // Remove existing suggestion if any
+    const existingSuggestion = input.parentElement.querySelector('.ocr-suggestion');
+    if (existingSuggestion) existingSuggestion.remove();
+    
+    // Create suggestion element
+    const suggestionDiv = document.createElement('div');
+    suggestionDiv.className = 'ocr-suggestion flex items-center gap-2 mt-1 p-2 bg-yellow-50 border border-yellow-300 rounded-lg text-sm';
+    suggestionDiv.innerHTML = `
+        <i class="fas fa-lightbulb text-yellow-500"></i>
+        <span class="text-gray-700">提案: <strong class="text-blue-600">${suggestion.suggested}</strong></span>
+        <button onclick="applySuggestion('${field}', '${suggestion.suggested.replace(/'/g, "\\'")}')" 
+                class="ml-auto px-2 py-1 bg-blue-500 text-white text-xs rounded hover:bg-blue-600 transition-colors">
+            適用
+        </button>
+    `;
+    
+    input.parentElement.appendChild(suggestionDiv);
+}
+
+// Apply a suggestion to a field
+function applySuggestion(field, value) {
+    const inputId = `modalEdit_${field}`;
+    const input = document.getElementById(inputId);
+    if (input) {
+        input.value = value;
+        // Remove the suggestion after applying
+        const suggestionDiv = input.parentElement.querySelector('.ocr-suggestion');
+        if (suggestionDiv) suggestionDiv.remove();
+        showToast(`${field}に提案を適用しました`, 'success');
+    }
+}
+
+// Clear all suggestions
+function clearAllSuggestions() {
+    document.querySelectorAll('.ocr-suggestion').forEach(el => el.remove());
 }
 
 function closeImagePreview() {
@@ -588,16 +666,59 @@ function closeImagePreview() {
     modal.classList.add('hidden');
     document.body.style.overflow = ''; // Restore scroll
     currentEditingIndex = -1;
+    currentOcrSuggestions = {};
+    clearAllSuggestions();
 }
 
-// Save data from modal edit form
-function saveModalEditData() {
+// Save data from modal edit form and learn from corrections
+async function saveModalEditData() {
     if (currentEditingIndex >= 0 && gentanItems[currentEditingIndex]) {
-        gentanItems[currentEditingIndex].data.品番 = document.getElementById('modalEdit_品番').value;
-        gentanItems[currentEditingIndex].data.品名 = document.getElementById('modalEdit_品名').value;
-        gentanItems[currentEditingIndex].data.納入数 = document.getElementById('modalEdit_納入数').value;
-        gentanItems[currentEditingIndex].data.納入日 = document.getElementById('modalEdit_納入日').value;
-        gentanItems[currentEditingIndex].data.色番 = document.getElementById('modalEdit_色番').value;
+        const item = gentanItems[currentEditingIndex];
+        const newValues = {
+            品番: document.getElementById('modalEdit_品番').value,
+            品名: document.getElementById('modalEdit_品名').value,
+            納入数: document.getElementById('modalEdit_納入数').value,
+            納入日: document.getElementById('modalEdit_納入日').value,
+            色番: document.getElementById('modalEdit_色番').value
+        };
+        
+        // Check for corrections to learn (only for image types with original OCR data)
+        if (item.type === 'image' && item.originalOcrData) {
+            const corrections = [];
+            for (const field of ['品番', '品名', '納入数', '納入日', '色番']) {
+                const ocrValue = item.originalOcrData[field];
+                const correctedValue = newValues[field];
+                
+                // Only learn if OCR value exists and user changed it
+                if (ocrValue && correctedValue && ocrValue !== correctedValue) {
+                    corrections.push({
+                        field: field,
+                        ocrValue: ocrValue,
+                        correctedValue: correctedValue
+                    });
+                }
+            }
+            
+            // Send corrections to server for learning
+            if (corrections.length > 0) {
+                try {
+                    await fetch(`${API_BASE_URL}/ocr-learning/learn`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            corrections: corrections,
+                            learnedBy: currentWorker || 'Unknown'
+                        })
+                    });
+                    console.log(`🧠 Learned ${corrections.length} correction(s)`);
+                } catch (error) {
+                    console.error('Error sending corrections for learning:', error);
+                }
+            }
+        }
+        
+        // Update the item data
+        gentanItems[currentEditingIndex].data = { ...gentanItems[currentEditingIndex].data, ...newValues };
         
         saveGentanToStorage();
         updateGentanLists();
@@ -2443,6 +2564,7 @@ window.resetGentanData = resetGentanData;
 window.openImagePreview = openImagePreview;
 window.closeImagePreview = closeImagePreview;
 window.saveModalEditData = saveModalEditData;
+window.applySuggestion = applySuggestion;
 window.backToHome = backToHome;
 window.backToPickingList = backToPickingList;
 window.filterByStatus = filterByStatus;
