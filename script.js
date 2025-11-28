@@ -1048,13 +1048,22 @@ async function submitGentanData() {
             submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>送信中...';
         }
         
-        // Prepare data for MongoDB
-        const documentsToSubmit = gentanItems.map(item => ({
-            ...item.data,
-            submittedBy: currentWorker,
-            submittedAt: new Date().toISOString(),
-            sourceType: item.type
-        }));
+        // Prepare data for MongoDB (include imageSource for image types)
+        const documentsToSubmit = gentanItems.map(item => {
+            const doc = {
+                ...item.data,
+                submittedBy: currentWorker,
+                submittedAt: new Date().toISOString(),
+                sourceType: item.type
+            };
+            
+            // Include base64 image source for image types (will be uploaded to Firebase)
+            if (item.type === 'image' && item.source) {
+                doc.imageSource = item.source;
+            }
+            
+            return doc;
+        });
         
         const response = await fetch(`${API_BASE_URL}/gentan/submit`, {
             method: 'POST',
@@ -1062,7 +1071,8 @@ async function submitGentanData() {
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-                documents: documentsToSubmit
+                documents: documentsToSubmit,
+                factory: factory // Send factory value from dropdown
             })
         });
         

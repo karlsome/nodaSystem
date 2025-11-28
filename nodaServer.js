@@ -5,7 +5,29 @@ const path = require('path');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
 const mqtt = require('mqtt');
+const admin = require('firebase-admin');
 require('dotenv').config();
+
+// Initialize Firebase Admin SDK
+const firebaseConfig = {
+    credential: admin.credential.cert({
+        projectId: process.env.FIREBASE_PROJECT_ID,
+        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+        privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+    }),
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
+};
+
+let firebaseApp;
+let firebaseBucket;
+
+try {
+    firebaseApp = admin.initializeApp(firebaseConfig);
+    firebaseBucket = admin.storage().bucket();
+    console.log('🔥 Firebase Admin SDK initialized successfully');
+} catch (error) {
+    console.error('❌ Firebase initialization error:', error.message);
+}
 
 const app = express();
 const httpServer = createServer(app);
@@ -2728,10 +2750,10 @@ app.post('/api/gentan/n8n-callback', async (req, res) => {
     }
 });
 
-// Endpoint: Submit gentan data to MongoDB
+// Endpoint: Submit gentan data to MongoDB (with Firebase Storage for images)
 app.post('/api/gentan/submit', async (req, res) => {
     try {
-        const { documents } = req.body;
+        const { documents, factory } = req.body;
         
         if (!documents || !Array.isArray(documents) || documents.length === 0) {
             return res.status(400).json({ error: 'Documents array is required' });
@@ -2740,9 +2762,89 @@ app.post('/api/gentan/submit', async (req, res) => {
         const gentanDB = client.db('submittedDB');
         const collection = gentanDB.collection('nodaRawMaterialDB');
         
-        console.log(`📝 Inserting ${documents.length} gentan documents to MongoDB...`);
+        console.log(`📝 Processing ${documents.length} gentan documents...`);
         
-        const result = await collection.insertMany(documents);
+        // Process each document - upload images to Firebase if sourceType is 'image'
+        const processedDocuments = await Promise.all(documents.map(async (doc, index) => {
+            const processedDoc = { ...doc };
+            
+            // Add factory to the document
+            if (factory) {
+                processedDoc['工場'] = factory;
+            }
+            
+            // If it's an image type and has imageSource (base64), upload to Firebase
+            if (doc.sourceType === 'image' && doc.imageSource && firebaseBucket) {
+                try {
+                    console.log(`📤 Uploading image ${index + 1} to Firebase Storage...`);
+                    
+                    // Extract base64 data (remove data:image/xxx;base64, prefix if present)
+                    let base64Data = doc.imageSource;
+                    let mimeType = 'image/jpeg';
+                    
+                    if (base64Data.includes(',')) {
+                        const matches = base64Data.match(/^data:(.+);base64,(.+)$/);
+                        if (matches) {
+                            mimeType = matches[1];
+                            base64Data = matches[2];
+                        } else {
+                            base64Data = base64Data.split(',')[1];
+                        }
+                    }
+                    
+                    const buffer = Buffer.from(base64Data, 'base64');
+                    
+                    // Generate filename: 品番_納入日_timestamp.jpg
+                    const hinban = doc['品番'] || 'unknown';
+                    const nounyubi = doc['納入日'] || new Date().toISOString().split('T')[0];
+                    const timestamp = Date.now();
+                    const extension = mimeType.includes('png') ? 'png' : 'jpg';
+                    const filename = `${hinban}_${nounyubi}_${timestamp}.${extension}`;
+                    
+                    // Sanitize factory name for file path
+                    const factoryFolder = factory ? factory.replace(/[\/\\]/g, '_') : 'unknown';
+                    const filePath = `rawMaterialImages/${factoryFolder}/${filename}`;
+                    
+                    const file = firebaseBucket.file(filePath);
+                    
+                    await file.save(buffer, {
+                        metadata: {
+                            contentType: mimeType,
+                            metadata: {
+                                品番: hinban,
+                                納入日: nounyubi,
+                                工場: factory || 'unknown',
+                                uploadedAt: new Date().toISOString()
+                            }
+                        }
+                    });
+                    
+                    // Make the file publicly accessible
+                    await file.makePublic();
+                    
+                    // Generate the public URL with the custom token
+                    const bucketName = process.env.FIREBASE_STORAGE_BUCKET;
+                    const encodedPath = encodeURIComponent(filePath);
+                    const imageURL = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodedPath}?alt=media&token=masterDBToken69`;
+                    
+                    processedDoc.imageURL = imageURL;
+                    console.log(`✅ Image uploaded: ${imageURL}`);
+                    
+                } catch (uploadError) {
+                    console.error(`❌ Failed to upload image ${index + 1}:`, uploadError.message);
+                    // Continue without imageURL if upload fails
+                }
+            }
+            
+            // Remove the base64 imageSource from the document (we don't want to store it in MongoDB)
+            delete processedDoc.imageSource;
+            
+            return processedDoc;
+        }));
+        
+        console.log(`📝 Inserting ${processedDocuments.length} gentan documents to MongoDB...`);
+        
+        const result = await collection.insertMany(processedDocuments);
         
         console.log(`✅ Successfully inserted ${result.insertedCount} documents`);
         
