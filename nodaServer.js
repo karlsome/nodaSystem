@@ -2631,7 +2631,7 @@ app.post('/api/gentan/process-image', express.json({ limit: '50mb' }), express.r
                 
                 console.log(`🔄 Forwarding image to n8n webhook...`);
                 
-                const n8nResponse = await fetch('https://karlsome.app.n8n.cloud/webhook-test/7081d838-c11e-42f5-8c17-94c5ee557cf6', {
+                const n8nResponse = await fetch('https://karlsome.app.n8n.cloud/webhook/7081d838-c11e-42f5-8c17-94c5ee557cf6', {
                     method: 'POST',
                     body: form,
                     headers: form.getHeaders(),

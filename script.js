@@ -502,7 +502,7 @@ function openPickingSystem() {
 // Global storage for gentan items
 let gentanItems = [];
 let gentanScanBuffer = '';
-const N8N_WEBHOOK_URL = 'https://karlsome.app.n8n.cloud/webhook-test/7081d838-c11e-42f5-8c17-94c5ee557cf6';
+const N8N_WEBHOOK_URL = 'https://karlsome.app.n8n.cloud/webhook/7081d838-c11e-42f5-8c17-94c5ee557cf6';
 
 function openGentanSystem() {
     showScreen('gentan');
