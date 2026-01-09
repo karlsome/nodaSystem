@@ -1363,9 +1363,9 @@ function displayPickingRequests() {
     
     // Apply status filter
     if (currentFilter === 'all') {
-        // Show pending, in-progress, and completed
+        // Show pending, in-progress, completed, and partial-inventory
         filteredRequests = filteredRequests.filter(req => 
-            req.status === 'pending' || req.status === 'in-progress' || req.status === 'completed'
+            req.status === 'pending' || req.status === 'in-progress' || req.status === 'completed' || req.status === 'partial-inventory'
         );
     } else {
         filteredRequests = filteredRequests.filter(req => req.status === currentFilter);
@@ -1515,7 +1515,29 @@ async function displayPickingDetail(request) {
     const infoContainer = document.getElementById('pickingRequestInfo');
     const completedItems = request.lineItems.filter(item => item.status === 'completed').length;
     
+    // Check if this is a partial-inventory request
+    const insufficientItems = request.lineItems.filter(item => 
+        item.inventoryStatus === 'none' || (item.shortfallQuantity && item.shortfallQuantity > 0)
+    );
+    
+    // Add warning banner for partial-inventory status
+    let warningBanner = '';
+    if (request.status === 'partial-inventory' && insufficientItems.length > 0) {
+        warningBanner = `
+            <div class="col-span-4 mb-4 bg-red-50 border-l-4 border-red-500 p-4 rounded-lg">
+                <div class="flex items-center space-x-3">
+                    <i class="fas fa-exclamation-triangle text-red-600 text-2xl"></i>
+                    <div>
+                        <h4 class="text-lg font-bold text-red-800">在庫不足の警告</h4>
+                        <p class="text-sm text-red-700">${insufficientItems.length}個の品番で在庫が不足しています。在庫補充が必要です。</p>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+    
     infoContainer.innerHTML = `
+        ${warningBanner}
         <div class="text-center">
             <p class="text-sm text-gray-500">依頼番号</p>
             <p class="text-lg font-semibold text-gray-900">${request.requestNumber}</p>
@@ -1549,10 +1571,11 @@ async function displayPickingDetail(request) {
     const startBtn = document.getElementById('startPickingBtn');
     startBtn.classList.add('start-picking-btn'); // Add class for lock handling
     
-    if (request.status === 'pending') {
+    if (request.status === 'pending' || request.status === 'partial-inventory') {
         startBtn.disabled = false;
         startBtn.onclick = startPickingProcess;
         startBtn.innerHTML = `<i class="fas fa-play mr-2"></i>${t('start-button')}`;
+        startBtn.className = 'px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors font-medium';
     } else if (request.status === 'in-progress') {
         startBtn.disabled = true;
         startBtn.onclick = null;
@@ -1610,7 +1633,15 @@ async function fetchMasterData(品番) {
 
 function createPickingItemElement(item, index) {
     const itemDiv = document.createElement('div');
-    itemDiv.className = 'picking-item border rounded-lg p-4 mb-3';
+    
+    // Check if item has insufficient inventory
+    const hasInsufficientInventory = item.inventoryStatus === 'none' || (item.shortfallQuantity && item.shortfallQuantity > 0);
+    
+    // Apply red background for items with insufficient inventory
+    itemDiv.className = hasInsufficientInventory 
+        ? 'picking-item border-2 border-red-500 rounded-lg p-4 mb-3 bg-red-50' 
+        : 'picking-item border rounded-lg p-4 mb-3';
+    
     // Add data attributes for real-time updates
     itemDiv.setAttribute('data-line', item.lineNumber);
     itemDiv.setAttribute('data-device-id', item.背番号);
@@ -1646,6 +1677,14 @@ function createPickingItemElement(item, index) {
     const quantityDetail = item.boxQuantity !== undefined && item.収容数 > 1 
         ? `<span class="text-xs text-gray-500">(${item.quantity}個 ÷ ${item.収容数})</span>` 
         : '';
+    
+    // Add inventory warning for insufficient items
+    const inventoryWarning = hasInsufficientInventory 
+        ? `<div class="mt-2 flex items-center space-x-2 bg-red-100 px-3 py-2 rounded-lg">
+            <i class="fas fa-exclamation-triangle text-red-600"></i>
+            <span class="text-sm font-semibold text-red-700">在庫不足: ${item.shortfallQuantity || item.quantity}個不足</span>
+           </div>` 
+        : '';
 
     itemDiv.innerHTML = `
         <div class="flex items-center justify-between">
@@ -1663,6 +1702,7 @@ function createPickingItemElement(item, index) {
                         数量: ${displayQuantity}${quantityUnit} ${quantityDetail}
                     </p>
                     <div class="completion-info mt-1">${completedInfo}</div>
+                    ${inventoryWarning}
                 </div>
             </div>
             <div class="text-right flex items-center space-x-4">
@@ -2070,6 +2110,7 @@ function getStatusClass(status) {
         case 'pending': return 'status-pending';
         case 'in-progress': return 'status-in-progress';
         case 'completed': return 'status-completed';
+        case 'partial-inventory': return 'status-partial-inventory';
         default: return 'status-pending';
     }
 }
@@ -2080,6 +2121,7 @@ function getStatusText(status) {
         case 'pending': return t('status-pending');
         case 'in-progress': return t('status-in-progress');
         case 'completed': return t('status-completed');
+        case 'partial-inventory': return '在庫不足';
         default: return t('status-unknown');
     }
 }

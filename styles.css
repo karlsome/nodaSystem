@@ -126,6 +126,12 @@ button {
     color: #065f46;
 }
 
+.status-partial-inventory {
+    background-color: #fee2e2;
+    color: #991b1b;
+    font-weight: 600;
+}
+
 /* Loading animation */
 .loading-spinner {
     animation: spin 1s linear infinite;
