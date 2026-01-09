@@ -1358,23 +1358,17 @@ function displayPickingRequests() {
         return;
     }
     
-    // Filter requests based on current filter and date
+    // Filter requests based on current filter (status-based only)
     let filteredRequests = pickingRequests;
     
     // Apply status filter
-    if (currentFilter !== 'all') {
+    if (currentFilter === 'all') {
+        // Show pending, in-progress, and completed
+        filteredRequests = filteredRequests.filter(req => 
+            req.status === 'pending' || req.status === 'in-progress' || req.status === 'completed'
+        );
+    } else {
         filteredRequests = filteredRequests.filter(req => req.status === currentFilter);
-    }
-    
-    // Apply date filter
-    if (currentDateFilter) {
-        filteredRequests = filteredRequests.filter(req => {
-            if (!req.createdAt) return false;
-            
-            // Extract date part from createdAt (YYYY-MM-DD)
-            const requestDate = new Date(req.createdAt).toISOString().split('T')[0];
-            return requestDate === currentDateFilter;
-        });
     }
     
     // Sort requests: oldest first (ascending by createdAt)
@@ -1406,9 +1400,6 @@ function createPickingRequestCard(request) {
     const statusText = getStatusText(request.status);
     const formattedDate = new Date(request.createdAt).toLocaleDateString('ja-JP');
     
-    // Color the suffix based on order number
-    const coloredRequestNumber = colorizeRequestNumber(request.requestNumber);
-    
     card.innerHTML = `
         <div class="flex items-center justify-between">
             <div class="flex items-center space-x-4">
@@ -1416,7 +1407,7 @@ function createPickingRequestCard(request) {
                     <i class="fas fa-hand-paper text-green-600 text-2xl"></i>
                 </div>
                 <div>
-                    <h3 class="text-xl font-bold text-gray-900">${coloredRequestNumber}</h3>
+                    <h3 class="text-xl font-bold text-gray-900">${request.requestNumber}</h3>
                     <p class="text-gray-600">
                         ${request.itemCount}項目 • 合計数量: ${request.totalQuantity}
                     </p>
@@ -1432,30 +1423,6 @@ function createPickingRequestCard(request) {
     `;
     
     return card;
-}
-
-// Helper function to colorize request number suffix
-function colorizeRequestNumber(requestNumber) {
-    // Extract the last part (e.g., -001, -002, -003)
-    const match = requestNumber.match(/^(.+)(-)(\d+)$/);
-    
-    if (!match) return requestNumber; // Return as-is if pattern doesn't match
-    
-    const prefix = match[1]; // e.g., "NODAPO-20251104"
-    const dash = match[2];   // "-"
-    const suffix = match[3]; // e.g., "001"
-    const suffixNum = parseInt(suffix);
-    
-    let colorClass = '';
-    if (suffixNum === 1) {
-        colorClass = 'text-blue-600 blink-suffix'; // -001 is blue and blinks
-    } else if (suffixNum === 2) {
-        colorClass = 'text-green-700 blink-suffix'; // -002 is dark green and blinks
-    } else {
-        colorClass = 'text-red-600 blink-suffix'; // -003 and above is red and blinks
-    }
-    
-    return `${prefix}<span class="${colorClass}">${dash}${suffix}</span>`;
 }
 
 // Enrich line items with master data (収容数) and calculate box quantities
@@ -2081,12 +2048,8 @@ function filterByStatus(status) {
 }
 
 function filterByDate() {
-    const dateInput = document.getElementById('pickingDateFilter');
-    if (dateInput) {
-        currentDateFilter = dateInput.value;
-        console.log('📅 Date filter changed to:', currentDateFilter);
-        displayPickingRequests();
-    }
+    // Date filtering removed - function kept for compatibility
+    return;
 }
 
 // Refresh function
