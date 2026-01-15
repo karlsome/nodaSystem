@@ -537,7 +537,7 @@ async function handleDeviceCompletion(deviceId, data) {
     const { requestNumber, lineNumber, completedBy } = data;
     
     try {
-        // Use existing completion logic
+        // Use existing completion logic with new inventory-aware handling
         const result = await completeLineItem(requestNumber, lineNumber, completedBy);
         
         // Check if this was a duplicate completion
@@ -546,22 +546,66 @@ async function handleDeviceCompletion(deviceId, data) {
             return; // Don't send notifications for duplicates
         }
         
-        // Send confirmation back to device (red screen)
-        publishDeviceCommand(deviceId, {
-            color: 'red',
-            quantity: null,
-            message: 'Completed'
-        });
-        
-        // Notify tablets
-        connectedTablets.forEach(tabletSocket => {
-            tabletSocket.emit('item-completed', {
-                requestNumber,
-                lineNumber,
-                deviceId,
-                completedBy
+        // ===== NEW: Handle different completion scenarios =====
+        if (result.fullyCompleted) {
+            // SUFFICIENT inventory: Full completion - send RED and keep RED
+            console.log(`🔴 Fully completed - sending RED to device ${deviceId}`);
+            publishDeviceCommand(deviceId, {
+                color: 'red',
+                quantity: null,
+                message: 'Completed'
             });
-        });
+            
+            // Notify tablets
+            connectedTablets.forEach(tabletSocket => {
+                tabletSocket.emit('item-completed', {
+                    requestNumber,
+                    lineNumber,
+                    deviceId,
+                    completedBy,
+                    fullyCompleted: true
+                });
+            });
+        }
+        else if (result.partialComplete || result.insufficientInventory) {
+            // INSUFFICIENT or NONE: Reactivate IoT with remaining quantity
+            const remainingQuantity = result.remaining || result.needed;
+            const remainingBoxQty = await calculateBoxQuantity(result.品番, remainingQuantity);
+            
+            console.log(`🟢 Partial/None inventory - reactivating device ${deviceId} with ${remainingBoxQty} boxes (${remainingQuantity} pieces)`);
+            
+            // Flash RED briefly to acknowledge button press
+            publishDeviceCommand(deviceId, {
+                color: 'red',
+                quantity: null,
+                message: 'Acknowledged'
+            });
+            
+            // After brief delay, send GREEN with remaining quantity
+            setTimeout(() => {
+                publishDeviceCommand(deviceId, {
+                    color: 'green',
+                    quantity: remainingBoxQty,
+                    message: result.partialComplete 
+                        ? `残り ${remainingBoxQty} 箱` 
+                        : '在庫なし'
+                });
+            }, 500); // 500ms delay for visual feedback
+            
+            // Notify tablets about partial completion
+            connectedTablets.forEach(tabletSocket => {
+                tabletSocket.emit('item-partial-completed', {
+                    requestNumber,
+                    lineNumber,
+                    deviceId,
+                    completedBy,
+                    deducted: result.deducted,
+                    remaining: remainingQuantity,
+                    partialComplete: result.partialComplete,
+                    insufficientInventory: result.insufficientInventory
+                });
+            });
+        }
         
     } catch (error) {
         console.error('❌ Error processing device completion:', error);
@@ -939,6 +983,8 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
 // Complete a line item
 async function completeLineItem(requestNumber, lineNumber, completedBy) {
     const collection = db.collection(process.env.COLLECTION_NAME);
+    const submittedDb = client.db("submittedDB");
+    const inventoryCollection = submittedDb.collection('nodaInventoryDB');
     const now = new Date();
     
     // Get the request first to get item details for inventory update
@@ -965,83 +1011,175 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         throw new Error(`Line item status is '${lineItem.status}', expected 'in-progress'`);
     }
     
-    // Update the specific line item - only if currently in-progress
-    const updateResult = await collection.updateOne(
-        { 
-            requestNumber
-        },
+    // ===== NEW: Fetch real-time inventory availability =====
+    console.log(`📊 Checking real-time inventory for ${lineItem.背番号}...`);
+    const inventoryResults = await inventoryCollection.aggregate([
+        { $match: { 背番号: lineItem.背番号 } },
         {
-            $set: {
-                'lineItems.$[elem].status': 'completed',
-                'lineItems.$[elem].completedAt': now,
-                'lineItems.$[elem].completedBy': completedBy,
-                'lineItems.$[elem].updatedAt': now,
-                'updatedAt': now
+            $addFields: {
+                timeStampDate: {
+                    $cond: {
+                        if: { $type: "$timeStamp" },
+                        then: {
+                            $cond: {
+                                if: { $eq: [{ $type: "$timeStamp" }, "string"] },
+                                then: { $dateFromString: { dateString: "$timeStamp" } },
+                                else: "$timeStamp"
+                            }
+                        },
+                        else: new Date()
+                    }
+                }
             }
         },
-        {
-            arrayFilters: [
-                { 
-                    'elem.lineNumber': lineNumber,
-                    'elem.status': 'in-progress'
-                }
-            ]
-        }
-    );
+        { $sort: { timeStampDate: -1 } },
+        { $limit: 1 }
+    ]).toArray();
     
-    if (updateResult.matchedCount === 0) {
-        console.log(`⚠️ Line item ${lineNumber} was already completed by another process.`);
-        return { allCompleted: true, request: request, alreadyCompleted: true };
+    let currentAvailable = 0;
+    if (inventoryResults.length > 0) {
+        const inventoryItem = inventoryResults[0];
+        currentAvailable = inventoryItem.availableQuantity || 0;
     }
     
-    // Create inventory transaction record to match admin backend structure
-    console.log(`✅ Processing completion for ${requestNumber} line ${lineNumber} - creating inventory transaction`);
-    await createInventoryTransaction({
-        背番号: lineItem.背番号,
-        品番: lineItem.品番,
-        pickedQuantity: lineItem.quantity,
-        action: 'Picking',
-        source: `IoT Device ${lineItem.背番号} - ${request.startedBy || completedBy}`,
-        requestNumber: requestNumber,
-        lineNumber: lineNumber,
-        completedBy: completedBy,
-        工場: request.factory || '野田倉庫'  // Use factory from request or default
-    });
+    const requestedQuantity = lineItem.quantity;
+    const actualDeductQuantity = Math.min(currentAvailable, requestedQuantity);
+    const remaining = requestedQuantity - actualDeductQuantity;
     
-    // Check if all line items are completed
-    const updatedRequest = await collection.findOne({ requestNumber });
-    const allCompleted = updatedRequest.lineItems.every(item => item.status === 'completed');
+    console.log(`📦 Inventory Check: Requested=${requestedQuantity}, Available=${currentAvailable}, Will Deduct=${actualDeductQuantity}, Remaining=${remaining}`);
     
-    if (allCompleted) {
-        // Update overall request status to completed
-        await collection.updateOne(
+    // ===== Decide action based on availability =====
+    if (actualDeductQuantity === requestedQuantity) {
+        // SUFFICIENT: Full deduction - mark as completed
+        console.log(`✅ SUFFICIENT inventory - completing line item`);
+        
+        const updateResult = await collection.updateOne(
             { requestNumber },
             {
                 $set: {
-                    status: 'completed',
-                    completedAt: now,
-                    updatedAt: now
+                    'lineItems.$[elem].status': 'completed',
+                    'lineItems.$[elem].completedAt': now,
+                    'lineItems.$[elem].completedBy': completedBy,
+                    'lineItems.$[elem].updatedAt': now,
+                    'updatedAt': now
                 }
+            },
+            {
+                arrayFilters: [
+                    { 
+                        'elem.lineNumber': lineNumber,
+                        'elem.status': 'in-progress'
+                    }
+                ]
             }
         );
         
-        // Release global lock when request is completed
-        if (globalPickingLock.isLocked && globalPickingLock.activeRequestNumber === requestNumber) {
-            globalPickingLock = {
-                isLocked: false,
-                activeRequestNumber: null,
-                startedBy: null,
-                startedAt: null
-            };
-            
-            // Broadcast lock release to all tablets
-            broadcastLockStatus();
+        if (updateResult.matchedCount === 0) {
+            console.log(`⚠️ Line item ${lineNumber} was already completed by another process.`);
+            return { allCompleted: true, request: request, alreadyCompleted: true };
         }
         
-        console.log(`Request ${requestNumber} fully completed! Lock released.`);
+        await createInventoryTransaction({
+            背番号: lineItem.背番号,
+            品番: lineItem.品番,
+            pickedQuantity: actualDeductQuantity,
+            action: 'Picking',
+            source: `IoT Device ${lineItem.背番号} - ${request.startedBy || completedBy}`,
+            requestNumber: requestNumber,
+            lineNumber: lineNumber,
+            completedBy: completedBy,
+            工場: request.factory || '野田倉庫'
+        });
+        
+        // Check if all line items are completed
+        const updatedRequest = await collection.findOne({ requestNumber });
+        const allCompleted = updatedRequest.lineItems.every(item => item.status === 'completed');
+        
+        if (allCompleted) {
+            await collection.updateOne(
+                { requestNumber },
+                {
+                    $set: {
+                        status: 'completed',
+                        completedAt: now,
+                        updatedAt: now
+                    }
+                }
+            );
+            
+            if (globalPickingLock.isLocked && globalPickingLock.activeRequestNumber === requestNumber) {
+                globalPickingLock = {
+                    isLocked: false,
+                    activeRequestNumber: null,
+                    startedBy: null,
+                    startedAt: null
+                };
+                broadcastLockStatus();
+            }
+            
+            console.log(`Request ${requestNumber} fully completed! Lock released.`);
+        }
+        
+        return { 
+            allCompleted, 
+            request: updatedRequest, 
+            fullyCompleted: true,
+            deducted: actualDeductQuantity
+        };
     }
-    
-    return { allCompleted, request: updatedRequest };
+    else if (actualDeductQuantity > 0) {
+        // INSUFFICIENT: Partial deduction - keep as in-progress
+        console.log(`⚠️ INSUFFICIENT inventory - partial deduction only, keeping in-progress`);
+        
+        await createInventoryTransaction({
+            背番号: lineItem.背番号,
+            品番: lineItem.品番,
+            pickedQuantity: actualDeductQuantity,
+            action: 'Picking (Partial)',
+            source: `IoT Device ${lineItem.背番号} - ${request.startedBy || completedBy}`,
+            requestNumber: requestNumber,
+            lineNumber: lineNumber,
+            completedBy: completedBy,
+            工場: request.factory || '野田倉庫'
+        });
+        
+        return {
+            allCompleted: false,
+            request: request,
+            partialComplete: true,
+            deducted: actualDeductQuantity,
+            remaining: remaining,
+            品番: lineItem.品番,
+            背番号: lineItem.背番号
+        };
+    }
+    else {
+        // NONE: Zero inventory - don't deduct, keep as in-progress
+        console.log(`❌ ZERO inventory - no deduction, keeping in-progress`);
+        
+        // Audit trail: Record attempt with zero deduction
+        await createInventoryTransaction({
+            背番号: lineItem.背番号,
+            品番: lineItem.品番,
+            pickedQuantity: 0,
+            action: 'Picking Attempted (No Inventory)',
+            source: `IoT Device ${lineItem.背番号} - ${request.startedBy || completedBy}`,
+            requestNumber: requestNumber,
+            lineNumber: lineNumber,
+            completedBy: completedBy,
+            工場: request.factory || '野田倉庫'
+        });
+        
+        return {
+            allCompleted: false,
+            request: request,
+            insufficientInventory: true,
+            deducted: 0,
+            needed: requestedQuantity,
+            品番: lineItem.品番,
+            背番号: lineItem.背番号
+        };
+    }
 }
 
 // Create inventory transaction to match admin backend structure
@@ -1090,7 +1228,7 @@ async function createInventoryTransaction(transactionData) {
         // Calculate new quantities after picking
         const pickedQuantity = transactionData.pickedQuantity;
         const newPhysicalQuantity = currentPhysical - pickedQuantity;  // Reduce physical stock
-        const newReservedQuantity = currentReserved - pickedQuantity;  // Reduce reserved stock
+        const newReservedQuantity = Math.max(0, currentReserved - pickedQuantity);  // Reduce reserved stock (no negative)
         const newAvailableQuantity = newPhysicalQuantity - newReservedQuantity; // Recalculate available
         
         // Create new transaction record (exact same structure as admin backend)
@@ -1109,7 +1247,7 @@ async function createInventoryTransaction(transactionData) {
             runningQuantity: newPhysicalQuantity,
             lastQuantity: currentPhysical,
             
-            action: `Picking (-${pickedQuantity})`,
+            action: transactionData.action || `Picking (-${pickedQuantity})`,
             source: transactionData.source,
             
             // Optional picking-specific fields
