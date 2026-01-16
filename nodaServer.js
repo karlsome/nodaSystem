@@ -1037,13 +1037,33 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
     ]).toArray();
     
     let currentAvailable = 0;
+    let currentReserved = 0;
     if (inventoryResults.length > 0) {
         const inventoryItem = inventoryResults[0];
         currentAvailable = inventoryItem.availableQuantity || 0;
+        currentReserved = inventoryItem.reservedQuantity || 0;
+    }
+    
+    // ===== CRITICAL FIX: Check if inventory is reserved for THIS request =====
+    const reservationCheck = await inventoryCollection.findOne({
+        背番号: lineItem.背番号,
+        $or: [
+            { requestId: requestNumber },
+            { bulkRequestNumber: requestNumber }
+        ],
+        action: { $regex: /Reservation/ },
+        reservedQuantity: { $gt: 0 }
+    });
+    
+    let pickableQuantity = currentAvailable;
+    if (reservationCheck) {
+        // Use reserved quantity for this request
+        pickableQuantity = reservationCheck.reservedQuantity;
+        console.log(`🔒 Found reservation for request ${requestNumber}: ${pickableQuantity} units reserved`);
     }
     
     const requestedQuantity = lineItem.quantity;
-    const actualDeductQuantity = Math.min(currentAvailable, requestedQuantity);
+    const actualDeductQuantity = Math.min(pickableQuantity, requestedQuantity);
     const remaining = requestedQuantity - actualDeductQuantity;
     
     console.log(`📦 Inventory Check: Requested=${requestedQuantity}, Available=${currentAvailable}, Will Deduct=${actualDeductQuantity}, Remaining=${remaining}`);
@@ -1150,7 +1170,8 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
             deducted: actualDeductQuantity,
             remaining: remaining,
             品番: lineItem.品番,
-            背番号: lineItem.背番号
+            背番号: lineItem.背番号,
+            lineNumber: lineNumber
         };
     }
     else {
@@ -1176,8 +1197,10 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
             insufficientInventory: true,
             deducted: 0,
             needed: requestedQuantity,
+            remaining: requestedQuantity,
             品番: lineItem.品番,
-            背番号: lineItem.背番号
+            背番号: lineItem.背番号,
+            lineNumber: lineNumber
         };
     }
 }
