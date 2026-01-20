@@ -1294,20 +1294,31 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         console.log(`⚠️ [NO INVENTORY] No inventory records found for ${lineItem.背番号}`);
     }
     
-    // ===== CRITICAL: For reserved requests, use physical quantity =====
-    // When inventory is reserved for this request, availableQuantity shows 0 but physicalQuantity shows actual stock
-    let pickableQuantity = currentAvailable;
+    // ===== CRITICAL: For picking, ALWAYS use physical quantity =====
+    // When picking items from the warehouse, we're taking PHYSICAL items, not "available" items
+    // availableQuantity is for RESERVATION tracking (what can be reserved for NEW requests)
+    // physicalQuantity is for PICKING (what's actually in the warehouse to take)
+    // 
+    // Example: Physical=1720, Reserved=1600, Available=120
+    // - We can PICK up to 1720 items (physical stock in warehouse)
+    // - Only 120 can be reserved for NEW requests (available)
+    // - 1600 is already reserved/allocated to existing requests
+    //
+    // The key insight: Picking REDUCES physical stock, not available stock
+    // Available stock is reduced when NEW reservations are made
     
-    console.log(`\n🔍 [RESERVATION CHECK] Checking if inventory is reserved for this request...`);
-    console.log(`   Available=${currentAvailable}, Reserved=${currentReserved}, Physical=${currentPhysical}`);
+    let pickableQuantity = currentPhysical; // ✅ FIXED: Always use physical for picking
     
-    // Check if this inventory is reserved for THIS specific request
-    if (currentAvailable === 0 && currentReserved > 0 && currentPhysical > 0) {
-        // Inventory is reserved, use physical quantity as pickable amount
-        pickableQuantity = currentPhysical;
-        console.log(`🔒 [RESERVED INVENTORY] Using physical quantity as pickable: ${currentPhysical}`);
-    } else {
-        console.log(`⚠️ [NOT RESERVED] Using available quantity: ${currentAvailable}`);
+    console.log(`\n🔍 [PICKING QUANTITY CALCULATION]`);
+    console.log(`   Available (for new reservations)=${currentAvailable}`);
+    console.log(`   Reserved (already allocated)=${currentReserved}`);
+    console.log(`   Physical (actual stock in warehouse)=${currentPhysical}`);
+    console.log(`   ✅ Pickable Quantity: ${pickableQuantity} (using PHYSICAL stock)`);
+    
+    // Sanity check: if physical is 0, we can't pick anything
+    if (currentPhysical === 0) {
+        console.log(`⚠️ [NO PHYSICAL STOCK] Cannot pick - warehouse is empty`);
+        pickableQuantity = 0;
     }
     
     // ===== CRITICAL FIX: Calculate remaining quantity from HELPER, not original lineItem =====
