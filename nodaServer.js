@@ -1539,23 +1539,26 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         await new Promise(resolve => setTimeout(resolve, 500));
         
         const verifyHelper = await helperCollection.findOne({ requestNumber, lineNumber });
-        if (verifyHelper && (verifyHelper.pickedQuantity > lineItem.quantity || verifyHelper.shortfallQuantity > 0)) {
+        // Check if values don't match expected (trigger may have corrupted them)
+        if (verifyHelper && (verifyHelper.pickedQuantity !== lineItem.quantity || verifyHelper.remainingQuantity !== 0 || verifyHelper.shortfallQuantity !== 0 || !verifyHelper.pickingComplete)) {
             console.warn(`\n🚨 [POST-COMPLETE CORRUPTION] Trigger corrupted completed helper!`);
             console.warn(`   pickedQuantity: ${verifyHelper.pickedQuantity} (should be ${lineItem.quantity})`);
+            console.warn(`   remainingQuantity: ${verifyHelper.remainingQuantity} (should be 0)`);
             console.warn(`   shortfallQuantity: ${verifyHelper.shortfallQuantity} (should be 0)`);
+            console.warn(`   pickingComplete: ${verifyHelper.pickingComplete} (should be true)`);
             await helperCollection.updateOne(
                 { requestNumber, lineNumber },
                 {
                     $set: {
                         pickedQuantity: lineItem.quantity,
                         remainingQuantity: 0,
-                        shortfallQuantity: 0,  // CRITICAL: Also reset shortfall
+                        shortfallQuantity: 0,
                         pickingComplete: true,
                         _postUpdateCorrectedAt: new Date().toISOString()
                     }
                 }
             );
-            console.warn(`   ✅ Corrected back to: picked=${lineItem.quantity}, remaining=0, shortfall=0`);
+            console.warn(`   ✅ Corrected back to: picked=${lineItem.quantity}, remaining=0, shortfall=0, complete=true`);
         }
         
         // Check if all line items are completed based on HELPER COLLECTION
@@ -1682,10 +1685,11 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         await new Promise(resolve => setTimeout(resolve, 500));
         
         const verifyHelper = await helperCollection.findOne({ requestNumber, lineNumber });
-        if (verifyHelper && verifyHelper.pickedQuantity > lineItem.quantity) {
+        // Check if values don't match what we EXPECTED to set (trigger may have doubled them)
+        if (verifyHelper && (verifyHelper.pickedQuantity !== newTotalPicked || verifyHelper.remainingQuantity !== newRemaining)) {
             console.warn(`\n🚨🚨🚨 [POST-UPDATE CORRUPTION DETECTED] MongoDB Trigger corrupted helper!`);
-            console.warn(`   Expected pickedQuantity: ${newTotalPicked}`);
-            console.warn(`   Actual pickedQuantity: ${verifyHelper.pickedQuantity}`);
+            console.warn(`   Expected: picked=${newTotalPicked}, remaining=${newRemaining}`);
+            console.warn(`   Actual: picked=${verifyHelper.pickedQuantity}, remaining=${verifyHelper.remainingQuantity}`);
             console.warn(`   Total quantity limit: ${lineItem.quantity}`);
             
             // Re-correct immediately
@@ -1696,11 +1700,22 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
                         pickedQuantity: newTotalPicked,
                         remainingQuantity: newRemaining,
                         _postUpdateCorrectedAt: new Date().toISOString(),
-                        _postUpdateCorrectionReason: `Trigger doubled values: was ${verifyHelper.pickedQuantity}, corrected to ${newTotalPicked}`
+                        _postUpdateCorrectionReason: `Trigger corrupted values: was picked=${verifyHelper.pickedQuantity}/remaining=${verifyHelper.remainingQuantity}, corrected to picked=${newTotalPicked}/remaining=${newRemaining}`
                     }
                 }
             );
             console.warn(`   ✅ Immediately corrected back to: picked=${newTotalPicked}, remaining=${newRemaining}`);
+            
+            // Wait and verify AGAIN (trigger might fire again)
+            await new Promise(resolve => setTimeout(resolve, 300));
+            const reVerify = await helperCollection.findOne({ requestNumber, lineNumber });
+            if (reVerify && (reVerify.pickedQuantity !== newTotalPicked || reVerify.remainingQuantity !== newRemaining)) {
+                console.warn(`   🚨 Second corruption detected! Fixing again...`);
+                await helperCollection.updateOne(
+                    { requestNumber, lineNumber },
+                    { $set: { pickedQuantity: newTotalPicked, remainingQuantity: newRemaining } }
+                );
+            }
         } else {
             console.log(`✅ [POST-UPDATE VERIFY] Helper record integrity confirmed: picked=${verifyHelper?.pickedQuantity}, remaining=${verifyHelper?.remainingQuantity}`);
         }
