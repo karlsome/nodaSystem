@@ -74,6 +74,7 @@ const MQTT_PASSWORD = process.env.MQTT_PASSWORD || '';
 let mqttClient = null;
 const mqttConnectedDevices = new Map(); // deviceId -> last seen timestamp
 const mqttDevices = new Map(); // deviceId -> device info (isOnline, lastSeen, etc.)
+const processedCompletions = new Map(); // Track processed completions: "requestNumber-lineNumber-timestamp" -> true
 
 // Global picking lock state
 let globalPickingLock = {
@@ -82,6 +83,9 @@ let globalPickingLock = {
     startedBy: null,
     startedAt: null
 };
+
+// 🔐 MUTEX: Prevent concurrent inventory transactions for the same item
+const inventoryTransactionLocks = new Map(); // key: "背番号" -> { locked: boolean, queue: [] }
 
 // Global lock management functions
 async function checkGlobalPickingLock() {
@@ -287,9 +291,101 @@ async function connectToMongoDB() {
         await client.connect();
         db = client.db(process.env.DATABASE_NAME);
         console.log('Connected to MongoDB successfully');
+        
+        // 🔍 Set up change stream to monitor status changes
+        setupStatusChangeMonitoring();
+        
+        // 🔍🔍🔍 NEW: Monitor ALL insertions to nodaInventoryDB
+        setupInventoryInsertMonitoring();
     } catch (error) {
         console.error('Failed to connect to MongoDB:', error);
         process.exit(1);
+    }
+}
+
+// 🔍🔍🔍 Monitor ALL insertions to inventory collection
+function setupInventoryInsertMonitoring() {
+    try {
+        const submittedDb = client.db("submittedDB");
+        const inventoryCollection = submittedDb.collection('nodaInventoryDB');
+        const changeStream = inventoryCollection.watch([
+            {
+                $match: {
+                    operationType: 'insert'
+                }
+            }
+        ]);
+        
+        changeStream.on('change', async (change) => {
+            const doc = change.fullDocument;
+            const docId = change.documentKey._id;
+            
+            console.log(`\n🔔🔔🔔 [INVENTORY INSERT DETECTED] 🔔🔔🔔`);
+            console.log(`   Operation: ${change.operationType}`);
+            console.log(`   Document ID: ${docId}`);
+            console.log(`   背番号: ${doc.背番号}`);
+            console.log(`   Action: ${doc.action}`);
+            console.log(`   Picked Quantity: ${doc.physicalQuantity !== undefined ? 'Physical: ' + doc.physicalQuantity : 'N/A'}`);
+            console.log(`   Request: ${doc.requestId}, Line: ${doc.lineNumber}`);
+            console.log(`   TimeStamp: ${doc.timeStamp}`);
+            console.log(`   _insertedBy: ${doc._insertedBy || 'NOT SET (EXTERNAL SOURCE!)'}`);
+            
+            // 🚨 SAFEGUARD: Delete unauthorized insertions (missing our tracking field)
+            if (!doc._insertedBy && doc.action && doc.action.includes('Picking')) {
+                console.log(`\n🚨🚨🚨 [UNAUTHORIZED INSERTION DETECTED] 🚨🚨🚨`);
+                console.log(`   Document ID: ${docId}`);
+                console.log(`   Action: ${doc.action}`);
+                console.log(`   This insertion does NOT have _insertedBy tracking field!`);
+                console.log(`   This is likely from an external source (MongoDB Atlas Trigger?)`);
+                console.log(`   🗑️ DELETING THIS UNAUTHORIZED RECORD...`);
+                
+                try {
+                    const deleteResult = await inventoryCollection.deleteOne({ _id: docId });
+                    if (deleteResult.deletedCount > 0) {
+                        console.log(`   ✅ Successfully deleted unauthorized insertion: ${docId}`);
+                    } else {
+                        console.log(`   ⚠️ Could not delete - record may have already been removed`);
+                    }
+                } catch (deleteError) {
+                    console.error(`   ❌ Failed to delete unauthorized insertion:`, deleteError);
+                }
+            }
+        });
+        
+        console.log('✅ Inventory insertion monitoring active (with unauthorized deletion safeguard)');
+    } catch (error) {
+        console.error('❌ Failed to set up inventory change stream:', error);
+    }
+}
+
+// Monitor all status changes to detect external modifications
+function setupStatusChangeMonitoring() {
+    try {
+        const collection = db.collection(process.env.COLLECTION_NAME);
+        const changeStream = collection.watch([
+            {
+                $match: {
+                    $or: [
+                        { 'updateDescription.updatedFields.status': { $exists: true } },
+                        { 'updateDescription.updatedFields.lineItems.0.status': { $exists: true } }
+                    ]
+                }
+            }
+        ]);
+        
+        changeStream.on('change', (change) => {
+            console.log(`\n🔔🔔🔔 DATABASE STATUS CHANGE DETECTED 🔔🔔🔔`);
+            console.log(`   Operation: ${change.operationType}`);
+            console.log(`   Document ID: ${change.documentKey._id}`);
+            console.log(`   Updated fields:`, change.updateDescription?.updatedFields);
+            console.log(`   Timestamp: ${new Date().toISOString()}`);
+            console.log(`   Stack trace at time of detection:`);
+            console.log(new Error().stack);
+        });
+        
+        console.log('✅ Status change monitoring active');
+    } catch (error) {
+        console.error('❌ Failed to set up change stream:', error);
     }
 }
 
@@ -406,7 +502,14 @@ function initializeMQTT() {
 // Handle incoming MQTT messages
 async function handleMQTTMessage(topic, message) {
     try {
-        const data = JSON.parse(message.toString());
+        // Ignore empty messages (from clearing retained messages)
+        const messageString = message.toString();
+        if (!messageString || messageString.trim() === '') {
+            console.log(`📭 Received empty MQTT message on ${topic} - ignoring (likely cleared retained message)`);
+            return;
+        }
+        
+        const data = JSON.parse(messageString);
         const topicParts = topic.split('/');
         const deviceId = topicParts[2];
         const messageType = topicParts[3];
@@ -532,13 +635,46 @@ async function checkDeviceAssignments(deviceId) {
 
 // Handle device task completion via MQTT
 async function handleDeviceCompletion(deviceId, data) {
-    console.log(`✅ Device ${deviceId} completed task:`, data);
+    const traceId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    console.log(`\n========== TRACE START [${traceId}] ==========`);
+    console.log(`✅ [${traceId}] handleDeviceCompletion CALLED for device ${deviceId}:`, data);
     
-    const { requestNumber, lineNumber, completedBy } = data;
+    const { requestNumber, lineNumber, completedBy, timestamp } = data;
+    
+    // ===== DUPLICATE DETECTION: Check if this completion was already processed =====
+    const completionKey = `${requestNumber}-${lineNumber}-${timestamp}`;
+    console.log(`🔍 Checking completion key: ${completionKey}`);
+    console.log(`📋 Currently tracked completions: ${processedCompletions.size} entries`);
+    
+    if (processedCompletions.has(completionKey)) {
+        console.log(`⚠️ DUPLICATE completion detected for ${completionKey} - IGNORING`);
+        return; // Skip duplicate processing
+    }
+    
+    // Mark this completion as processed
+    processedCompletions.set(completionKey, true);
+    console.log(`✅ Marked ${completionKey} as processed`);
+    
+    // ===== CRITICAL: Clear retained completion message to prevent re-delivery =====
+    mqttClient.publish(`noda/device/${deviceId}/completion`, "", { qos: 1, retain: true }, (err) => {
+        if (err) {
+            console.log(`⚠️ Failed to clear retained completion message for ${deviceId}`);
+        } else {
+            console.log(`🧹 Cleared retained completion message for ${deviceId}`);
+        }
+    });
+    
+    // Clean up old entries (keep only last 100)
+    if (processedCompletions.size > 100) {
+        const firstKey = processedCompletions.keys().next().value;
+        processedCompletions.delete(firstKey);
+    }
     
     try {
-        // Use existing completion logic
+        // Use existing completion logic with new inventory-aware handling
+        console.log(`📞 [${traceId}] CALLING completeLineItem(${requestNumber}, ${lineNumber}, ${completedBy})`);
         const result = await completeLineItem(requestNumber, lineNumber, completedBy);
+        console.log(`📞 [${traceId}] completeLineItem RETURNED:`, { fullyCompleted: result.fullyCompleted, partialComplete: result.partialComplete, insufficientInventory: result.insufficientInventory });
         
         // Check if this was a duplicate completion
         if (result.alreadyCompleted) {
@@ -546,22 +682,81 @@ async function handleDeviceCompletion(deviceId, data) {
             return; // Don't send notifications for duplicates
         }
         
-        // Send confirmation back to device (red screen)
-        publishDeviceCommand(deviceId, {
-            color: 'red',
-            quantity: null,
-            message: 'Completed'
+        // ===== NEW: Handle different completion scenarios using HELPER COLLECTION =====
+        const submittedDb = client.db("submittedDB");
+        const helperCollection = submittedDb.collection('nodaRequestHelperDB');
+        const helperRecord = await helperCollection.findOne({ requestNumber, lineNumber });
+        
+        console.log(`📊 Helper record state:`, {
+            pickingComplete: helperRecord?.pickingComplete,
+            pickedQuantity: helperRecord?.pickedQuantity,
+            remainingQuantity: helperRecord?.remainingQuantity
         });
         
-        // Notify tablets
-        connectedTablets.forEach(tabletSocket => {
-            tabletSocket.emit('item-completed', {
-                requestNumber,
-                lineNumber,
-                deviceId,
-                completedBy
+        if (result.fullyCompleted || helperRecord?.pickingComplete) {
+            // SUFFICIENT inventory: Full completion - send RED and keep RED
+            console.log(`🔴 Fully completed - sending RED to device ${deviceId}`);
+            publishDeviceCommand(deviceId, {
+                color: 'red',
+                quantity: null,
+                message: 'Completed'
             });
-        });
+            
+            // Notify tablets
+            connectedTablets.forEach(tabletSocket => {
+                tabletSocket.emit('item-completed', {
+                    requestNumber,
+                    lineNumber,
+                    deviceId,
+                    completedBy,
+                    fullyCompleted: true
+                });
+            });
+        }
+        else if (result.partialComplete || result.insufficientInventory || (helperRecord && helperRecord.remainingQuantity > 0)) {
+            // INSUFFICIENT or NONE: Reactivate IoT with remaining quantity from HELPER
+            const remainingQuantity = helperRecord ? helperRecord.remainingQuantity : (result.remaining || result.needed);
+            const remainingBoxQty = await calculateBoxQuantity(result.品番, remainingQuantity);
+            
+            console.log(`📦 Using HELPER COLLECTION data: ${remainingQuantity} pieces = ${remainingBoxQty} boxes remaining`);
+            
+            console.log(`🟢 Partial/None inventory - reactivating device ${deviceId} with ${remainingBoxQty} boxes (${remainingQuantity} pieces)`);
+            
+            // Flash RED briefly to acknowledge button press
+            publishDeviceCommand(deviceId, {
+                color: 'red',
+                quantity: null,
+                message: 'Acknowledged'
+            });
+            
+            // After brief delay, send GREEN with remaining quantity
+            setTimeout(() => {
+                publishDeviceCommand(deviceId, {
+                    color: 'green',
+                    quantity: remainingBoxQty,
+                    message: result.partialComplete 
+                        ? `残り ${remainingBoxQty} 箱` 
+                        : '在庫なし',
+                    requestNumber: requestNumber,  // ← CRITICAL: ESP32 needs this!
+                    lineNumber: lineNumber,        // ← CRITICAL: ESP32 needs this!
+                    品番: result.品番               // ← Include product number
+                });
+            }, 500); // 500ms delay for visual feedback
+            
+            // Notify tablets about partial completion
+            connectedTablets.forEach(tabletSocket => {
+                tabletSocket.emit('item-partial-completed', {
+                    requestNumber,
+                    lineNumber,
+                    deviceId,
+                    completedBy,
+                    deducted: result.deducted,
+                    remaining: remainingQuantity,
+                    partialComplete: result.partialComplete,
+                    insufficientInventory: result.insufficientInventory
+                });
+            });
+        }
         
     } catch (error) {
         console.error('❌ Error processing device completion:', error);
@@ -577,7 +772,7 @@ async function handleDeviceCompletion(deviceId, data) {
 
 // Handle device heartbeat
 function handleDeviceHeartbeat(deviceId, data) {
-    console.log(`💓 Heartbeat from device ${deviceId} - RSSI: ${data.rssi || 'N/A'}`);
+    //console.log(`💓 Heartbeat from device ${deviceId} - RSSI: ${data.rssi || 'N/A'}`);
     // Just update the tracking - heartbeat is for connection monitoring
 }
 
@@ -673,7 +868,9 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Device completion notification
+    // Device completion notification - DISABLED (now using MQTT exclusively)
+    // This handler caused duplicate transactions when ESP32 devices sent completion via both MQTT and Socket.IO
+    /*
     socket.on('item-completed', async (data) => {
         const { deviceId, requestNumber, lineNumber, completedBy } = data;
         console.log(`Item completed by device ${deviceId}: ${requestNumber} line ${lineNumber}`);
@@ -712,6 +909,7 @@ io.on('connection', (socket) => {
             socket.emit('error', { message: 'Failed to complete item' });
         }
     });
+    */
 
     // Handle disconnection
     socket.on('disconnect', () => {
@@ -848,6 +1046,38 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
         // Get updated request with new status
         const updatedRequest = await collection.findOne({ requestNumber });
         
+        // ===== CREATE HELPER RECORDS for picking progress tracking =====
+        console.log(`📝 Creating helper records in nodaRequestHelperDB for ${requestNumber}`);
+        const submittedDb = client.db("submittedDB");
+        const helperCollection = submittedDb.collection('nodaRequestHelperDB');
+        
+        // Clear any existing helper records for this request
+        await helperCollection.deleteMany({ requestNumber });
+        
+        // Create helper record for each line item
+        const helperRecords = updatedRequest.lineItems.map(item => ({
+            requestNumber,
+            lineNumber: item.lineNumber,
+            背番号: item.背番号,
+            品番: item.品番,
+            totalQuantity: item.quantity,
+            requestedQuantity: item.quantity,
+            pickedQuantity: 0,
+            remainingQuantity: item.quantity,
+            reservedQuantity: item.reservedQuantity || 0,
+            shortfallQuantity: item.shortfallQuantity || 0,
+            pickingComplete: false,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            startedBy: startedBy,
+            factory: factory || '野田倉庫'
+        }));
+        
+        if (helperRecords.length > 0) {
+            await helperCollection.insertMany(helperRecords);
+            console.log(`✅ Created ${helperRecords.length} helper records for tracking picking progress`);
+        }
+        
         // Explicitly notify ESP32 devices of the new picking order
         console.log(`🚀 Start picking triggered for request ${requestNumber} by ${startedBy}`);
         await notifyESP32DevicesForRequest(requestNumber, startedBy);
@@ -938,8 +1168,31 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
 
 // Complete a line item
 async function completeLineItem(requestNumber, lineNumber, completedBy) {
+    const callStack = new Error().stack;
+    console.log(`\n🔵 completeLineItem ENTERED for request ${requestNumber}, line ${lineNumber}`);
+    console.log(`📍 Called from:`, callStack.split('\n')[2].trim());
+    
     const collection = db.collection(process.env.COLLECTION_NAME);
+    const submittedDb = client.db("submittedDB");
+    const inventoryCollection = submittedDb.collection('nodaInventoryDB');
+    const helperCollection = submittedDb.collection('nodaRequestHelperDB');
     const now = new Date();
+    
+    // ===== CHECK HELPER COLLECTION FIRST - it's the source of truth for picking =====
+    const helperRecord = await helperCollection.findOne({ requestNumber, lineNumber });
+    console.log(`\n📊 [HELPER CHECK] Helper record for ${requestNumber} line ${lineNumber}:`, helperRecord ? {
+        pickedQuantity: helperRecord.pickedQuantity,
+        remainingQuantity: helperRecord.remainingQuantity,
+        totalQuantity: helperRecord.totalQuantity,
+        pickingComplete: helperRecord.pickingComplete
+    } : 'NOT FOUND');
+    
+    if (helperRecord && helperRecord.pickingComplete) {
+        console.log(`⚠️ Helper collection shows line ${lineNumber} already complete - ignoring duplicate`);
+        console.log(`   Picked: ${helperRecord.pickedQuantity}/${helperRecord.totalQuantity}`);
+        console.log(`   CompletedAt: ${helperRecord.completedAt}`);
+        return { allCompleted: true, alreadyCompleted: true };
+    }
     
     // Get the request first to get item details for inventory update
     const request = await collection.findOne({ requestNumber });
@@ -953,11 +1206,7 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         throw new Error('Line item not found');
     }
     
-    // Check if line item is already completed - prevent duplicate processing
-    if (lineItem.status === 'completed') {
-        console.log(`⚠️ Line item ${lineNumber} for request ${requestNumber} is already completed. Ignoring duplicate completion.`);
-        return { allCompleted: true, request: request, alreadyCompleted: true };
-    }
+    console.log(`📋 [LINE ITEM] Status: ${lineItem.status}, Original Quantity: ${lineItem.quantity}, 品番: ${lineItem.品番}, 背番号: ${lineItem.背番号}`);
     
     // Only process if status is 'in-progress'
     if (lineItem.status !== 'in-progress') {
@@ -965,87 +1214,487 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         throw new Error(`Line item status is '${lineItem.status}', expected 'in-progress'`);
     }
     
-    // Update the specific line item - only if currently in-progress
-    const updateResult = await collection.updateOne(
-        { 
-            requestNumber
-        },
-        {
-            $set: {
-                'lineItems.$[elem].status': 'completed',
-                'lineItems.$[elem].completedAt': now,
-                'lineItems.$[elem].completedBy': completedBy,
-                'lineItems.$[elem].updatedAt': now,
-                'updatedAt': now
-            }
-        },
-        {
-            arrayFilters: [
-                { 
-                    'elem.lineNumber': lineNumber,
-                    'elem.status': 'in-progress'
-                }
-            ]
-        }
-    );
-    
-    if (updateResult.matchedCount === 0) {
-        console.log(`⚠️ Line item ${lineNumber} was already completed by another process.`);
-        return { allCompleted: true, request: request, alreadyCompleted: true };
+    // ===== NEW: Check if we already processed a partial deduction =====
+    // If completedAt exists but status is still in-progress, this is a SECOND button press waiting for more inventory
+    if (lineItem.completedAt) {
+        console.log(`⚠️ Line item ${lineNumber} already has completedAt but waiting for more inventory. Creating audit trail only.`);
+        
+        // Create audit trail showing user pressed button again but inventory still insufficient
+        console.log(`🔵 [RETRY PATH] Calling createInventoryTransaction with 0 quantity for ${lineItem.背番号}`);
+        await createInventoryTransaction({
+            背番号: lineItem.背番号,
+            品番: lineItem.品番,
+            pickedQuantity: 0,
+            action: 'Picking Attempted (Insufficient Inventory - Retry)',
+            source: `IoT Device ${lineItem.背番号} - ${completedBy}`,
+            requestNumber: requestNumber,
+            lineNumber: lineNumber,
+            completedBy: completedBy,
+            工場: request.工場 || '野田倉庫'
+        });
+        
+        // Calculate remaining needed based on original quantity minus what was already picked
+        const alreadyPicked = (lineItem.reservedQuantity || 0);
+        const remainingNeeded = lineItem.quantity - alreadyPicked;
+        
+        return {
+            allCompleted: false,
+            request: request,
+            insufficientInventory: true,
+            deducted: 0,
+            needed: remainingNeeded,
+            remaining: remainingNeeded,
+            品番: lineItem.品番,
+            背番号: lineItem.背番号,
+            lineNumber: lineNumber,
+            isRetry: true
+        };
     }
     
-    // Create inventory transaction record to match admin backend structure
-    console.log(`✅ Processing completion for ${requestNumber} line ${lineNumber} - creating inventory transaction`);
-    await createInventoryTransaction({
-        背番号: lineItem.背番号,
-        品番: lineItem.品番,
-        pickedQuantity: lineItem.quantity,
-        action: 'Picking',
-        source: `IoT Device ${lineItem.背番号} - ${request.startedBy || completedBy}`,
-        requestNumber: requestNumber,
-        lineNumber: lineNumber,
-        completedBy: completedBy,
-        工場: request.factory || '野田倉庫'  // Use factory from request or default
-    });
+    // ===== NEW: Fetch real-time inventory availability =====
+    console.log(`\n📊 [INVENTORY CHECK] Fetching real-time inventory for 背番号: ${lineItem.背番号}...`);
+    const inventoryResults = await inventoryCollection.aggregate([
+        { $match: { 背番号: lineItem.背番号 } },
+        {
+            $addFields: {
+                timeStampDate: {
+                    $cond: {
+                        if: { $type: "$timeStamp" },
+                        then: {
+                            $cond: {
+                                if: { $eq: [{ $type: "$timeStamp" }, "string"] },
+                                then: { $dateFromString: { dateString: "$timeStamp" } },
+                                else: "$timeStamp"
+                            }
+                        },
+                        else: new Date()
+                    }
+                }
+            }
+        },
+        { $sort: { timeStampDate: -1 } },
+        { $limit: 1 }
+    ]).toArray();
     
-    // Check if all line items are completed
-    const updatedRequest = await collection.findOne({ requestNumber });
-    const allCompleted = updatedRequest.lineItems.every(item => item.status === 'completed');
+    let currentAvailable = 0;
+    let currentReserved = 0;
+    let currentPhysical = 0;
+    if (inventoryResults.length > 0) {
+        const inventoryItem = inventoryResults[0];
+        currentAvailable = inventoryItem.availableQuantity || 0;
+        currentReserved = inventoryItem.reservedQuantity || 0;
+        currentPhysical = inventoryItem.physicalQuantity || 0;
+        console.log(`📊 [LATEST INVENTORY] 背番号: ${inventoryItem.背番号}`);
+        console.log(`   Physical Quantity: ${currentPhysical}`);
+        console.log(`   Reserved Quantity: ${currentReserved}`);
+        console.log(`   Available Quantity: ${currentAvailable}`);
+        console.log(`   Last Action: ${inventoryItem.action}`);
+        console.log(`   Last Timestamp: ${inventoryItem.timeStamp}`);
+    } else {
+        console.log(`⚠️ [NO INVENTORY] No inventory records found for ${lineItem.背番号}`);
+    }
     
-    if (allCompleted) {
-        // Update overall request status to completed
-        await collection.updateOne(
+    // ===== CRITICAL: For reserved requests, use physical quantity =====
+    // When inventory is reserved for this request, availableQuantity shows 0 but physicalQuantity shows actual stock
+    let pickableQuantity = currentAvailable;
+    
+    console.log(`\n🔍 [RESERVATION CHECK] Checking if inventory is reserved for this request...`);
+    console.log(`   Available=${currentAvailable}, Reserved=${currentReserved}, Physical=${currentPhysical}`);
+    
+    // Check if this inventory is reserved for THIS specific request
+    if (currentAvailable === 0 && currentReserved > 0 && currentPhysical > 0) {
+        // Inventory is reserved, use physical quantity as pickable amount
+        pickableQuantity = currentPhysical;
+        console.log(`🔒 [RESERVED INVENTORY] Using physical quantity as pickable: ${currentPhysical}`);
+    } else {
+        console.log(`⚠️ [NOT RESERVED] Using available quantity: ${currentAvailable}`);
+    }
+    
+    // ===== CRITICAL FIX: Calculate remaining quantity from HELPER, not original lineItem =====
+    const previouslyPicked = helperRecord ? helperRecord.pickedQuantity : 0;
+    const remainingNeeded = lineItem.quantity - previouslyPicked;
+    
+    console.log(`\n🎯 [QUANTITY CALCULATION]`);
+    console.log(`   Original Requested: ${lineItem.quantity}`);
+    console.log(`   Previously Picked: ${previouslyPicked}`);
+    console.log(`   Remaining Needed: ${remainingNeeded}`);
+    console.log(`   Physical Available Now: ${pickableQuantity}`);
+    
+    // ===== PREVENT NEGATIVE DEDUCTIONS: Only deduct what's physically available =====
+    const actualDeductQuantity = Math.max(0, Math.min(pickableQuantity, remainingNeeded));
+    const remaining = remainingNeeded - actualDeductQuantity;
+    
+    console.log(`\n💡 [DEDUCTION DECISION]`);
+    console.log(`   Will Deduct: ${actualDeductQuantity} (min of ${pickableQuantity} physical and ${remainingNeeded} needed)`);
+    console.log(`   Will Remain After: ${remaining}`);
+    console.log(`   Deduction Type: ${actualDeductQuantity === 0 ? '🔴 ZERO (Audit Only)' : actualDeductQuantity < remainingNeeded ? '🟡 PARTIAL' : '🟢 FULL'}`);
+
+    
+    // ===== Decide action based on availability =====
+    console.log(`\n🔀 [DECISION POINT] actualDeductQuantity=${actualDeductQuantity}, remainingNeeded=${remainingNeeded}`);
+    
+    if (actualDeductQuantity === remainingNeeded && remainingNeeded > 0) {
+        // SUFFICIENT: Full deduction - mark as completed
+        console.log(`\n✅✅✅ [SUFFICIENT PATH] Full inventory available ✅✅✅`);
+        console.log(`   Deducting: ${actualDeductQuantity}`);
+        console.log(`   This will complete the line item`);
+
+        
+        const updateResult = await collection.updateOne(
             { requestNumber },
             {
                 $set: {
-                    status: 'completed',
+                    'lineItems.$[elem].status': 'completed',
+                    'lineItems.$[elem].completedAt': now,
+                    'lineItems.$[elem].completedBy': completedBy,
+                    'lineItems.$[elem].updatedAt': now,
+                    'updatedAt': now
+                }
+            },
+            {
+                arrayFilters: [
+                    { 
+                        'elem.lineNumber': lineNumber,
+                        'elem.status': 'in-progress'
+                    }
+                ]
+            }
+        );
+        
+        if (updateResult.matchedCount === 0) {
+            console.log(`⚠️ Line item ${lineNumber} was already completed by another process.`);
+            return { allCompleted: true, request: request, alreadyCompleted: true };
+        }
+        
+        console.log(`🟢 [SUFFICIENT PATH] Calling createInventoryTransaction with ${actualDeductQuantity} quantity for ${lineItem.背番号}`);
+        console.log(`   Action: 'Picking' (Full)`);
+        console.log(`   This is INSERT #${Date.now()}`);
+        await createInventoryTransaction({
+            背番号: lineItem.背番号,
+            品番: lineItem.品番,
+            pickedQuantity: actualDeductQuantity,
+            action: 'Picking',
+            source: `IoT Device ${lineItem.背番号} - ${request.startedBy || completedBy}`,
+            requestNumber: requestNumber,
+            lineNumber: lineNumber,
+            completedBy: completedBy,
+            工場: request.factory || '野田倉庫'
+        });
+        
+        // ===== UPDATE HELPER COLLECTION - mark as complete =====
+        const submittedDb = client.db("submittedDB");
+        const helperCollection = submittedDb.collection('nodaRequestHelperDB');
+        
+        await helperCollection.updateOne(
+            { requestNumber, lineNumber },
+            {
+                $set: {
+                    pickedQuantity: lineItem.quantity,
+                    remainingQuantity: 0,
+                    pickingComplete: true,
                     completedAt: now,
+                    completedBy: completedBy,
                     updatedAt: now
+                }
+            },
+            { upsert: true }
+        );
+        
+        console.log(`✅ Helper collection updated - marked as COMPLETE (all ${lineItem.quantity} picked)`);
+        
+        // Check if all line items are completed based on HELPER COLLECTION
+        const allHelperRecords = await helperCollection.find({ requestNumber }).toArray();
+        const allCompleted = allHelperRecords.every(h => h.pickingComplete);
+        const anyWithShortfall = allHelperRecords.some(h => h.shortfallQuantity > 0);
+        
+        console.log(`🔍 Completion check using HELPER COLLECTION:`);
+        console.log(`   Total line items: ${allHelperRecords.length}`);
+        console.log(`   Completed items: ${allHelperRecords.filter(h => h.pickingComplete).length}`);
+        
+        console.log(`🔍 Request completion check:`);
+        console.log(`   All items completed: ${allCompleted}`);
+        console.log(`   Any with shortfall: ${anyWithShortfall}`);
+        
+        if (allCompleted && !anyWithShortfall) {
+            console.log(`✅ All items completed with NO shortfalls - completing request`);
+            await collection.updateOne(
+                { requestNumber },
+                {
+                    $set: {
+                        status: 'completed',
+                        completedAt: now,
+                        updatedAt: now
+                    }
+                }
+            );
+            
+            if (globalPickingLock.isLocked && globalPickingLock.activeRequestNumber === requestNumber) {
+                globalPickingLock = {
+                    isLocked: false,
+                    activeRequestNumber: null,
+                    startedBy: null,
+                    startedAt: null
+                };
+                broadcastLockStatus();
+            }
+            
+            console.log(`✅ Request ${requestNumber} fully completed! Lock released.`);
+        } else if (allCompleted && anyWithShortfall) {
+            console.log(`⚠️⚠️⚠️ NOT completing request - all items processed but ${allHelperRecords.filter(h => h.shortfallQuantity > 0).length} items have shortfalls!`);
+            console.log(`   Request status remains: in-progress (based on helper collection)`);
+        }
+        
+        return { 
+            allCompleted, 
+            request: request,
+            fullyCompleted: true,
+            deducted: actualDeductQuantity
+        };
+    }
+    else if (actualDeductQuantity > 0 && actualDeductQuantity < remainingNeeded) {
+        // INSUFFICIENT: Partial deduction - keep as in-progress
+        console.log(`\n⚠️⚠️⚠️ [INSUFFICIENT PATH] Partial inventory only ⚠️⚠️⚠️`);
+        console.log(`   Requested: ${remainingNeeded} (remaining from original ${lineItem.quantity})`);
+        console.log(`   Available: ${actualDeductQuantity}`);
+        console.log(`   Will keep line item as 'in-progress' after partial pick`);
+
+        
+        // ===== UPDATE HELPER COLLECTION for picking progress =====
+        const submittedDb = client.db("submittedDB");
+        const helperCollection = submittedDb.collection('nodaRequestHelperDB');
+        
+        // Get current helper record
+        const currentHelper = await helperCollection.findOne({ requestNumber, lineNumber });
+        const previouslyPicked = currentHelper ? currentHelper.pickedQuantity : 0;
+        const newTotalPicked = previouslyPicked + actualDeductQuantity;
+        const newRemaining = lineItem.quantity - newTotalPicked;
+        
+        console.log(`\n📝 [HELPER UPDATE] Updating progress in helper collection:`);
+        console.log(`   Previously Picked: ${previouslyPicked}`);
+        console.log(`   This Pick: ${actualDeductQuantity}`);
+        console.log(`   New Total Picked: ${newTotalPicked}`);
+        console.log(`   New Remaining: ${newRemaining}`);
+        console.log(`   Picking Complete: false`);
+
+        
+        // Update helper record with new pick
+        await helperCollection.updateOne(
+            { requestNumber, lineNumber },
+            {
+                $set: {
+                    pickedQuantity: newTotalPicked,
+                    remainingQuantity: newRemaining,
+                    pickingComplete: false,
+                    lastPickedAt: now,
+                    lastPickedBy: completedBy,
+                    updatedAt: now
+                }
+            },
+            { upsert: true }
+        );
+        
+        console.log(`✅ [HELPER UPDATE] Helper collection updated successfully`);
+        
+        // ===== CRITICAL: Update MAIN REQUEST to keep lineItem as 'in-progress' =====
+        console.log(`\n🔒 [MAIN REQUEST UPDATE] Explicitly setting main request lineItem ${lineNumber} to 'in-progress'`);
+        await collection.updateOne(
+            { requestNumber, 'lineItems.lineNumber': lineNumber },
+            {
+                $set: {
+                    'lineItems.$.status': 'in-progress',
+                    'lineItems.$.updatedAt': now,
+                    updatedAt: now
+                },
+                $unset: {
+                    'lineItems.$.completedAt': "",
+                    'lineItems.$.completedBy': ""
                 }
             }
         );
         
-        // Release global lock when request is completed
-        if (globalPickingLock.isLocked && globalPickingLock.activeRequestNumber === requestNumber) {
-            globalPickingLock = {
-                isLocked: false,
-                activeRequestNumber: null,
-                startedBy: null,
-                startedAt: null
-            };
-            
-            // Broadcast lock release to all tablets
-            broadcastLockStatus();
-        }
+        console.log(`✅ [MAIN REQUEST UPDATE] LineItem status forced to 'in-progress', completedAt/completedBy removed`);
         
-        console.log(`Request ${requestNumber} fully completed! Lock released.`);
+        // Also ensure REQUEST status is 'in-progress'
+        console.log(`🔒 [REQUEST UPDATE] Ensuring request ${requestNumber} status is 'in-progress'`);
+        await collection.updateOne(
+            { requestNumber },
+            {
+                $set: {
+                    status: 'in-progress',
+                    updatedAt: now
+                },
+                $unset: {
+                    completedAt: ""
+                }
+            }
+        );
+        
+        console.log(`✅ [REQUEST UPDATE] Request status forced to 'in-progress', completedAt removed`);
+        
+        console.log(`\n💾💾💾 [INVENTORY INSERT] Creating inventory transaction...`);
+        console.log(`   INSERT TYPE: Partial Pick`);
+        console.log(`   Quantity: ${actualDeductQuantity}`);
+        console.log(`   Action: 'Picking (Partial)'`);
+        console.log(`   Background: ${previouslyPicked} already picked, ${newRemaining} still remaining`);
+        console.log(`   This is INSERT #${Date.now()}`);
+        
+        await createInventoryTransaction({
+            背番号: lineItem.背番号,
+            品番: lineItem.品番,
+            pickedQuantity: actualDeductQuantity,
+            action: 'Picking (Partial)',
+            source: `IoT Device ${lineItem.背番号} - ${request.startedBy || completedBy}`,
+            requestNumber: requestNumber,
+            lineNumber: lineNumber,
+            completedBy: completedBy,
+            工場: request.factory || '野田倉庫'
+        });
+        
+        console.log(`✅ [INVENTORY INSERT] Partial pick transaction inserted successfully`);
+        
+        console.log(`\n⚠️⚠️⚠️ [INSUFFICIENT SUMMARY] Partial pick recorded in helper collection`);
+        console.log(`   Deducted This Time: ${actualDeductQuantity}`);
+        console.log(`   Total Picked So Far: ${newTotalPicked}/${lineItem.quantity}`);
+        console.log(`   Still Remaining: ${newRemaining}`);
+        console.log(`   Main request lineItem kept as 'in-progress'`);
+        console.log(`   Waiting for inventory replenishment or next pick attempt`);
+        
+        console.log(`🔵 completeLineItem EXITING with partialComplete=true, deducted=${actualDeductQuantity}, remaining=${newRemaining}`);
+        return {
+            allCompleted: false,
+            request: request,
+            partialComplete: true,
+            deducted: actualDeductQuantity,
+            remaining: newRemaining,
+            totalPicked: newTotalPicked,
+            品番: lineItem.品番,
+            背番号: lineItem.背番号,
+            lineNumber: lineNumber
+        };
     }
-    
-    return { allCompleted, request: updatedRequest };
+    else {
+        // NONE: Zero inventory - don't deduct, keep as in-progress, AUDIT ONLY
+        console.log(`\n❌❌❌ [ZERO PATH] No physical inventory available ❌❌❌`);
+        console.log(`   Requested: ${remainingNeeded} (remaining from original ${lineItem.quantity})`);
+        console.log(`   Physical Available: 0`);
+        console.log(`   Will insert 0 deduction for AUDIT PURPOSES ONLY`);
+        console.log(`   Reason: Cannot deduct from empty inventory - prevents negative stock`);
+        
+        // ===== CRITICAL: Keep line item and request as 'in-progress' =====
+        console.log(`\n🔒 [ZERO PATH - MAIN REQUEST UPDATE] Keeping lineItem ${lineNumber} as 'in-progress'`);
+        await collection.updateOne(
+            { requestNumber, 'lineItems.lineNumber': lineNumber },
+            {
+                $set: {
+                    'lineItems.$.status': 'in-progress',
+                    'lineItems.$.updatedAt': now,
+                    updatedAt: now
+                },
+                $unset: {
+                    'lineItems.$.completedAt': "",
+                    'lineItems.$.completedBy': ""
+                }
+            }
+        );
+        console.log(`✅ [ZERO PATH] LineItem status forced to 'in-progress', completedAt/completedBy removed`);
+        
+        // Also ensure REQUEST status is 'in-progress'
+        console.log(`🔒 [ZERO PATH - REQUEST UPDATE] Ensuring request ${requestNumber} status is 'in-progress'`);
+        await collection.updateOne(
+            { requestNumber },
+            {
+                $set: {
+                    status: 'in-progress',
+                    updatedAt: now
+                },
+                $unset: {
+                    completedAt: ""
+                }
+            }
+        );
+        console.log(`✅ [ZERO PATH] Request status forced to 'in-progress', completedAt removed`);
+        
+        // Audit trail: Record attempt with zero deduction
+        console.log(`\n💾💾💾 [INVENTORY INSERT] Creating ZERO audit transaction...`);
+        console.log(`   INSERT TYPE: Zero Deduction (Audit Only)`);
+        console.log(`   Quantity: 0`);
+        console.log(`   Action: 'Picking Attempted (No Inventory)'`);
+        console.log(`   Background: User pressed button but physical inventory is 0`);
+        console.log(`   This is INSERT #${Date.now()}`);
+        
+        await createInventoryTransaction({
+            背番号: lineItem.背番号,
+            品番: lineItem.品番,
+            pickedQuantity: 0,
+            action: 'Picking Attempted (No Inventory)',
+            source: `IoT Device ${lineItem.背番号} - ${request.startedBy || completedBy}`,
+            requestNumber: requestNumber,
+            lineNumber: lineNumber,
+            completedBy: completedBy,
+            工場: request.factory || '野田倉庫'
+        });
+        
+        console.log(`✅ [INVENTORY INSERT] Zero audit transaction inserted successfully`);
+        console.log(`   Purpose: Track button press attempt when inventory is empty`);
+        console.log(`   Physical inventory remains at 0 (no negative values)`);
+        
+        console.log(`\n❌ [ZERO SUMMARY] Cannot pick - waiting for inventory replenishment`);
+        console.log(`   Still Needed: ${remainingNeeded}`);
+        console.log(`   Physical Stock: 0`);
+        console.log(`   Next Step: Add inventory, then press button again`);
+        
+        return {
+            allCompleted: false,
+            request: request,
+            insufficientInventory: true,
+            deducted: 0,
+            needed: remainingNeeded,
+            remaining: remainingNeeded,
+            品番: lineItem.品番,
+            背番号: lineItem.背番号,
+            lineNumber: lineNumber
+        };
+    }
 }
 
 // Create inventory transaction to match admin backend structure
 async function createInventoryTransaction(transactionData) {
+    const callStack = new Error().stack;
+    const traceId = `INV-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+    const lockKey = `${transactionData.背番号}-${transactionData.requestNumber}-${transactionData.lineNumber}`;
+    
+    // 🔐 MUTEX CHECK: Prevent duplicate concurrent transactions
+    if (inventoryTransactionLocks.has(lockKey)) {
+        console.log(`\n🚫🚫🚫 [DUPLICATE BLOCKED] Transaction already in progress for ${lockKey} 🚫🚫🚫`);
+        console.log(`   This call would have created a DUPLICATE insertion!`);
+        console.log(`   TraceId: ${traceId}`);
+        console.log(`   Action: ${transactionData.action}`);
+        console.log(`   Quantity: ${transactionData.pickedQuantity}`);
+        console.log(callStack);
+        return { blocked: true, reason: 'Duplicate transaction blocked by mutex' };
+    }
+    
+    // Set lock
+    inventoryTransactionLocks.set(lockKey, { traceId, startedAt: Date.now() });
+    console.log(`🔐 [MUTEX] Lock acquired for ${lockKey}`);
+    
+    console.log(`\n💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾`);
+    console.log(`[${traceId}] ✨ createInventoryTransaction FUNCTION CALLED ✨`);
+    console.log(`💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾💾`);
+    console.log(`\n📋 [TRANSACTION DATA]`);
+    console.log(`   背番号: ${transactionData.背番号}`);
+    console.log(`   品番: ${transactionData.品番}`);
+    console.log(`   Request: ${transactionData.requestNumber}`);
+    console.log(`   Line: ${transactionData.lineNumber}`);
+    console.log(`   Picked Qty: ${transactionData.pickedQuantity}`);
+    console.log(`   Action: ${transactionData.action}`);
+    console.log(`   Source: ${transactionData.source}`);
+    console.log(`   CompletedBy: ${transactionData.completedBy}`);
+    console.log(`   工場: ${transactionData.工場}`);
+    console.log(`\n📞 [CALL STACK] This function was called from:`);
+    console.log(callStack);
+
+    
     try {
         // Connect to the submittedDB database (same as admin backend)
         const submittedDb = client.db("submittedDB");
@@ -1085,15 +1734,77 @@ async function createInventoryTransaction(transactionData) {
             currentPhysical = inventoryItem.physicalQuantity || inventoryItem.runningQuantity || 0;
             currentReserved = inventoryItem.reservedQuantity || 0;
             currentAvailable = inventoryItem.availableQuantity || inventoryItem.runningQuantity || 0;
+            console.log(`\n📊 [BEFORE CALCULATION] Current inventory state:`);
+            console.log(`   Physical: ${currentPhysical}`);
+            console.log(`   Reserved: ${currentReserved}`);
+            console.log(`   Available: ${currentAvailable}`);
+            console.log(`   Last Action: ${inventoryItem.action}`);
+            console.log(`   Last TimeStamp: ${inventoryItem.timeStamp}`);
+        } else {
+            console.log(`\n⚠️ [NO PRIOR INVENTORY] No previous records found - starting from 0`);
         }
         
         // Calculate new quantities after picking
         const pickedQuantity = transactionData.pickedQuantity;
-        const newPhysicalQuantity = currentPhysical - pickedQuantity;  // Reduce physical stock
-        const newReservedQuantity = currentReserved - pickedQuantity;  // Reduce reserved stock
-        const newAvailableQuantity = newPhysicalQuantity - newReservedQuantity; // Recalculate available
+        
+        console.log(`\n🧮 [QUANTITY CALCULATION]`);
+        console.log(`   Picked Quantity to Deduct: ${pickedQuantity}`);
+        console.log(`   Current Physical: ${currentPhysical}`);
+        console.log(`   Current Reserved: ${currentReserved}`);
+        console.log(`   Current Available: ${currentAvailable}`);
+
+        // 🔒 AUDIT-ONLY MODE: If pickedQuantity is 0, preserve all existing values
+        let newPhysicalQuantity, newReservedQuantity, newAvailableQuantity;
+        
+        if (pickedQuantity === 0) {
+            console.log(`\n📋 [AUDIT-ONLY MODE] pickedQuantity is 0 - preserving existing inventory values`);
+            newPhysicalQuantity = currentPhysical;
+            newReservedQuantity = currentReserved;
+            newAvailableQuantity = currentAvailable;
+            console.log(`   Physical: ${newPhysicalQuantity} (unchanged)`);
+            console.log(`   Reserved: ${newReservedQuantity} (unchanged)`);
+            console.log(`   Available: ${newAvailableQuantity} (unchanged)`);
+        } else {
+            newPhysicalQuantity = currentPhysical - pickedQuantity;  // Reduce physical stock
+            newReservedQuantity = Math.max(0, currentReserved - pickedQuantity);  // Reduce reserved stock (no negative)
+            newAvailableQuantity = newPhysicalQuantity - newReservedQuantity; // Recalculate available
+            
+            console.log(`\n📐 [AFTER CALCULATION] New inventory state:`);
+            console.log(`   New Physical: ${currentPhysical} - ${pickedQuantity} = ${newPhysicalQuantity}`);
+            console.log(`   New Reserved: max(0, ${currentReserved} - ${pickedQuantity}) = ${newReservedQuantity}`);
+            console.log(`   New Available: ${newPhysicalQuantity} - ${newReservedQuantity} = ${newAvailableQuantity}`);
+        }
+        
+        // ===== SAFETY CHECK: Prevent negative physical quantity =====
+        if (newPhysicalQuantity < 0) {
+            console.error(`\n🚨🚨🚨 [CRITICAL ERROR] Negative physical quantity detected! 🚨🚨🚨`);
+            console.error(`   This should NEVER happen!`);
+            console.error(`   Current Physical: ${currentPhysical}`);
+            console.error(`   Trying to Deduct: ${pickedQuantity}`);
+            console.error(`   Would Result In: ${newPhysicalQuantity}`);
+            console.error(`   🛑 ABORTING TRANSACTION TO PREVENT DATA CORRUPTION`);
+            throw new Error(`Cannot deduct ${pickedQuantity} from physical quantity ${currentPhysical} - would result in negative inventory`);
+        }
+        
+        console.log(`✅ [SAFETY CHECK] Physical quantity validation passed (${newPhysicalQuantity} >= 0)`);
+
+        // 🚨 CHECK: Is action being provided or using default?
+        const providedAction = transactionData.action;
+        const finalAction = providedAction || `Picking (-${pickedQuantity})`;
+        
+        if (!providedAction) {
+            console.log(`\n🚨🚨🚨 [WARNING] NO ACTION PROVIDED - USING DEFAULT 🚨🚨🚨`);
+            console.log(`   This should NOT happen! All callers should provide explicit action.`);
+            console.log(`   Default action being used: "${finalAction}"`);
+            console.log(`   transactionData.action value: "${transactionData.action}" (type: ${typeof transactionData.action})`);
+            console.log(`   Full transactionData:`, JSON.stringify(transactionData, null, 2));
+        } else {
+            console.log(`✅ [ACTION CHECK] Using provided action: "${providedAction}"`);
+        }
+
         
         // Create new transaction record (exact same structure as admin backend)
+        const insertSourceId = `nodaServer-createInventoryTransaction-${traceId}`;
         const transactionRecord = {
             背番号: transactionData.背番号,
             品番: transactionData.品番,
@@ -1109,28 +1820,63 @@ async function createInventoryTransaction(transactionData) {
             runningQuantity: newPhysicalQuantity,
             lastQuantity: currentPhysical,
             
-            action: `Picking (-${pickedQuantity})`,
+            action: finalAction,
             source: transactionData.source,
             
             // Optional picking-specific fields
             requestId: transactionData.requestNumber,
             lineNumber: transactionData.lineNumber,
             note: `Picked ${pickedQuantity} units for request ${transactionData.requestNumber} line ${transactionData.lineNumber} by ${transactionData.completedBy}`,
-            工場: transactionData.工場 || '野田倉庫'  // Factory field with default value
+            工場: transactionData.工場 || '野田倉庫',
+            
+            // 🔍 DEBUG: Track insertion source
+            _insertSource: insertSourceId,
+            _insertedAt: new Date().toISOString(),
+            _insertedBy: 'nodaServer.js:createInventoryTransaction',
+            _providedAction: providedAction || 'NONE - USING DEFAULT'
         };
         
-        // Insert the new record
-        const result = await inventoryCollection.insertOne(transactionRecord);
+        console.log(`\n📝 [TRANSACTION RECORD] About to insert:`);
+        console.log(JSON.stringify(transactionRecord, null, 2));
         
-        console.log(`📦 Inventory transaction created for ${transactionData.背番号}:`);
+        // Insert the new record
+        console.log(`\n🔽 [DATABASE INSERT] Calling inventoryCollection.insertOne()...`);
+        const insertStartTime = Date.now();
+        const result = await inventoryCollection.insertOne(transactionRecord);
+        const insertEndTime = Date.now();
+        const insertDuration = insertEndTime - insertStartTime;
+        
+        // 🔓 Release the lock AFTER successful insertion
+        inventoryTransactionLocks.delete(lockKey);
+        console.log(`🔓 [MUTEX] Lock released for ${lockKey}`);
+        
+        console.log(`\n✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅`);
+        console.log(`[${traceId}] 🎉 SUCCESSFULLY INSERTED TO nodaInventoryDB 🎉`);
+        console.log(`✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅`);
+        console.log(`\n📌 [INSERT DETAILS]`);
+        console.log(`   MongoDB Insert ID: ${result.insertedId}`);
+        console.log(`   Request: ${transactionData.requestNumber}`);
+        console.log(`   Line: ${transactionData.lineNumber}`);
+        console.log(`   背番号: ${transactionData.背番号}`);
+        console.log(`   Action: ${transactionRecord.action}`);
         console.log(`   Picked: ${pickedQuantity} units`);
-        console.log(`   Physical: ${currentPhysical} → ${newPhysicalQuantity}`);
+        console.log(`   Insert Duration: ${insertDuration}ms`);
+        console.log(`   TimeStamp: ${transactionRecord.timeStamp.toISOString()}`);
+        
+        console.log(`\n📊 [INVENTORY SUMMARY] Changes applied:`);
+        console.log(`   Physical: ${currentPhysical} → ${newPhysicalQuantity} (${pickedQuantity > 0 ? '-' : ''}${pickedQuantity})`);
         console.log(`   Reserved: ${currentReserved} → ${newReservedQuantity}`);
         console.log(`   Available: ${currentAvailable} → ${newAvailableQuantity}`);
+        
+        console.log(`\n💾 [FUNCTION EXIT] createInventoryTransaction completed successfully\n`);
+
         
         return result;
         
     } catch (error) {
+        // 🔓 Release the lock on error too
+        inventoryTransactionLocks.delete(lockKey);
+        console.log(`🔓 [MUTEX] Lock released for ${lockKey} (due to error)`);
         console.error('Error creating inventory transaction:', error);
         throw error;
     }
@@ -1266,6 +2012,24 @@ app.put('/api/picking-requests/:requestNumber/line/:lineNumber/status', async (r
             return res.status(400).json({ error: 'Invalid status' });
         }
         
+        console.log(`🌐 REST API: Status update requested for ${requestNumber} line ${lineNumber} by ${completedBy}`);
+        console.log(`⚠️ WARNING: This endpoint should NOT be called for IoT completions - use MQTT only!`);
+        
+        // Check if this line item was already processed via MQTT
+        const collection = db.collection(process.env.COLLECTION_NAME);
+        const request = await collection.findOne({ requestNumber });
+        if (request) {
+            const lineItem = request.lineItems.find(item => item.lineNumber === parseInt(lineNumber));
+            if (lineItem && lineItem.completedAt) {
+                console.log(`⚠️ REST API: Line item ${lineNumber} already has completedAt - likely already processed via MQTT`);
+                return res.json({ 
+                    message: 'Line item already processed via MQTT', 
+                    alreadyProcessed: true,
+                    completedAt: lineItem.completedAt
+                });
+            }
+        }
+        
         const result = await completeLineItem(requestNumber, parseInt(lineNumber), completedBy);
         
         if (result.alreadyCompleted) {
@@ -1343,6 +2107,44 @@ app.get('/api/mqtt/device/:deviceId/status', (req, res) => {
         lastSeen,
         status: isOnline ? 'connected' : 'disconnected'
     });
+});
+
+// Get picking progress from helper collection
+app.get('/api/picking-requests/:requestNumber/helper', async (req, res) => {
+    try {
+        const { requestNumber } = req.params;
+        const submittedDb = client.db("submittedDB");
+        const helperCollection = submittedDb.collection('nodaRequestHelperDB');
+        
+        const helperRecords = await helperCollection.find({ requestNumber }).toArray();
+        
+        if (helperRecords.length === 0) {
+            return res.status(404).json({ error: 'No picking progress found' });
+        }
+        
+        // Calculate overall progress
+        const totalItems = helperRecords.length;
+        const completedItems = helperRecords.filter(h => h.pickingComplete).length;
+        const totalRequested = helperRecords.reduce((sum, h) => sum + h.totalQuantity, 0);
+        const totalPicked = helperRecords.reduce((sum, h) => sum + h.pickedQuantity, 0);
+        const totalRemaining = helperRecords.reduce((sum, h) => sum + h.remainingQuantity, 0);
+        
+        res.json({
+            requestNumber,
+            progress: {
+                totalItems,
+                completedItems,
+                totalRequested,
+                totalPicked,
+                totalRemaining,
+                percentComplete: Math.round((totalPicked / totalRequested) * 100)
+            },
+            lineItems: helperRecords
+        });
+    } catch (error) {
+        console.error('Error fetching picking progress:', error);
+        res.status(500).json({ error: 'Failed to fetch picking progress' });
+    }
 });
 
 // Send command to MQTT device
@@ -1444,6 +2246,11 @@ app.post("/api/noda-requests", async (req, res) => {
     switch (action) {
       case 'updateLineItemStatus':
         try {
+          console.log(`🌐🌐🌐 /api/noda-requests: updateLineItemStatus called`);
+          console.log(`   Request ID: ${requestId}`);
+          console.log(`   Line Number: ${data?.lineNumber}`);
+          console.log(`   New Status: ${data?.status}`);
+          
           if (!requestId || !data || !data.lineNumber || !data.status) {
             return res.status(400).json({ error: "Request ID, line number, and status are required" });
           }
@@ -1453,6 +2260,9 @@ app.post("/api/noda-requests", async (req, res) => {
           if (!bulkRequest) {
             return res.status(404).json({ error: "Bulk request not found" });
           }
+          
+          console.log(`   Request Number: ${bulkRequest.requestNumber}`);
+          console.log(`   Request Type: ${bulkRequest.requestType}`);
 
           if (bulkRequest.requestType !== 'bulk') {
             return res.status(400).json({ error: "This operation is only for bulk requests" });
@@ -1466,6 +2276,22 @@ app.post("/api/noda-requests", async (req, res) => {
 
           const oldStatus = lineItem.status;
           const newStatus = data.status;
+          
+          // ⚠️ CRITICAL: Prevent completing line items with remaining inventory
+          if (newStatus === 'completed' && lineItem.completedAt) {
+            console.log(`⚠️⚠️⚠️ BLOCKED: Line item ${data.lineNumber} already processed by IoT at ${lineItem.completedAt}`);
+            console.log(`   Current status: ${oldStatus}`);
+            console.log(`   Remaining inventory: ${lineItem.shortfallQuantity || 0} units`);
+            
+            if (lineItem.shortfallQuantity > 0) {
+              console.log(`❌ REJECTING: Cannot complete - ${lineItem.shortfallQuantity} units still missing!`);
+              return res.status(400).json({ 
+                error: "Cannot complete line item with insufficient inventory",
+                shortfall: lineItem.shortfallQuantity,
+                message: `${lineItem.shortfallQuantity} units still needed before completion`
+              });
+            }
+          }
 
           // Update the specific line item status
           const result = await requestsCollection.updateOne(
@@ -1490,12 +2316,20 @@ app.post("/api/noda-requests", async (req, res) => {
           const updatedRequest = await requestsCollection.findOne({ _id: new ObjectId(requestId) });
           const allCompleted = updatedRequest.lineItems.every(item => item.status === 'completed');
           const anyInProgress = updatedRequest.lineItems.some(item => item.status === 'in-progress');
+          const anyWithShortfall = updatedRequest.lineItems.some(item => item.shortfallQuantity > 0);
+
+          console.log(`📊 Bulk status check:`);
+          console.log(`   All completed: ${allCompleted}`);
+          console.log(`   Any in-progress: ${anyInProgress}`);
+          console.log(`   Any with shortfall: ${anyWithShortfall}`);
 
           let newBulkStatus = updatedRequest.status;
-          if (allCompleted) {
+          if (allCompleted && !anyWithShortfall) {
             newBulkStatus = 'completed';
-          } else if (anyInProgress) {
+            console.log(`✅ All items completed with no shortfalls - marking bulk as completed`);
+          } else if (anyInProgress || anyWithShortfall) {
             newBulkStatus = 'in-progress';
+            console.log(`⚠️ Keeping bulk status as in-progress (inProgress=${anyInProgress}, shortfall=${anyWithShortfall})`);
           }
 
           // Update bulk request status if needed
@@ -1537,6 +2371,15 @@ app.post("/api/noda-requests", async (req, res) => {
 
       case 'changeRequestStatus':
         try {
+          console.log(`\n🌐🌐🌐 /api/noda-requests: changeRequestStatus called 🌐🌐🌐`);
+          console.log(`   ⚠️⚠️⚠️ THIS MAY BE THE DUPLICATE INSERTION SOURCE!`);
+          console.log(`   Request ID: ${requestId}`);
+          console.log(`   New Status: ${data?.status}`);
+          console.log(`   User: ${data?.userName}`);
+          console.log(`   FULL CALL STACK:`);
+          console.log(new Error().stack);
+          console.log(`   🔍 Checking if this is causing duplicate inventory transaction...`);
+          
           if (!requestId || !data || !data.status) {
             return res.status(400).json({ error: "Request ID and status are required" });
           }
@@ -1545,15 +2388,34 @@ app.post("/api/noda-requests", async (req, res) => {
           if (!request) {
             return res.status(404).json({ error: "Request not found" });
           }
+          
+          console.log(`   Request Number: ${request.requestNumber}`);
+          console.log(`   Request Type: ${request.requestType}`);
 
           const userName = data.userName || 'Unknown User';
           const oldStatus = request.status;
           const newStatus = data.status;
+          
+          console.log(`\n📊 [REQUEST DETAILS]`);
+          console.log(`   Status transition: ${oldStatus} → ${newStatus}`);
+          console.log(`   Request type: ${request.requestType}`);
+          console.log(`   Has lineItems: ${!!request.lineItems}`);
+          console.log(`   LineItems count: ${request.lineItems?.length || 0}`);
+          console.log(`   Is bulk request: ${request.requestType === 'bulk'}`);
+          console.log(`   Has lineItems array: ${Array.isArray(request.lineItems)}`);
 
           // Handle inventory changes based on status transition
           if (oldStatus !== newStatus) {
+            console.log(`\n🔀 [STATUS CHANGE HANDLER] Status transition detected: ${oldStatus} → ${newStatus}`);
+            
             // For bulk requests, handle line items individually
-            if (request.requestType === 'bulk' && request.lineItems) {
+            if (request.requestType === 'bulk' && request.lineItems && Array.isArray(request.lineItems)) {
+              console.log(`\n✅✅✅ [BULK REQUEST PATH] Entering bulk request handler ✅✅✅`);
+              console.log(`   ⛔ SKIPPING inventory transaction creation`);
+              console.log(`   📌 Reason: IoT devices already created inventory transactions via MQTT completions`);
+              console.log(`   🎯 This endpoint only updates status fields, NOT inventory`);
+              console.log(`   📋 Line items: ${request.lineItems.length} items`);
+              
               // Update all line items to the new status
               await requestsCollection.updateOne(
                 { _id: new ObjectId(requestId) },
@@ -1567,6 +2429,8 @@ app.post("/api/noda-requests", async (req, res) => {
                   }
                 }
               );
+              
+              console.log(`✅ Status updated to ${newStatus} WITHOUT creating duplicate inventory transactions`);
 
               // 🚨 NEW: Notify all ESP32 devices in this bulk request
               for (const lineItem of request.lineItems) {
@@ -1580,6 +2444,24 @@ app.post("/api/noda-requests", async (req, res) => {
                 );
               }
             } else {
+              console.log(`\n🚨🚨🚨 [SINGLE REQUEST PATH] Entering single request handler 🚨🚨🚨`);
+              console.log(`   ⚠️ WARNING: This may create duplicate inventory transactions!`);
+              console.log(`   Request type: ${request.requestType || 'undefined'}`);
+              console.log(`   Request number: ${request.requestNumber}`);
+              console.log(`   Request quantity: ${request.quantity || 'N/A'}`);
+              console.log(`   Has lineItems: ${!!request.lineItems}`);
+              console.log(`   LineItems is Array: ${Array.isArray(request.lineItems)}`);
+              console.log(`\n   🔍 Investigating why this is treated as single request...`);
+              if (request.requestType === 'bulk') {
+                console.log(`   ❌ ERROR: Request type is 'bulk' but entered single request path!`);
+                console.log(`   ❌ This is a BUG - should have gone to bulk path`);
+                console.log(`   ❌ ABORTING to prevent duplicate inventory transaction`);
+                return res.status(400).json({ 
+                  error: 'Invalid request type handling',
+                  message: 'Bulk request incorrectly routed to single request handler'
+                });
+              }
+              
               // Single request - existing inventory logic
               const inventoryItem = await inventoryCollection.findOne({ 
                 背番号: request.背番号 
@@ -1600,11 +2482,30 @@ app.post("/api/noda-requests", async (req, res) => {
 
                 // Handle different status transitions
                 if (newStatus === 'complete' && (oldStatus === 'pending' || oldStatus === 'active')) {
-                  // Completing pickup: reduce physical and reserved quantities
-                  newPhysical = currentPhysical - request.quantity;
-                  newReserved = Math.max(0, currentReserved - request.quantity);
-                  action = `Picking Completed (-${request.quantity})`;
-                  note = `Physically picked ${request.quantity} units for request ${request.requestNumber}`;
+                  console.log(`\n🚨🚨🚨 [API ROUTE] SINGLE REQUEST COMPLETION TRIGGERED 🚨🚨🚨`);
+                  console.log(`   ⚠️ WARNING: This should NOT be called for IoT-driven completions!`);
+                  console.log(`   Request: ${request.requestNumber}`);
+                  console.log(`   Old Status: ${oldStatus} → New Status: ${newStatus}`);
+                  console.log(`   Quantity: ${request.quantity}`);
+                  console.log(`   Current Physical: ${currentPhysical}`);
+                  console.log(`   Called by: ${userName}`);
+                  console.log(`   Call Stack:`);
+                  console.log(new Error().stack);
+                  console.log(`\n   ⛔ SKIPPING INVENTORY TRANSACTION - IoT devices handle this via MQTT`);
+                  console.log(`   🔒 If this was an IoT completion, transaction already created by completeLineItem()`);
+                  
+                  // ⛔ DO NOT create inventory transaction here for IoT completions
+                  // The MQTT handler already created the transaction via completeLineItem()
+                  // This API route should only be for MANUAL admin overrides
+                  console.log(`\n   ❌ BLOCKING duplicate inventory transaction creation`);
+                  // Skip the inventory transaction creation for IoT-driven completions
+                  action = `Status Change: ${oldStatus} → ${newStatus} (No Inventory Change - IoT Handled)`;
+                  note = `Request ${request.requestNumber} completed via IoT device - inventory already adjusted`;
+                  
+                  // Keep quantities unchanged since IoT already handled it
+                  newPhysical = currentPhysical;
+                  newReserved = currentReserved;
+                  newAvailable = currentAvailable;
 
                 } else if (newStatus === 'failed' && (oldStatus === 'pending' || oldStatus === 'active')) {
                   // Failed pickup: restore available, reduce reserved
@@ -1624,28 +2525,45 @@ app.post("/api/noda-requests", async (req, res) => {
 
                 // Create inventory transaction if there was a quantity change
                 if (newPhysical !== currentPhysical || newReserved !== currentReserved || newAvailable !== currentAvailable) {
-                  const statusTransaction = {
-                    背番号: request.背番号,
-                    品番: request.品番,
-                    timeStamp: new Date(),
-                    Date: new Date().toISOString().split('T')[0],
-                    
-                    // Two-stage inventory fields
-                    physicalQuantity: newPhysical,
-                    reservedQuantity: newReserved,
-                    availableQuantity: newAvailable,
-                    
-                    // Legacy field for compatibility
-                    runningQuantity: newAvailable,
-                    lastQuantity: currentAvailable,
-                    
-                    action: action,
-                    source: `Freya Admin - ${userName}`,
-                    requestId: requestId,
-                    note: note
-                  };
+                  console.log(`\n🚨🚨🚨🚨🚨 [DUPLICATE SOURCE FOUND!] 🚨🚨🚨🚨🚨`);
+                  console.log(`   THIS IS THE SECOND INSERTION - FROM /api/noda-requests changeRequestStatus!`);
+                  console.log(`   Request: ${request.requestNumber}`);
+                  console.log(`   背番号: ${request.背番号}`);
+                  console.log(`   品番: ${request.品番}`);
+                  console.log(`   Status: ${oldStatus} → ${newStatus}`);
+                  console.log(`   User: ${userName}`);
+                  console.log(`   newPhysical: ${newPhysical}`);
+                  console.log(`   newReserved: ${newReserved}`);
+                  console.log(`   newAvailable: ${newAvailable}`);
+                  console.log(`   action: ${action}`);
+                  console.log(`   FULL CALL STACK:`);
+                  console.log(new Error().stack);
+                  console.log(`   ⛔ BLOCKING THIS INSERTION - IT CREATES DUPLICATES!`);
+                  console.log(`\n`);
+                  
+                  // ⛔⛔⛔ DISABLE THIS INSERTION - IT CREATES DUPLICATES! ⛔⛔⛔
+                  // const statusTransaction = {
+                  //   背番号: request.背番号,
+                  //   品番: request.品番,
+                  //   timeStamp: new Date(),
+                  //   Date: new Date().toISOString().split('T')[0],
+                  //   
+                  //   // Two-stage inventory fields
+                  //   physicalQuantity: newPhysical,
+                  //   reservedQuantity: newReserved,
+                  //   availableQuantity: newAvailable,
+                  //   
+                  //   // Legacy field for compatibility
+                  //   runningQuantity: newAvailable,
+                  //   lastQuantity: currentAvailable,
+                  //   
+                  //   action: action,
+                  //   source: `Freya Admin - ${userName}`,
+                  //   requestId: requestId,
+                  //   note: note
+                  //   };
 
-                  await inventoryCollection.insertOne(statusTransaction);
+                  // await inventoryCollection.insertOne(statusTransaction);
                 }
               }
 
