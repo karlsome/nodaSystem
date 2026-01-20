@@ -1415,12 +1415,20 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         
         // Check if all line items are completed based on HELPER COLLECTION
         const allHelperRecords = await helperCollection.find({ requestNumber }).toArray();
-        const allCompleted = allHelperRecords.every(h => h.pickingComplete);
+        const totalLineItemsInRequest = request.lineItems ? request.lineItems.length : 0;
+        const allHelperRecordsComplete = allHelperRecords.every(h => h.pickingComplete);
         const anyWithShortfall = allHelperRecords.some(h => h.shortfallQuantity > 0);
         
+        // CRITICAL: Also check that we have helper records for ALL line items in the request
+        const allLineItemsHaveHelperRecords = allHelperRecords.length >= totalLineItemsInRequest;
+        const allCompleted = allHelperRecordsComplete && allLineItemsHaveHelperRecords;
+        
         console.log(`🔍 Completion check using HELPER COLLECTION:`);
-        console.log(`   Total line items: ${allHelperRecords.length}`);
-        console.log(`   Completed items: ${allHelperRecords.filter(h => h.pickingComplete).length}`);
+        console.log(`   Total line items in request: ${totalLineItemsInRequest}`);
+        console.log(`   Helper records found: ${allHelperRecords.length}`);
+        console.log(`   Completed helper records: ${allHelperRecords.filter(h => h.pickingComplete).length}`);
+        console.log(`   All helper records complete: ${allHelperRecordsComplete}`);
+        console.log(`   All line items have helper records: ${allLineItemsHaveHelperRecords}`);
         
         console.log(`🔍 Request completion check:`);
         console.log(`   All items completed: ${allCompleted}`);
@@ -1450,9 +1458,12 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
             }
             
             console.log(`✅ Request ${requestNumber} fully completed! Lock released.`);
-        } else if (allCompleted && anyWithShortfall) {
+        } else if (allHelperRecordsComplete && anyWithShortfall) {
             console.log(`⚠️⚠️⚠️ NOT completing request - all items processed but ${allHelperRecords.filter(h => h.shortfallQuantity > 0).length} items have shortfalls!`);
             console.log(`   Request status remains: in-progress (based on helper collection)`);
+        } else if (!allLineItemsHaveHelperRecords) {
+            console.log(`⚠️⚠️⚠️ NOT completing request - only ${allHelperRecords.length} of ${totalLineItemsInRequest} line items have been picked!`);
+            console.log(`   Request status remains: in-progress (missing line items)`);
         }
         
         return { 
