@@ -13,8 +13,8 @@ let todaysTasks = []; // Initialize empty array for tasks
 let factory = null; // Factory location from URL parameter
 
 // API base URL - change this to your server URL
-const API_BASE_URL = 'http://localhost:3001/api';
-//const API_BASE_URL = 'https://nodasystem.onrender.com/api';
+//const API_BASE_URL = 'http://localhost:3001/api';
+const API_BASE_URL = 'https://nodasystem.onrender.com/api';
 
 // Debug localStorage on page load
 console.log('🔄 Page loaded, checking localStorage availability...');
