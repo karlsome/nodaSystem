@@ -276,10 +276,20 @@ async function calculateBoxQuantity(品番, pieceQuantity) {
         }
         
         const 収容数 = parseInt(masterData.収容数) || 1;
-        const boxQuantity = Math.ceil(pieceQuantity / 収容数);
         
-        console.log(`📦 Box calculation for ${品番}: ${pieceQuantity} pieces ÷ ${収容数} = ${boxQuantity} boxes`);
-        return boxQuantity;
+        // Safeguard: Ensure pieceQuantity is not negative
+        const safePieceQuantity = Math.max(0, pieceQuantity || 0);
+        if (safePieceQuantity === 0) {
+            console.log(`📦 Box calculation for ${品番}: 0 pieces = 0 boxes`);
+            return 0;
+        }
+        
+        const boxQuantity = Math.ceil(safePieceQuantity / 収容数);
+        // Ensure at least 1 box if there are any pieces
+        const safeBoxQuantity = safePieceQuantity > 0 ? Math.max(1, boxQuantity) : 0;
+        
+        console.log(`📦 Box calculation for ${品番}: ${pieceQuantity} pieces ÷ ${収容数} = ${safeBoxQuantity} boxes`);
+        return safeBoxQuantity;
     } catch (error) {
         console.error(`❌ Error calculating box quantity for ${品番}:`, error);
         return pieceQuantity; // Fallback to piece quantity on error
@@ -329,30 +339,60 @@ function setupInventoryInsertMonitoring() {
             console.log(`   Request: ${doc.requestId}, Line: ${doc.lineNumber}`);
             console.log(`   TimeStamp: ${doc.timeStamp}`);
             console.log(`   _insertedBy: ${doc._insertedBy || 'NOT SET (EXTERNAL SOURCE!)'}`);
+            console.log(`   _insertSource: ${doc._insertSource || 'NOT SET'}`);
             
-            // 🚨 SAFEGUARD: Delete unauthorized insertions (missing our tracking field)
+            // 🚨 SAFEGUARD 1: Delete unauthorized insertions (missing our tracking field)
             if (!doc._insertedBy && doc.action && doc.action.includes('Picking')) {
-                console.log(`\n🚨🚨🚨 [UNAUTHORIZED INSERTION DETECTED] 🚨🚨🚨`);
+                console.log(`\n🚨🚨🚨 [UNAUTHORIZED INSERTION - NO TRACKING] 🚨🚨🚨`);
                 console.log(`   Document ID: ${docId}`);
-                console.log(`   Action: ${doc.action}`);
                 console.log(`   This insertion does NOT have _insertedBy tracking field!`);
-                console.log(`   This is likely from an external source (MongoDB Atlas Trigger?)`);
                 console.log(`   🗑️ DELETING THIS UNAUTHORIZED RECORD...`);
                 
                 try {
                     const deleteResult = await inventoryCollection.deleteOne({ _id: docId });
                     if (deleteResult.deletedCount > 0) {
                         console.log(`   ✅ Successfully deleted unauthorized insertion: ${docId}`);
-                    } else {
-                        console.log(`   ⚠️ Could not delete - record may have already been removed`);
                     }
                 } catch (deleteError) {
-                    console.error(`   ❌ Failed to delete unauthorized insertion:`, deleteError);
+                    console.error(`   ❌ Failed to delete:`, deleteError);
+                }
+                return; // Stop processing
+            }
+            
+            // 🚨 SAFEGUARD 2: Delete DUPLICATES (same _insertSource but different _id)
+            // MongoDB Trigger copies our documents including _insertSource, creating duplicates
+            if (doc._insertSource && doc.action && doc.action.includes('Picking')) {
+                const existingWithSameSource = await inventoryCollection.find({
+                    _insertSource: doc._insertSource
+                }).toArray();
+                
+                if (existingWithSameSource.length > 1) {
+                    console.log(`\n🚨🚨🚨 [DUPLICATE INSERTION DETECTED] 🚨🚨🚨`);
+                    console.log(`   Found ${existingWithSameSource.length} records with same _insertSource`);
+                    console.log(`   _insertSource: ${doc._insertSource}`);
+                    
+                    // Keep only the FIRST one (oldest), delete this duplicate
+                    const sortedByTime = existingWithSameSource.sort((a, b) => 
+                        new Date(a._insertedAt) - new Date(b._insertedAt)
+                    );
+                    const originalId = sortedByTime[0]._id.toString();
+                    
+                    if (docId.toString() !== originalId) {
+                        console.log(`   🗑️ This is a DUPLICATE of ${originalId}, deleting...`);
+                        try {
+                            const deleteResult = await inventoryCollection.deleteOne({ _id: docId });
+                            if (deleteResult.deletedCount > 0) {
+                                console.log(`   ✅ Successfully deleted duplicate: ${docId}`);
+                            }
+                        } catch (deleteError) {
+                            console.error(`   ❌ Failed to delete duplicate:`, deleteError);
+                        }
+                    }
                 }
             }
         });
         
-        console.log('✅ Inventory insertion monitoring active (with unauthorized deletion safeguard)');
+        console.log('✅ Inventory insertion monitoring active (with duplicate deletion safeguard)');
     } catch (error) {
         console.error('❌ Failed to set up inventory change stream:', error);
     }
@@ -715,12 +755,22 @@ async function handleDeviceCompletion(deviceId, data) {
         }
         else if (result.partialComplete || result.insufficientInventory || (helperRecord && helperRecord.remainingQuantity > 0)) {
             // INSUFFICIENT or NONE: Reactivate IoT with remaining quantity from HELPER
-            const remainingQuantity = helperRecord ? helperRecord.remainingQuantity : (result.remaining || result.needed);
+            const rawRemainingQuantity = helperRecord ? helperRecord.remainingQuantity : (result.remaining || result.needed);
+            
+            // SAFEGUARD: Ensure remaining quantity is never negative
+            const remainingQuantity = Math.max(0, rawRemainingQuantity || 0);
+            if (rawRemainingQuantity < 0) {
+                console.warn(`⚠️ [SAFEGUARD] Helper had negative remainingQuantity: ${rawRemainingQuantity}, corrected to ${remainingQuantity}`);
+            }
+            
             const remainingBoxQty = await calculateBoxQuantity(result.品番, remainingQuantity);
             
-            console.log(`📦 Using HELPER COLLECTION data: ${remainingQuantity} pieces = ${remainingBoxQty} boxes remaining`);
+            // SAFEGUARD: Ensure box quantity is never negative
+            const safeBoxQty = Math.max(0, remainingBoxQty);
             
-            console.log(`🟢 Partial/None inventory - reactivating device ${deviceId} with ${remainingBoxQty} boxes (${remainingQuantity} pieces)`);
+            console.log(`📦 Using HELPER COLLECTION data: ${remainingQuantity} pieces = ${safeBoxQty} boxes remaining`);
+            
+            console.log(`🟢 Partial/None inventory - reactivating device ${deviceId} with ${safeBoxQty} boxes (${remainingQuantity} pieces)`);
             
             // Flash RED briefly to acknowledge button press
             publishDeviceCommand(deviceId, {
@@ -733,9 +783,9 @@ async function handleDeviceCompletion(deviceId, data) {
             setTimeout(() => {
                 publishDeviceCommand(deviceId, {
                     color: 'green',
-                    quantity: remainingBoxQty,
+                    quantity: safeBoxQty,
                     message: result.partialComplete 
-                        ? `残り ${remainingBoxQty} 箱` 
+                        ? `残り ${safeBoxQty} 箱` 
                         : '在庫なし',
                     requestNumber: requestNumber,  // ← CRITICAL: ESP32 needs this!
                     lineNumber: lineNumber,        // ← CRITICAL: ESP32 needs this!
@@ -761,10 +811,10 @@ async function handleDeviceCompletion(deviceId, data) {
     } catch (error) {
         console.error('❌ Error processing device completion:', error);
         
-        // Send error back to device
+        // Send error back to device - use 0 instead of null to avoid -1 display
         publishDeviceCommand(deviceId, {
             color: 'red',
-            quantity: null,
+            quantity: 0,
             message: 'Error - Try Again'
         });
     }
@@ -1179,13 +1229,82 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
     const now = new Date();
     
     // ===== CHECK HELPER COLLECTION FIRST - it's the source of truth for picking =====
-    const helperRecord = await helperCollection.findOne({ requestNumber, lineNumber });
+    let helperRecord = await helperCollection.findOne({ requestNumber, lineNumber });
     console.log(`\n📊 [HELPER CHECK] Helper record for ${requestNumber} line ${lineNumber}:`, helperRecord ? {
         pickedQuantity: helperRecord.pickedQuantity,
         remainingQuantity: helperRecord.remainingQuantity,
         totalQuantity: helperRecord.totalQuantity,
         pickingComplete: helperRecord.pickingComplete
     } : 'NOT FOUND');
+    
+    // ===== SAFEGUARD: Validate and fix corrupted helper data =====
+    if (helperRecord && helperRecord.pickedQuantity > helperRecord.totalQuantity) {
+        console.warn(`\n🚨🚨🚨 [HELPER CORRUPTION DETECTED] 🚨🚨🚨`);
+        console.warn(`   pickedQuantity (${helperRecord.pickedQuantity}) > totalQuantity (${helperRecord.totalQuantity})`);
+        console.warn(`   This indicates external process (MongoDB Trigger?) is also updating helper`);
+        console.warn(`   🔧 AUTO-FIXING: Recalculating based on inventory records...`);
+        
+        // Recalculate actual picked quantity from inventory records
+        // Use _insertSource pattern to identify UNIQUE insertions (excludes trigger duplicates)
+        const inventoryRecords = await inventoryCollection.find({
+            requestId: requestNumber,
+            lineNumber: lineNumber,
+            action: { $regex: /^Picking/ },
+            _insertedBy: 'nodaServer.js:createInventoryTransaction'
+        }).toArray();
+        
+        // CRITICAL: Filter duplicates by _insertSource unique ID
+        // Each real insertion has a unique ID like "nodaServer-createInventoryTransaction-INV-1768903637454-osiab"
+        // Duplicates from MongoDB Trigger will have the SAME _insertSource as the original
+        const seenInsertSources = new Set();
+        const uniqueRecords = [];
+        
+        for (const record of inventoryRecords) {
+            if (record._insertSource && !seenInsertSources.has(record._insertSource)) {
+                seenInsertSources.add(record._insertSource);
+                uniqueRecords.push(record);
+            }
+        }
+        
+        let actualPicked = 0;
+        for (const record of uniqueRecords) {
+            // Calculate actual deducted amount: lastQuantity (before) - physicalQuantity (after)
+            const lastQty = record.lastQuantity || 0;
+            const newQty = record.physicalQuantity || 0;
+            const deducted = lastQty - newQty;
+            if (deducted > 0) {
+                actualPicked += deducted;
+                console.warn(`   📦 Record: lastQty=${lastQty} -> physicalQty=${newQty}, deducted=${deducted}`);
+            }
+        }
+        
+        // Cap at total quantity - can never pick more than requested
+        actualPicked = Math.min(actualPicked, helperRecord.totalQuantity);
+        const correctedRemaining = Math.max(0, helperRecord.totalQuantity - actualPicked);
+        
+        console.warn(`   📊 Found ${inventoryRecords.length} total inventory records`);
+        console.warn(`   📊 After deduplication: ${uniqueRecords.length} unique records`);
+        console.warn(`   📊 Actual picked (deduplicated): ${actualPicked}`);
+        console.warn(`   📊 Corrected remaining: ${correctedRemaining}`);
+        
+        // Fix the helper record
+        await helperCollection.updateOne(
+            { requestNumber, lineNumber },
+            {
+                $set: {
+                    pickedQuantity: actualPicked,
+                    remainingQuantity: correctedRemaining,
+                    _correctedAt: now,
+                    _correctionReason: `Auto-fixed: pickedQuantity was ${helperRecord.pickedQuantity}, corrected to ${actualPicked}`,
+                    _correctedBy: 'nodaServer.js:completeLineItem:safeguard'
+                }
+            }
+        );
+        
+        // Re-read the corrected record
+        helperRecord = await helperCollection.findOne({ requestNumber, lineNumber });
+        console.warn(`   ✅ Helper record corrected: picked=${helperRecord.pickedQuantity}, remaining=${helperRecord.remainingQuantity}`);
+    }
     
     if (helperRecord && helperRecord.pickingComplete) {
         console.log(`⚠️ Helper collection shows line ${lineNumber} already complete - ignoring duplicate`);
@@ -1358,6 +1477,8 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
                     'lineItems.$[elem].status': 'completed',
                     'lineItems.$[elem].completedAt': now,
                     'lineItems.$[elem].completedBy': completedBy,
+                    'lineItems.$[elem].shortfallQuantity': 0,  // Reset shortfall when completed
+                    'lineItems.$[elem].inventoryStatus': 'sufficient',  // Mark as sufficient
                     'lineItems.$[elem].updatedAt': now,
                     'updatedAt': now
                 }
@@ -1402,6 +1523,7 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
                 $set: {
                     pickedQuantity: lineItem.quantity,
                     remainingQuantity: 0,
+                    shortfallQuantity: 0,  // CRITICAL: Reset shortfall when completed
                     pickingComplete: true,
                     completedAt: now,
                     completedBy: completedBy,
@@ -1411,7 +1533,30 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
             { upsert: true }
         );
         
-        console.log(`✅ Helper collection updated - marked as COMPLETE (all ${lineItem.quantity} picked)`);
+        console.log(`✅ Helper collection updated - marked as COMPLETE (all ${lineItem.quantity} picked, shortfall reset to 0)`);
+        
+        // ===== POST-UPDATE CORRUPTION CHECK FOR COMPLETED PATH =====
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        const verifyHelper = await helperCollection.findOne({ requestNumber, lineNumber });
+        if (verifyHelper && (verifyHelper.pickedQuantity > lineItem.quantity || verifyHelper.shortfallQuantity > 0)) {
+            console.warn(`\n🚨 [POST-COMPLETE CORRUPTION] Trigger corrupted completed helper!`);
+            console.warn(`   pickedQuantity: ${verifyHelper.pickedQuantity} (should be ${lineItem.quantity})`);
+            console.warn(`   shortfallQuantity: ${verifyHelper.shortfallQuantity} (should be 0)`);
+            await helperCollection.updateOne(
+                { requestNumber, lineNumber },
+                {
+                    $set: {
+                        pickedQuantity: lineItem.quantity,
+                        remainingQuantity: 0,
+                        shortfallQuantity: 0,  // CRITICAL: Also reset shortfall
+                        pickingComplete: true,
+                        _postUpdateCorrectedAt: new Date().toISOString()
+                    }
+                }
+            );
+            console.warn(`   ✅ Corrected back to: picked=${lineItem.quantity}, remaining=0, shortfall=0`);
+        }
         
         // Check if all line items are completed based on HELPER COLLECTION
         const allHelperRecords = await helperCollection.find({ requestNumber }).toArray();
@@ -1434,15 +1579,19 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         console.log(`   All items completed: ${allCompleted}`);
         console.log(`   Any with shortfall: ${anyWithShortfall}`);
         
-        if (allCompleted && !anyWithShortfall) {
-            console.log(`✅ All items completed with NO shortfalls - completing request`);
+        if (allCompleted) {
+            // Complete request when ALL line items are done - regardless of shortfalls
+            const completionStatus = anyWithShortfall ? 'completed-with-shortfall' : 'completed';
+            console.log(`✅ All items completed - marking request as '${completionStatus}'`);
+            
             await collection.updateOne(
                 { requestNumber },
                 {
                     $set: {
                         status: 'completed',
                         completedAt: now,
-                        updatedAt: now
+                        updatedAt: now,
+                        hasShortfall: anyWithShortfall
                     }
                 }
             );
@@ -1457,10 +1606,11 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
                 broadcastLockStatus();
             }
             
-            console.log(`✅ Request ${requestNumber} fully completed! Lock released.`);
-        } else if (allHelperRecordsComplete && anyWithShortfall) {
-            console.log(`⚠️⚠️⚠️ NOT completing request - all items processed but ${allHelperRecords.filter(h => h.shortfallQuantity > 0).length} items have shortfalls!`);
-            console.log(`   Request status remains: in-progress (based on helper collection)`);
+            if (anyWithShortfall) {
+                console.log(`✅ Request ${requestNumber} completed WITH SHORTFALLS! Lock released.`);
+            } else {
+                console.log(`✅ Request ${requestNumber} fully completed! Lock released.`);
+            }
         } else if (!allLineItemsHaveHelperRecords) {
             console.log(`⚠️⚠️⚠️ NOT completing request - only ${allHelperRecords.length} of ${totalLineItemsInRequest} line items have been picked!`);
             console.log(`   Request status remains: in-progress (missing line items)`);
@@ -1488,8 +1638,17 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         // Get current helper record
         const currentHelper = await helperCollection.findOne({ requestNumber, lineNumber });
         const previouslyPicked = currentHelper ? currentHelper.pickedQuantity : 0;
-        const newTotalPicked = previouslyPicked + actualDeductQuantity;
-        const newRemaining = lineItem.quantity - newTotalPicked;
+        
+        // SAFEGUARD: Ensure we never exceed the total quantity
+        const rawNewTotalPicked = previouslyPicked + actualDeductQuantity;
+        const newTotalPicked = Math.min(rawNewTotalPicked, lineItem.quantity);
+        const newRemaining = Math.max(0, lineItem.quantity - newTotalPicked);
+        
+        if (rawNewTotalPicked > lineItem.quantity) {
+            console.warn(`⚠️ [HELPER SAFEGUARD] Prevented over-counting!`);
+            console.warn(`   Raw total would have been: ${rawNewTotalPicked}`);
+            console.warn(`   Capped to max quantity: ${newTotalPicked}`);
+        }
         
         console.log(`\n📝 [HELPER UPDATE] Updating progress in helper collection:`);
         console.log(`   Previously Picked: ${previouslyPicked}`);
@@ -1516,6 +1675,35 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         );
         
         console.log(`✅ [HELPER UPDATE] Helper collection updated successfully`);
+        
+        // ===== POST-UPDATE CORRUPTION CHECK =====
+        // MongoDB Atlas Trigger may double the values - check and fix immediately
+        // Wait a brief moment for any trigger to execute
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        const verifyHelper = await helperCollection.findOne({ requestNumber, lineNumber });
+        if (verifyHelper && verifyHelper.pickedQuantity > lineItem.quantity) {
+            console.warn(`\n🚨🚨🚨 [POST-UPDATE CORRUPTION DETECTED] MongoDB Trigger corrupted helper!`);
+            console.warn(`   Expected pickedQuantity: ${newTotalPicked}`);
+            console.warn(`   Actual pickedQuantity: ${verifyHelper.pickedQuantity}`);
+            console.warn(`   Total quantity limit: ${lineItem.quantity}`);
+            
+            // Re-correct immediately
+            await helperCollection.updateOne(
+                { requestNumber, lineNumber },
+                {
+                    $set: {
+                        pickedQuantity: newTotalPicked,
+                        remainingQuantity: newRemaining,
+                        _postUpdateCorrectedAt: new Date().toISOString(),
+                        _postUpdateCorrectionReason: `Trigger doubled values: was ${verifyHelper.pickedQuantity}, corrected to ${newTotalPicked}`
+                    }
+                }
+            );
+            console.warn(`   ✅ Immediately corrected back to: picked=${newTotalPicked}, remaining=${newRemaining}`);
+        } else {
+            console.log(`✅ [POST-UPDATE VERIFY] Helper record integrity confirmed: picked=${verifyHelper?.pickedQuantity}, remaining=${verifyHelper?.remainingQuantity}`);
+        }
         
         // ===== CRITICAL: Update MAIN REQUEST to keep lineItem as 'in-progress' =====
         console.log(`\n🔒 [MAIN REQUEST UPDATE] Explicitly setting main request lineItem ${lineNumber} to 'in-progress'`);
@@ -1750,18 +1938,46 @@ async function createInventoryTransaction(transactionData) {
         let currentPhysical = 0;
         let currentReserved = 0;
         let currentAvailable = 0;
+        let lastAction = null;
+        let lastRequestNumber = null;
+        let lastLineNumber = null;
         
         if (inventoryResults.length > 0) {
             const inventoryItem = inventoryResults[0];
             currentPhysical = inventoryItem.physicalQuantity || inventoryItem.runningQuantity || 0;
             currentReserved = inventoryItem.reservedQuantity || 0;
             currentAvailable = inventoryItem.availableQuantity || inventoryItem.runningQuantity || 0;
+            lastAction = inventoryItem.action;
+            lastRequestNumber = inventoryItem.requestNumber;
+            lastLineNumber = inventoryItem.lineNumber;
             console.log(`\n📊 [BEFORE CALCULATION] Current inventory state:`);
             console.log(`   Physical: ${currentPhysical}`);
             console.log(`   Reserved: ${currentReserved}`);
             console.log(`   Available: ${currentAvailable}`);
             console.log(`   Last Action: ${inventoryItem.action}`);
             console.log(`   Last TimeStamp: ${inventoryItem.timeStamp}`);
+            
+            // 🚨 DUPLICATE DETECTION: Check if Atlas Trigger already deducted for this pick
+            const isPickingAction = lastAction && (lastAction.includes('Picking') || lastAction.includes('picking'));
+            const sameRequest = lastRequestNumber === transactionData.requestNumber;
+            const sameLine = lastLineNumber === transactionData.lineNumber;
+            
+            if (isPickingAction && sameRequest && sameLine) {
+                console.log(`\n🚨🚨🚨 [DUPLICATE TRANSACTION DETECTED] 🚨🚨🚨`);
+                console.log(`   Last action was already: ${lastAction}`);
+                console.log(`   For same request: ${lastRequestNumber}, line: ${lastLineNumber}`);
+                console.log(`   MongoDB Atlas Trigger likely already deducted inventory!`);
+                console.log(`   Skipping this transaction to prevent double-deduction.`);
+                
+                inventoryTransactionLocks.delete(lockKey);
+                console.log(`🔓 [MUTEX] Lock released for ${lockKey} (duplicate detected)`);
+                
+                return { 
+                    success: true, 
+                    skipped: true, 
+                    reason: 'Transaction already completed by Atlas Trigger' 
+                };
+            }
         } else {
             console.log(`\n⚠️ [NO PRIOR INVENTORY] No previous records found - starting from 0`);
         }
@@ -2137,11 +2353,72 @@ app.get('/api/picking-requests/:requestNumber/helper', async (req, res) => {
         const { requestNumber } = req.params;
         const submittedDb = client.db("submittedDB");
         const helperCollection = submittedDb.collection('nodaRequestHelperDB');
+        const inventoryCollection = submittedDb.collection('nodaInventoryDB');
         
-        const helperRecords = await helperCollection.find({ requestNumber }).toArray();
+        let helperRecords = await helperCollection.find({ requestNumber }).toArray();
         
         if (helperRecords.length === 0) {
             return res.status(404).json({ error: 'No picking progress found' });
+        }
+        
+        // ===== SAFEGUARD: Validate and fix corrupted helper data =====
+        const now = new Date();
+        for (let i = 0; i < helperRecords.length; i++) {
+            const record = helperRecords[i];
+            
+            if (record.pickedQuantity > record.totalQuantity) {
+                console.warn(`\n🚨 [HELPER API] Corruption detected for ${requestNumber} line ${record.lineNumber}`);
+                console.warn(`   pickedQuantity (${record.pickedQuantity}) > totalQuantity (${record.totalQuantity})`);
+                
+                // Recalculate from inventory records
+                const inventoryRecords = await inventoryCollection.find({
+                    requestId: requestNumber,
+                    lineNumber: record.lineNumber,
+                    action: { $regex: /^Picking/ },
+                    _insertedBy: 'nodaServer.js:createInventoryTransaction'
+                }).toArray();
+                
+                // Deduplicate by _insertSource
+                const seenInsertSources = new Set();
+                const uniqueRecords = [];
+                for (const invRec of inventoryRecords) {
+                    if (invRec._insertSource && !seenInsertSources.has(invRec._insertSource)) {
+                        seenInsertSources.add(invRec._insertSource);
+                        uniqueRecords.push(invRec);
+                    }
+                }
+                
+                let actualPicked = 0;
+                for (const invRec of uniqueRecords) {
+                    if (invRec.lastQuantity && invRec.lastQuantity > 0) {
+                        actualPicked += invRec.lastQuantity;
+                    }
+                }
+                
+                // Cap at total quantity
+                actualPicked = Math.min(actualPicked, record.totalQuantity);
+                const correctedRemaining = Math.max(0, record.totalQuantity - actualPicked);
+                
+                console.warn(`   🔧 Correcting: picked=${actualPicked}, remaining=${correctedRemaining}`);
+                
+                // Fix the helper record in DB
+                await helperCollection.updateOne(
+                    { requestNumber, lineNumber: record.lineNumber },
+                    {
+                        $set: {
+                            pickedQuantity: actualPicked,
+                            remainingQuantity: correctedRemaining,
+                            _correctedAt: now,
+                            _correctionReason: `API fix: pickedQuantity was ${record.pickedQuantity}, corrected to ${actualPicked}`,
+                            _correctedBy: 'nodaServer.js:helper-api-endpoint'
+                        }
+                    }
+                );
+                
+                // Update the record in our array for the response
+                helperRecords[i].pickedQuantity = actualPicked;
+                helperRecords[i].remainingQuantity = correctedRemaining;
+            }
         }
         
         // Calculate overall progress
@@ -2215,16 +2492,65 @@ async function notifyDeviceStatusChange(deviceId, requestNumber, lineNumber, qua
     let command = null;
     
     if (newStatus === 'in-progress') {
-        // Calculate box quantity for display
-        const boxQuantity = await calculateBoxQuantity(品番, quantity);
-        command = {
-            color: 'green',
-            quantity: boxQuantity,
-            message: `Pick ${boxQuantity}`,
-            requestNumber: requestNumber,
-            lineNumber: lineNumber,
-            品番: 品番
-        };
+        // ===== CRITICAL FIX: Check helper collection for ACTUAL remaining quantity =====
+        // The passed 'quantity' might be the ORIGINAL request, not the REMAINING amount
+        let actualQuantityToDisplay = quantity;
+        
+        try {
+            const submittedDb = client.db("submittedDB");
+            const helperCollection = submittedDb.collection('nodaRequestHelperDB');
+            const helperRecord = await helperCollection.findOne({ requestNumber, lineNumber });
+            
+            if (helperRecord) {
+                // Use remaining quantity from helper (source of truth for picking progress)
+                let remainingFromHelper = helperRecord.remainingQuantity;
+                
+                // SAFEGUARD: Never use negative quantities
+                if (remainingFromHelper < 0) {
+                    console.warn(`⚠️ [HELPER CHECK] Negative remainingQuantity detected: ${remainingFromHelper}, using 0`);
+                    remainingFromHelper = 0;
+                }
+                
+                if (remainingFromHelper !== undefined && remainingFromHelper !== quantity) {
+                    console.log(`🔄 [HELPER CHECK] Original quantity: ${quantity}, Helper remaining: ${remainingFromHelper}`);
+                    actualQuantityToDisplay = remainingFromHelper;
+                }
+                
+                // If picking is complete, don't send green - should be red
+                if (helperRecord.pickingComplete) {
+                    console.log(`⚠️ [HELPER CHECK] Line item already complete - sending RED instead of GREEN`);
+                    command = {
+                        color: 'red',
+                        quantity: 0,
+                        message: 'Completed',
+                        requestNumber: '',
+                        lineNumber: 0,
+                        品番: ''
+                    };
+                    // Skip the green command creation below
+                    newStatus = 'completed';
+                }
+            }
+        } catch (helperError) {
+            console.error(`⚠️ Error checking helper collection:`, helperError);
+            // Fall back to original quantity if helper check fails
+        }
+        
+        // Only create green command if not already completed
+        if (newStatus === 'in-progress') {
+            // Calculate box quantity for display using ACTUAL remaining quantity
+            const boxQuantity = await calculateBoxQuantity(品番, actualQuantityToDisplay);
+            console.log(`📦 Using actual remaining: ${actualQuantityToDisplay} pieces = ${boxQuantity} boxes`);
+            
+            command = {
+                color: 'green',
+                quantity: boxQuantity,
+                message: `Pick ${boxQuantity}`,
+                requestNumber: requestNumber,
+                lineNumber: lineNumber,
+                品番: 品番
+            };
+        }
     } else if (newStatus === 'completed') {
         command = {
             color: 'red',
