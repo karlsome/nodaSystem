@@ -14,6 +14,7 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <esp_task_wdt.h>  // Hardware watchdog
 #include "bsp_cst816.h"
 #include "FreeSans14pt7b.h"  // Small font for device ID
 #include "FreeSans50pt7b.h"  // Large font for quantity (with size multiplier)
@@ -22,6 +23,7 @@
 void handleDisplayUpdate(String jsonData);
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 void reconnectMQTT();
+void forceDeviceReboot(const char* reason);
 
 // List of known SSIDs and passwords
 const char* ssidList[] = {
@@ -121,10 +123,14 @@ struct ConnectionState {
   const unsigned long WIFI_RECONNECT_INTERVAL = 10000; // Try WiFi reconnection every 10 seconds
   const unsigned long MAX_RECONNECT_ATTEMPTS = 3; // Max consecutive attempts before longer delay
   const unsigned long AUTO_RESET_AFTER = 120000; // Auto-reset attempt counter after 2 minutes of failures
+  const unsigned long WIFI_AUTO_RESET_AFTER = 180000; // Auto-reset WiFi attempt counter after 3 minutes
+  const unsigned long FORCE_REBOOT_AFTER = 600000; // Force reboot after 10 minutes of no connectivity (WiFi or MQTT)
   unsigned int reconnectAttempts = 0;
   unsigned int wifiReconnectAttempts = 0;
   unsigned long currentBackoffDelay = 10000; // Dynamic backoff delay
   unsigned long firstFailureTime = 0; // Track when failures started
+  unsigned long lastSuccessfulConnection = 0; // Track last time we had working connection
+  unsigned long wifiFirstFailureTime = 0; // Track when WiFi failures started
 } connectionState;
 
 // Screen power management
@@ -462,12 +468,80 @@ void check_bridge_button() {
   }
 }
 
+// Force device reboot - last resort failsafe
+void forceDeviceReboot(const char* reason) {
+  Serial.println("🔄🔄🔄 ===== FORCE REBOOT INITIATED =====");
+  Serial.printf("📋 Reason: %s\n", reason);
+  Serial.println("⏰ Rebooting in 3 seconds...");
+  
+  // Show reboot message on display
+  gfx->fillScreen(RED);
+  gfx->setFont(&FreeSans14pt7b);
+  gfx->setTextSize(1);
+  gfx->setTextColor(WHITE);
+  gfx->setCursor(50, 100);
+  gfx->print("REBOOTING...");
+  gfx->setCursor(30, 140);
+  gfx->print(reason);
+  gfx->flush();
+  
+  delay(3000);
+  
+  Serial.println("🔄 Executing ESP.restart()...");
+  ESP.restart();
+}
+
+// Check if we need to force reboot due to prolonged failure
+void checkForForcedReboot() {
+  unsigned long now = millis();
+  
+  // Handle millis() overflow
+  if (now < connectionState.lastSuccessfulConnection) {
+    connectionState.lastSuccessfulConnection = now;
+    return;
+  }
+  
+  // Check if we've been disconnected for too long
+  bool wifiOk = (WiFi.status() == WL_CONNECTED);
+  bool mqttOk = deviceState.isConnected && mqttClient.connected();
+  
+  if (wifiOk && mqttOk) {
+    // All good - update last successful connection time
+    connectionState.lastSuccessfulConnection = now;
+    return;
+  }
+  
+  // Calculate how long we've been without full connectivity
+  unsigned long disconnectedTime = now - connectionState.lastSuccessfulConnection;
+  
+  // Log status periodically (every 30 seconds after 1 minute)
+  static unsigned long lastStatusLog = 0;
+  if (disconnectedTime > 60000 && (now - lastStatusLog) > 30000) {
+    lastStatusLog = now;
+    Serial.printf("⚠️ Connection status: WiFi=%s, MQTT=%s, disconnected for %lu seconds\n",
+      wifiOk ? "OK" : "FAIL",
+      mqttOk ? "OK" : "FAIL", 
+      disconnectedTime / 1000);
+    Serial.printf("⏰ Will force reboot after %lu seconds of failure\n", 
+      connectionState.FORCE_REBOOT_AFTER / 1000);
+  }
+  
+  // Force reboot if disconnected for too long (10 minutes by default)
+  if (disconnectedTime >= connectionState.FORCE_REBOOT_AFTER) {
+    String reason = "No connection for " + String(disconnectedTime / 60000) + " min";
+    forceDeviceReboot(reason.c_str());
+  }
+}
+
 // WiFi helpers
 void onWiFiConnected() {
   Serial.println("📶 WiFi connected!");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
   deviceState.currentMessage = "WiFi Connected";
+  connectionState.wifiReconnectAttempts = 0; // Reset WiFi retry counter on success
+  connectionState.wifiFirstFailureTime = 0; // Reset failure timer
+  connectionState.lastSuccessfulConnection = millis(); // Update last successful connection
   update_screen_activity(); // Reset timeout and wake screen
   update_screen_display();
   
@@ -480,6 +554,12 @@ void onWiFiDisconnected() {
   deviceState.isConnected = false;
   connectionState.wasWifiConnected = false;
   deviceState.currentMessage = "WiFi Disconnected";
+  
+  // Track when WiFi failure started
+  if (connectionState.wifiFirstFailureTime == 0) {
+    connectionState.wifiFirstFailureTime = millis();
+  }
+  
   update_screen_activity(); // Reset timeout and wake screen
   update_screen_display();
 }
@@ -487,9 +567,28 @@ void onWiFiDisconnected() {
 void attemptWiFiReconnection() {
   unsigned long now = millis();
   
+  // Handle millis() overflow for WiFi reconnection timing
+  if (now < connectionState.lastWifiReconnectAttempt) {
+    connectionState.lastWifiReconnectAttempt = now;
+  }
+  
+  // Auto-reset WiFi attempt counter after extended failures (3 minutes)
+  if (connectionState.wifiReconnectAttempts > 0 && connectionState.wifiFirstFailureTime > 0) {
+    if (now - connectionState.wifiFirstFailureTime >= connectionState.WIFI_AUTO_RESET_AFTER) {
+      Serial.println("⏰ Auto-resetting WiFi reconnect attempts after extended failures");
+      connectionState.wifiReconnectAttempts = 0;
+      connectionState.wifiFirstFailureTime = now; // Reset the timer too
+    }
+  }
+  
   // Check if enough time has passed since last attempt
   if (now - connectionState.lastWifiReconnectAttempt < connectionState.WIFI_RECONNECT_INTERVAL) {
     return; // Too soon to retry
+  }
+  
+  // Track when WiFi failure started (if not already set)
+  if (connectionState.wifiFirstFailureTime == 0) {
+    connectionState.wifiFirstFailureTime = now;
   }
   
   // Check if WiFi is currently in connecting state - avoid calling reconnect during connection
@@ -510,17 +609,22 @@ void attemptWiFiReconnection() {
   connectionState.lastWifiReconnectAttempt = now;
   connectionState.wifiReconnectAttempts++;
   
-  Serial.printf("🔄 WiFi reconnection attempt #%d...\n", connectionState.wifiReconnectAttempts);
+  Serial.printf("🔄 WiFi reconnection attempt #%d (failing for %lu sec)...\n", 
+    connectionState.wifiReconnectAttempts,
+    (now - connectionState.wifiFirstFailureTime) / 1000);
   
-  deviceState.currentMessage = String("WiFi Reconnect #") + String(connectionState.wifiReconnectAttempts);
+  // Show more informative message
+  deviceState.currentMessage = "WiFi Retry #" + String(connectionState.wifiReconnectAttempts);
   update_screen_activity();
   update_screen_display();
   
   // Always do full network scan to allow connecting to range extender (OneMesh)
   // WiFi.reconnect() locks to BSSID (MAC) of original AP, preventing extender connection
   Serial.println("🔍 Performing full network scan to find best AP (router/extender)...");
+  esp_task_wdt_reset(); // Feed watchdog before potentially long operation
   WiFi.disconnect(true, true);
   delay(500);
+  esp_task_wdt_reset();
   connectToWiFi();
   return; // connectToWiFi handles the connection attempt
   
@@ -630,6 +734,7 @@ void connectToMQTT() {
   
   // Configure WiFiClientSecure for TLS/SSL connection
   wifiClient.setInsecure(); // Skip certificate verification for simplicity (use CA cert in production)
+  wifiClient.setTimeout(15); // 15 second timeout for TLS handshake (prevents hanging)
   
   // Configure MQTT client
   mqttClient.setServer(mqtt_server, mqtt_port);
@@ -690,8 +795,10 @@ void reconnectMQTT() {
   String willTopic = TOPIC_STATUS;
   String willMessage = "{\"deviceId\":\"" + DEVICE_ID + "\",\"status\":\"offline\",\"timestamp\":" + String(millis()) + "}";
   
+  esp_task_wdt_reset(); // Feed watchdog before potentially slow TLS connection
   bool connected = mqttClient.connect(clientId.c_str(), mqtt_user, mqtt_password, 
                                      willTopic.c_str(), 1, true, willMessage.c_str());
+  esp_task_wdt_reset(); // Feed watchdog after connection attempt
   
   if (connected) {
     Serial.println(" ✅ MQTT Connected!");
@@ -702,6 +809,7 @@ void reconnectMQTT() {
     connectionState.reconnectAttempts = 0; // Reset counter on successful connection
     connectionState.currentBackoffDelay = connectionState.RECONNECT_DELAY; // Reset backoff delay
     connectionState.firstFailureTime = 0; // Reset failure timer
+    connectionState.lastSuccessfulConnection = millis(); // Update last successful connection time
     
     // Subscribe to command topic
     bool subSuccess = mqttClient.subscribe(TOPIC_COMMAND.c_str(), 1); // QoS 1 for reliable delivery
@@ -725,7 +833,9 @@ void reconnectMQTT() {
     update_screen_display();
     
     // Check current status via API as backup
+    esp_task_wdt_reset();
     delay(2000);
+    esp_task_wdt_reset();
     Serial.println("🔄 Checking device status via REST API as backup...");
     checkDeviceStatusViaAPI();
     
@@ -889,7 +999,13 @@ void ensureConnectionStability() {
 
 // MQTT message callback
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  Serial.println("� ===== MQTT MESSAGE RECEIVED =====");
+  // Ignore empty payloads (e.g., from clearing retained messages)
+  if (length == 0) {
+    Serial.println("📡 Empty MQTT message received (retained clear) - ignoring");
+    return;
+  }
+  
+  Serial.println("📡 ===== MQTT MESSAGE RECEIVED =====");
   Serial.printf("📡 Topic: %s\n", topic);
   Serial.printf("📡 Payload Length: %u bytes\n", length);
   
@@ -899,7 +1015,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     message += (char)payload[i];
   }
   
-  Serial.println("� Raw Message: " + message);
+  Serial.println("📡 Raw Message: " + message);
   connectionState.lastMqttMessage = millis();
   
   // Handle different topic types
@@ -1033,13 +1149,22 @@ void connectToWiFi() {
 
   // Retry loop for initial connection
   while (!connected && retryCount < MAX_RETRY_CYCLES) {
+    // Feed watchdog during long connection process
+    esp_task_wdt_reset();
+    
     if (retryCount > 0) {
       Serial.printf("🔄 WiFi connection retry cycle %d of %d...\n", retryCount + 1, MAX_RETRY_CYCLES);
-      delay(5000); // Wait 5 seconds between full retry cycles
+      // Feed watchdog during delay
+      for (int d = 0; d < 10; d++) {
+        delay(500);
+        esp_task_wdt_reset();
+      }
     }
 
     Serial.println("📡 Scanning for available networks...");
+    esp_task_wdt_reset(); // Feed before potentially long scan
     int n = WiFi.scanNetworks();
+    esp_task_wdt_reset(); // Feed after scan
     Serial.printf("Found %d networks\n", n);
 
     for (int i = 0; i < numNetworks && !connected; i++) {
@@ -1061,8 +1186,9 @@ void connectToWiFi() {
           WiFi.begin(ssidList[i], passwordList[i]);
 
           int attempts = 0;
-          while (WiFi.status() != WL_CONNECTED && attempts < 60) { // Increase to 30s for extenders
+          while (WiFi.status() != WL_CONNECTED && attempts < 120) { // 60 seconds for slow connections/extenders
             delay(500);
+            esp_task_wdt_reset(); // Feed watchdog during connection wait
             Serial.print(".");
             attempts++;
             
@@ -1117,6 +1243,19 @@ void connectToWiFi() {
 void setup() {
   Serial.begin(115200);
   Serial.println("🚀 ESP32-S3 Noda System IoT Device - MQTT VERSION - ID: " + DEVICE_ID);
+
+  // Initialize hardware watchdog (30 second timeout)
+  Serial.println("🐕 Initializing hardware watchdog (30s timeout)...");
+  
+  // ESP-IDF v5.x uses new config struct API
+  esp_task_wdt_config_t wdt_config = {
+    .timeout_ms = 30000,           // 30 second timeout
+    .idle_core_mask = (1 << 0),    // Watch core 0
+    .trigger_panic = true          // Panic (reboot) on timeout
+  };
+  esp_task_wdt_init(&wdt_config);
+  esp_task_wdt_add(NULL); // Add current task to watchdog
+  Serial.println("✅ Watchdog initialized");
 
   // LCD
   if (!gfx->begin()) Serial.println("gfx->begin() failed!");
@@ -1183,6 +1322,7 @@ void setup() {
   connectionState.lastHeartbeat = millis(); // Initialize connection monitoring
   connectionState.lastConnectAttempt = 0;
   connectionState.isReconnecting = false;
+  connectionState.lastSuccessfulConnection = millis(); // Initialize - assume starting fresh
   update_screen_display();
 
   // Connect to WiFi (MQTT connection will be initiated from onWiFiConnected)
@@ -1194,6 +1334,9 @@ void setup() {
 
 // --- Loop ---
 void loop() {
+  // Feed the hardware watchdog - prevents device hang
+  esp_task_wdt_reset();
+  
   lv_timer_handler();
   check_bridge_button();
   check_screen_timeout(); // Check if screen should timeout during red/standby modes
@@ -1213,6 +1356,9 @@ void loop() {
     // WiFi is down - attempt reconnection
     attemptWiFiReconnection();
   }
+  
+  // Check for prolonged connection failure - force reboot as last resort
+  checkForForcedReboot();
 
   delay(10); // Small delay to prevent watchdog issues
 }
