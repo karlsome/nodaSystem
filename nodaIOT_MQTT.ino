@@ -120,8 +120,11 @@ struct ConnectionState {
   const unsigned long RECONNECT_DELAY = 10000; // Wait 10 seconds between reconnect attempts (longer for stability)
   const unsigned long WIFI_RECONNECT_INTERVAL = 10000; // Try WiFi reconnection every 10 seconds
   const unsigned long MAX_RECONNECT_ATTEMPTS = 3; // Max consecutive attempts before longer delay
+  const unsigned long AUTO_RESET_AFTER = 120000; // Auto-reset attempt counter after 2 minutes of failures
   unsigned int reconnectAttempts = 0;
   unsigned int wifiReconnectAttempts = 0;
+  unsigned long currentBackoffDelay = 10000; // Dynamic backoff delay
+  unsigned long firstFailureTime = 0; // Track when failures started
 } connectionState;
 
 // Screen power management
@@ -653,7 +656,19 @@ void reconnectMQTT() {
   }
 
   unsigned long now = millis();
-  if (now - connectionState.lastConnectAttempt < connectionState.RECONNECT_DELAY) {
+  
+  // Auto-reset attempt counter if failures have been going on too long
+  if (connectionState.reconnectAttempts > 0 && connectionState.firstFailureTime > 0) {
+    if (now - connectionState.firstFailureTime >= connectionState.AUTO_RESET_AFTER) {
+      Serial.println("⏰ Auto-resetting MQTT reconnect attempts after extended failures");
+      connectionState.reconnectAttempts = 0;
+      connectionState.currentBackoffDelay = connectionState.RECONNECT_DELAY;
+      connectionState.firstFailureTime = 0;
+    }
+  }
+  
+  // Check backoff delay dynamically
+  if (now - connectionState.lastConnectAttempt < connectionState.currentBackoffDelay) {
     return; // Too soon to retry
   }
 
@@ -661,7 +676,12 @@ void reconnectMQTT() {
   connectionState.lastConnectAttempt = now;
 
   Serial.print("🔄 Attempting MQTT connection...");
-  Serial.printf(" (Attempt #%d)\n", connectionState.reconnectAttempts + 1);
+  Serial.printf(" (Attempt #%d, delay: %lus)\n", connectionState.reconnectAttempts + 1, connectionState.currentBackoffDelay / 1000);
+  
+  // Update display to show retry attempt
+  deviceState.currentMessage = "MQTT Retry #" + String(connectionState.reconnectAttempts + 1);
+  update_screen_activity();
+  update_screen_display();
   
   // Create client ID with device ID
   String clientId = "NodaIoT_" + DEVICE_ID + "_" + String(random(0xffff), HEX);
@@ -680,6 +700,8 @@ void reconnectMQTT() {
     connectionState.isReconnecting = false;
     connectionState.lastMqttMessage = millis();
     connectionState.reconnectAttempts = 0; // Reset counter on successful connection
+    connectionState.currentBackoffDelay = connectionState.RECONNECT_DELAY; // Reset backoff delay
+    connectionState.firstFailureTime = 0; // Reset failure timer
     
     // Subscribe to command topic
     bool subSuccess = mqttClient.subscribe(TOPIC_COMMAND.c_str(), 1); // QoS 1 for reliable delivery
@@ -710,22 +732,51 @@ void reconnectMQTT() {
   } else {
     Serial.print(" ❌ Failed, rc=");
     Serial.print(mqttClient.state());
+    Serial.print(" (");
+    // Print readable error
+    switch(mqttClient.state()) {
+      case -4: Serial.print("TIMEOUT"); break;
+      case -3: Serial.print("CONNECTION LOST"); break;
+      case -2: Serial.print("CONNECT FAILED"); break;
+      case -1: Serial.print("DISCONNECTED"); break;
+      case 1: Serial.print("BAD PROTOCOL"); break;
+      case 2: Serial.print("BAD CLIENT ID"); break;
+      case 3: Serial.print("UNAVAILABLE"); break;
+      case 4: Serial.print("BAD CREDENTIALS"); break;
+      case 5: Serial.print("UNAUTHORIZED"); break;
+      default: Serial.print("UNKNOWN"); break;
+    }
+    Serial.println(")");
+    
     connectionState.reconnectAttempts++;
     
-    // Use exponential backoff after multiple failures
-    unsigned long backoffDelay = connectionState.RECONNECT_DELAY;
+    // Track when failures started
+    if (connectionState.firstFailureTime == 0) {
+      connectionState.firstFailureTime = millis();
+    }
+    
+    // Implement exponential backoff with max limit
     if (connectionState.reconnectAttempts >= connectionState.MAX_RECONNECT_ATTEMPTS) {
-      backoffDelay = 30000; // Wait 30 seconds after multiple failures
-      Serial.println(" (using extended backoff)");
+      // Cap at 30 seconds max
+      connectionState.currentBackoffDelay = 30000;
+      Serial.printf(" Will retry in %lu seconds (extended backoff)\n", connectionState.currentBackoffDelay / 1000);
     } else {
-      Serial.printf(" retrying in %lu seconds\n", backoffDelay / 1000);
+      // Progressive backoff: 10s, 15s, 20s
+      connectionState.currentBackoffDelay = connectionState.RECONNECT_DELAY + (connectionState.reconnectAttempts * 5000);
+      Serial.printf(" Will retry in %lu seconds\n", connectionState.currentBackoffDelay / 1000);
     }
     
     deviceState.isConnected = false;
-    deviceState.currentMessage = "MQTT Failed";
+    // Show more informative message with retry countdown
+    deviceState.currentMessage = "MQTT Failed - Retry #" + String(connectionState.reconnectAttempts + 1);
     connectionState.isReconnecting = false;
     update_screen_activity();
     update_screen_display();
+    
+    Serial.printf("📊 Reconnect stats: attempts=%d, backoff=%lus, failing_for=%lus\n", 
+                  connectionState.reconnectAttempts, 
+                  connectionState.currentBackoffDelay / 1000,
+                  (millis() - connectionState.firstFailureTime) / 1000);
   }
 }
 
