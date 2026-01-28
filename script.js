@@ -4762,10 +4762,27 @@ async function submitNyukoInput() {
         return;
     }
 
+    // Get buttons and overlay
+    const submitBtn = document.getElementById('submitNyukoBtn');
+    const resetBtn = document.getElementById('resetNyukoBtn');
+    const uploadOverlay = document.getElementById('nyukoUploadOverlay');
+    
+    // Save original button content
+    const originalSubmitContent = submitBtn.innerHTML;
+    
+    // Show upload overlay
+    uploadOverlay.classList.remove('hidden');
+    
+    // Disable buttons and show loading state
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>送信中...';
+    submitBtn.classList.add('opacity-75', 'cursor-not-allowed');
+    if (resetBtn) {
+        resetBtn.disabled = true;
+        resetBtn.classList.add('opacity-50', 'cursor-not-allowed');
+    }
+
     try {
-        // Show loading toast
-        showToast('📤 ' + t('submitting'), 'info');
-        
         // Prepare data
         const submissionData = {
             inputProducts: nyukoInputProducts,
@@ -4792,6 +4809,9 @@ async function submitNyukoInput() {
         const result = await response.json();
         console.log('✅ Submission result:', result);
 
+        // Hide overlay
+        uploadOverlay.classList.add('hidden');
+        
         showToast(`✅ ${result.processedCount}${t('products-received')}`, 'success');
 
         // Clear localStorage after successful submission
@@ -4812,7 +4832,20 @@ async function submitNyukoInput() {
 
     } catch (error) {
         console.error('Error submitting nyuko:', error);
+        
+        // Hide overlay
+        uploadOverlay.classList.add('hidden');
+        
         showToast('❌ ' + t('submit-failed'), 'error');
+        
+        // Re-enable buttons on error
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = originalSubmitContent;
+        submitBtn.classList.remove('opacity-75', 'cursor-not-allowed');
+        if (resetBtn) {
+            resetBtn.disabled = false;
+            resetBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+        }
     }
 }
 
