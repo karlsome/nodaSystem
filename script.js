@@ -3891,6 +3891,32 @@ async function startCountingProduct(productNumber, boxQuantity) {
             return;
         }
         
+        // Check if this product already exists in the counted list
+        const existingIndex = tanaoroshiCountedProducts.findIndex(p => p.品番 === productNumber);
+        if (existingIndex !== -1) {
+            const existingProduct = tanaoroshiCountedProducts[existingIndex];
+            const confirmOverwrite = confirm(
+                `⚠️ この製品は既にリストに存在します。\n\n` +
+                `品番: ${existingProduct.品番}\n` +
+                `現在のカウント: ${existingProduct.newPhysicalQuantity}個 (${existingProduct.countedBoxes}箱)\n\n` +
+                `上書きしますか？`
+            );
+            
+            // Restore keyboard focus after confirm dialog
+            document.body.focus();
+            
+            if (!confirmOverwrite) {
+                showToast('キャンセルしました', 'info');
+                return;
+            }
+            
+            // Remove existing entry
+            tanaoroshiCountedProducts.splice(existingIndex, 1);
+            saveTanaoroshiToStorage();
+            updateTanaoroshiSummaryList();
+            showToast('📝 既存データを上書きします', 'info');
+        }
+        
         // Check if this is a new product (not in inventory)
         if (productData.isNewProduct) {
             const confirmAdd = confirm(
@@ -3899,6 +3925,9 @@ async function startCountingProduct(productNumber, boxQuantity) {
                 `${t('product-name') || '品名'}: ${productData.品名 || '-'}\n\n` +
                 `${t('item-not-in-inventory-detail').split('\n').pop()}`
             );
+            
+            // Restore keyboard focus after confirm dialog
+            document.body.focus();
 
             if (!confirmAdd) {
                 showToast(t('cancelled'), 'info');
@@ -4053,34 +4082,8 @@ async function completeTanaoroshiCount() {
     const expectedPieces = product.currentPhysicalQuantity;
     const difference = countedPieces - expectedPieces;
     const isNewProduct = product.isNewProduct || false;
-
-    // For new products, show special confirmation
-    if (isNewProduct) {
-        const message = `${t('add-new-product-confirm')
-            .replace('{0}', product.品番)
-            .replace('{1}', countedPieces)
-            .replace('{2}', product.countedBoxes)}`;
-
-        if (!confirm(message)) {
-            return;
-        }
-    } else {
-        // If there's a discrepancy, show confirmation
-        if (difference !== 0) {
-            const boxDifference = Math.ceil(Math.abs(difference) / product.収容数);
-            const action = difference > 0 ? t('adjustment-add') : t('adjustment-reduce');
-            const message = `${t('inventory-adjustment-confirm')
-                .replace('{0}', Math.abs(difference))
-                .replace('{1}', boxDifference)
-                .replace('{2}', action)}`;
-
-            if (!confirm(message)) {
-                return;
-            }
-        }
-    }
     
-    // Add to counted products list
+    // Add to counted products list (no confirmation needed)
     tanaoroshiCountedProducts.push({
         品番: product.品番,
         品名: product.品名,
@@ -4109,6 +4112,9 @@ async function completeTanaoroshiCount() {
     updateTanaoroshiSummaryList();
 
     showToast('✅ ' + t('count-complete'), 'success');
+    
+    // Restore keyboard focus for scanning
+    document.body.focus();
 }
 
 // Update summary list display
