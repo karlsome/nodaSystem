@@ -4325,8 +4325,6 @@ async function submitTanaoroshiCount() {
         // Hide overlay
         uploadOverlay.classList.add('hidden');
         
-        showToast(`✅ ${result.processedCount}${t('products-updated')}`, 'success');
-
         // Clear localStorage after successful submission
         localStorage.removeItem(TANAOROSHI_STORAGE_KEY);
         localStorage.removeItem(TANAOROSHI_CACHE_KEY);
@@ -4336,12 +4334,12 @@ async function submitTanaoroshiCount() {
         tanaoroshiProductCache = {};
         currentTanaoroshiProduct = null;
 
-        // Reset UI after a short delay
-        setTimeout(() => {
-            document.getElementById('tanaoroshiInitialState').classList.remove('hidden');
-            document.getElementById('tanaoroshiActiveProduct').classList.add('hidden');
-            updateTanaoroshiSummaryList();
-        }, 2000);
+        // Reset UI immediately
+        document.getElementById('tanaoroshiInitialState').classList.remove('hidden');
+        document.getElementById('tanaoroshiActiveProduct').classList.add('hidden');
+        updateTanaoroshiSummaryList();
+        
+        showToast(`✅ ${result.processedCount}${t('products-updated')}`, 'success');
 
     } catch (error) {
         console.error('Error submitting tanaoroshi:', error);
@@ -4930,8 +4928,6 @@ async function submitNyukoInput() {
         // Hide overlay
         uploadOverlay.classList.add('hidden');
         
-        showToast(`✅ ${result.processedCount}${t('products-received')}`, 'success');
-
         // Clear localStorage after successful submission
         localStorage.removeItem(NYUKO_STORAGE_KEY);
         localStorage.removeItem(NYUKO_CACHE_KEY);
@@ -4941,12 +4937,12 @@ async function submitNyukoInput() {
         nyukoProductCache = {};
         currentDisplayedProduct = null;
 
-        // Reset UI after a short delay
-        setTimeout(() => {
-            document.getElementById('nyukoInitialState').classList.remove('hidden');
-            document.getElementById('nyukoActiveProduct').classList.add('hidden');
-            updateNyukoSummaryList();
-        }, 2000);
+        // Reset UI immediately
+        document.getElementById('nyukoInitialState').classList.remove('hidden');
+        document.getElementById('nyukoActiveProduct').classList.add('hidden');
+        updateNyukoSummaryList();
+        
+        showToast(`✅ ${result.processedCount}${t('products-received')}`, 'success');
 
     } catch (error) {
         console.error('Error submitting nyuko:', error);
