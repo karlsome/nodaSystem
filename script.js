@@ -2716,6 +2716,7 @@ window.openNyukoSystem = openNyukoSystem;
 window.deleteNyukoProduct = deleteNyukoProduct;
 window.submitNyukoInput = submitNyukoInput;
 window.showProductInDisplay = showProductInDisplay;
+window.resetAllNyukoProducts = resetAllNyukoProducts;
 
 // Gentan (原単) system functions
 window.handleGentanImageCapture = handleGentanImageCapture;
@@ -4252,6 +4253,8 @@ let nyukoInputProducts = []; // Array to store input products (accumulated)
 let nyukoProductCache = {}; // Cache for fetched product data
 let currentDisplayedProduct = null; // Currently displayed product number
 let nyukoScanBuffer = ''; // Buffer for QR scan input
+const NYUKO_STORAGE_KEY = 'nodaSystem_nyukoInputProducts';
+const NYUKO_CACHE_KEY = 'nodaSystem_nyukoProductCache';
 
 // Initialize nyuko when screen is shown
 function openNyukoSystem() {
@@ -4266,23 +4269,72 @@ function openNyukoSystem() {
 function initializeNyuko() {
     console.log('🔄 Initializing Nyuko system...');
     
-    // Reset state
-    nyukoInputProducts = [];
-    nyukoProductCache = {};
+    // Load from localStorage if available
+    loadNyukoFromStorage();
+    
+    // Reset scan buffer and displayed product
     currentDisplayedProduct = null;
     nyukoScanBuffer = '';
     
-    // Show initial state, hide active product display
-    document.getElementById('nyukoInitialState').classList.remove('hidden');
-    document.getElementById('nyukoActiveProduct').classList.add('hidden');
+    // Show initial state or last displayed product
+    if (nyukoInputProducts.length > 0) {
+        // Show the first product in the list
+        const firstProduct = nyukoInputProducts[0];
+        if (nyukoProductCache[firstProduct.品番]) {
+            updateProductDisplay(firstProduct.品番, nyukoProductCache[firstProduct.品番]);
+        } else {
+            document.getElementById('nyukoInitialState').classList.remove('hidden');
+            document.getElementById('nyukoActiveProduct').classList.add('hidden');
+        }
+    } else {
+        document.getElementById('nyukoInitialState').classList.remove('hidden');
+        document.getElementById('nyukoActiveProduct').classList.add('hidden');
+    }
     
-    // Update summary list (show empty state)
+    // Update summary list
     updateNyukoSummaryList();
     
     // Setup keyboard listener for HID mode QR scanner
     setupNyukoKeyboardListener();
     
     console.log('✅ Nyuko system ready');
+}
+
+// Load nyuko data from localStorage
+function loadNyukoFromStorage() {
+    try {
+        const savedProducts = localStorage.getItem(NYUKO_STORAGE_KEY);
+        const savedCache = localStorage.getItem(NYUKO_CACHE_KEY);
+        
+        if (savedProducts) {
+            nyukoInputProducts = JSON.parse(savedProducts);
+            console.log('💾 Loaded', nyukoInputProducts.length, 'products from storage');
+        } else {
+            nyukoInputProducts = [];
+        }
+        
+        if (savedCache) {
+            nyukoProductCache = JSON.parse(savedCache);
+            console.log('💾 Loaded product cache from storage');
+        } else {
+            nyukoProductCache = {};
+        }
+    } catch (error) {
+        console.error('Error loading nyuko from storage:', error);
+        nyukoInputProducts = [];
+        nyukoProductCache = {};
+    }
+}
+
+// Save nyuko data to localStorage
+function saveNyukoToStorage() {
+    try {
+        localStorage.setItem(NYUKO_STORAGE_KEY, JSON.stringify(nyukoInputProducts));
+        localStorage.setItem(NYUKO_CACHE_KEY, JSON.stringify(nyukoProductCache));
+        console.log('💾 Saved', nyukoInputProducts.length, 'products to storage');
+    } catch (error) {
+        console.error('Error saving nyuko to storage:', error);
+    }
 }
 
 // Setup keyboard listener for QR scanner (HID mode)
@@ -4448,6 +4500,9 @@ function addOrIncrementProduct(productNumber, productData, boxQuantity) {
         console.log(`📦 Added new product ${productNumber}: 1 box`);
     }
     
+    // Save to localStorage
+    saveNyukoToStorage();
+    
     // Update the summary list
     updateNyukoSummaryList();
 }
@@ -4531,19 +4586,22 @@ function updateNyukoSummaryList() {
     const itemCount = document.getElementById('nyukoItemCount');
     const emptyState = document.getElementById('nyukoEmptyState');
     const submitBtn = document.getElementById('submitNyukoBtn');
+    const resetBtn = document.getElementById('resetNyukoBtn');
     
     // Update count
     itemCount.textContent = `(${nyukoInputProducts.length})`;
     
-    // Show/hide empty state and submit button
+    // Show/hide empty state and buttons
     if (nyukoInputProducts.length === 0) {
         emptyState.classList.remove('hidden');
         itemsList.classList.add('hidden');
         submitBtn.classList.add('hidden');
+        if (resetBtn) resetBtn.classList.add('hidden');
     } else {
         emptyState.classList.add('hidden');
         itemsList.classList.remove('hidden');
         submitBtn.classList.remove('hidden');
+        if (resetBtn) resetBtn.classList.remove('hidden');
         
         // Clear and rebuild list
         itemsList.innerHTML = '';
@@ -4569,9 +4627,16 @@ function createNyukoSummaryRow(product, index) {
     const isActive = currentDisplayedProduct === product.品番;
     const activeClass = isActive ? 'ring-2 ring-purple-400 bg-purple-50' : '';
     
+    // Row number (1-based)
+    const rowNumber = index + 1;
+    
     row.innerHTML = `
         <div class="flex items-center justify-between ${activeClass} rounded-lg p-2 -m-2">
             <div class="flex items-center space-x-4 flex-1 cursor-pointer" onclick="showProductInDisplay('${product.品番}')">
+                <!-- Row Number -->
+                <div class="w-10 h-10 bg-purple-100 rounded-full flex items-center justify-center flex-shrink-0">
+                    <span class="text-purple-700 font-bold text-lg">${rowNumber}</span>
+                </div>
                 ${product.imageURL ? `
                     <img src="${product.imageURL}" alt="${product.品番}" class="w-16 h-16 object-contain rounded border border-gray-200">
                 ` : `
@@ -4637,6 +4702,9 @@ function deleteNyukoProduct(index) {
     const deletedProductNumber = product.品番;
     nyukoInputProducts.splice(index, 1);
     
+    // Save to localStorage
+    saveNyukoToStorage();
+    
     // If we deleted the currently displayed product, clear or update the display
     if (currentDisplayedProduct === deletedProductNumber) {
         if (nyukoInputProducts.length > 0) {
@@ -4653,6 +4721,34 @@ function deleteNyukoProduct(index) {
     
     updateNyukoSummaryList();
     showToast(t('deleted'), 'info');
+}
+
+// Reset all nyuko products
+function resetAllNyukoProducts() {
+    if (nyukoInputProducts.length === 0) {
+        showToast('リストは空です', 'info');
+        return;
+    }
+    
+    if (!confirm(`${nyukoInputProducts.length}件のデータをすべて削除しますか？\nこの操作は取り消せません。`)) {
+        return;
+    }
+    
+    // Clear all data
+    nyukoInputProducts = [];
+    nyukoProductCache = {};
+    currentDisplayedProduct = null;
+    
+    // Clear localStorage
+    localStorage.removeItem(NYUKO_STORAGE_KEY);
+    localStorage.removeItem(NYUKO_CACHE_KEY);
+    
+    // Reset UI to initial state
+    document.getElementById('nyukoInitialState').classList.remove('hidden');
+    document.getElementById('nyukoActiveProduct').classList.add('hidden');
+    
+    updateNyukoSummaryList();
+    showToast('すべてのデータをリセットしました', 'info');
 }
 
 // Submit all input products
@@ -4698,9 +4794,20 @@ async function submitNyukoInput() {
 
         showToast(`✅ ${result.processedCount}${t('products-received')}`, 'success');
 
-        // Reset system
+        // Clear localStorage after successful submission
+        localStorage.removeItem(NYUKO_STORAGE_KEY);
+        localStorage.removeItem(NYUKO_CACHE_KEY);
+        
+        // Reset state
+        nyukoInputProducts = [];
+        nyukoProductCache = {};
+        currentDisplayedProduct = null;
+
+        // Reset UI after a short delay
         setTimeout(() => {
-            initializeNyuko();
+            document.getElementById('nyukoInitialState').classList.remove('hidden');
+            document.getElementById('nyukoActiveProduct').classList.add('hidden');
+            updateNyukoSummaryList();
         }, 2000);
 
     } catch (error) {

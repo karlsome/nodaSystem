@@ -548,9 +548,14 @@
                                 <span id="nyukoItemCount" class="ml-2 text-purple-600">(0)</span>
                             </h3>
                         </div>
-                        <button onclick="submitNyukoInput()" id="submitNyukoBtn" class="px-8 py-3 bg-purple-500 text-white rounded-lg hover:bg-purple-600 transition-colors text-lg font-medium shadow-md">
-                            <i class="fas fa-check mr-2"></i><span data-i18n="submit-button">送信</span>
-                        </button>
+                        <div class="flex items-center space-x-3">
+                            <button onclick="resetAllNyukoProducts()" id="resetNyukoBtn" class="hidden px-6 py-3 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors text-lg font-medium shadow-md">
+                                <i class="fas fa-trash-alt mr-2"></i><span data-i18n="reset-all">リセット</span>
+                            </button>
+                            <button onclick="submitNyukoInput()" id="submitNyukoBtn" class="hidden px-8 py-3 bg-purple-500 text-white rounded-lg hover:bg-purple-600 transition-colors text-lg font-medium shadow-md">
+                                <i class="fas fa-check mr-2"></i><span data-i18n="submit-button">送信</span>
+                            </button>
+                        </div>
                     </div>
                     <div id="nyukoItemsList" class="divide-y divide-gray-200 max-h-[400px] overflow-y-auto">
                         <!-- Input products will be added here -->
