@@ -4542,6 +4542,15 @@ async function processNyukoProductScan(productNumber, boxQuantity) {
                 } else {
                     showToast('❌ ' + t('product-fetch-failed'), 'error');
                 }
+                
+                // Play alert sound on error, stop after 2 seconds
+                if (window.audioManager) {
+                    audioManager.playAlert();
+                    setTimeout(() => {
+                        audioManager.stopAlert();
+                    }, 2000);
+                }
+                
                 return;
             }
             
@@ -4556,9 +4565,12 @@ async function processNyukoProductScan(productNumber, boxQuantity) {
         if (boxQuantity !== productData.収容数) {
             showToast(`❌ ${t('box-quantity-mismatch')} ${productData.収容数}${t('box-quantity-suffix')}`, 'error');
             
-            // Play alert sound on error
+            // Play alert sound on error, stop after 2 seconds
             if (window.audioManager) {
                 audioManager.playAlert();
+                setTimeout(() => {
+                    audioManager.stopAlert();
+                }, 2000);
             }
             
             // Flash red on counter area if product is displayed
@@ -4586,6 +4598,14 @@ async function processNyukoProductScan(productNumber, boxQuantity) {
     } catch (error) {
         console.error('Error processing product scan:', error);
         showToast('❌ ' + t('error-occurred'), 'error');
+        
+        // Play alert sound on error, stop after 2 seconds
+        if (window.audioManager) {
+            audioManager.playAlert();
+            setTimeout(() => {
+                audioManager.stopAlert();
+            }, 2000);
+        }
     }
 }
 
