@@ -2713,12 +2713,9 @@ window.submitTanaoroshiCount = submitTanaoroshiCount;
 
 // Nyuko (入庫) system functions
 window.openNyukoSystem = openNyukoSystem;
-window.adjustNyukoCount = adjustNyukoCount;
-window.completeNyukoInput = completeNyukoInput;
-window.closeNyukoModal = closeNyukoModal;
-window.editNyukoProduct = editNyukoProduct;
 window.deleteNyukoProduct = deleteNyukoProduct;
 window.submitNyukoInput = submitNyukoInput;
+window.showProductInDisplay = showProductInDisplay;
 
 // Gentan (原単) system functions
 window.handleGentanImageCapture = handleGentanImageCapture;
@@ -4251,10 +4248,10 @@ async function submitTanaoroshiCount() {
 // ==================== NYUKO (入庫) SYSTEM ====================
 
 // Global variables for nyuko
-let nyukoInputProducts = []; // Array to store input products
-let currentNyukoProduct = null; // Currently inputting product
+let nyukoInputProducts = []; // Array to store input products (accumulated)
+let nyukoProductCache = {}; // Cache for fetched product data
+let currentDisplayedProduct = null; // Currently displayed product number
 let nyukoScanBuffer = ''; // Buffer for QR scan input
-let isNyukoModalOpen = false; // Track if modal is open
 
 // Initialize nyuko when screen is shown
 function openNyukoSystem() {
@@ -4271,16 +4268,16 @@ function initializeNyuko() {
     
     // Reset state
     nyukoInputProducts = [];
-    currentNyukoProduct = null;
+    nyukoProductCache = {};
+    currentDisplayedProduct = null;
     nyukoScanBuffer = '';
-    isNyukoModalOpen = false;
     
-    // Show scanner area, hide summary list
-    document.getElementById('nyukoScannerArea').classList.remove('hidden');
-    document.getElementById('nyukoSummaryList').classList.add('hidden');
+    // Show initial state, hide active product display
+    document.getElementById('nyukoInitialState').classList.remove('hidden');
+    document.getElementById('nyukoActiveProduct').classList.add('hidden');
     
-    // Close modal if open
-    document.getElementById('nyukoInputModal').classList.add('hidden');
+    // Update summary list (show empty state)
+    updateNyukoSummaryList();
     
     // Setup keyboard listener for HID mode QR scanner
     setupNyukoKeyboardListener();
@@ -4306,8 +4303,8 @@ function nyukoKeyHandler(event) {
         return;
     }
     
-    // Ignore if user is typing in an input field (except our modal state)
-    if (event.target.tagName === 'INPUT' && !isNyukoModalOpen) {
+    // Ignore if user is typing in an input field
+    if (event.target.tagName === 'INPUT' || event.target.tagName === 'TEXTAREA') {
         return;
     }
     
@@ -4351,291 +4348,230 @@ async function processNyukoScan(scanData) {
         return;
     }
     
-    // If no modal is open, this is the initial product scan
-    if (!isNyukoModalOpen) {
-        await startInputtingProduct(scannedProductNumber, scannedBoxQuantity);
-    } else {
-        // Modal is open, this is a box scan
-        await processNyukoBoxScan(scannedProductNumber, scannedBoxQuantity);
-    }
+    // Process the scan - fetch product data if needed, then add to list
+    await processNyukoProductScan(scannedProductNumber, scannedBoxQuantity);
 }
 
-// Start inputting a new product
-async function startInputtingProduct(productNumber, referenceQuantity) {
+// Process product scan - fetch data and add to list
+async function processNyukoProductScan(productNumber, boxQuantity) {
     try {
-        console.log(`🆕 Starting input for product: ${productNumber}`);
+        let productData;
+        
+        // Check if we have cached data for this product
+        if (nyukoProductCache[productNumber]) {
+            productData = nyukoProductCache[productNumber];
+            console.log('📋 Using cached product data:', productNumber);
+        } else {
+            // Fetch product data from API
+            console.log(`🔍 Fetching product data: ${productNumber}`);
+            showToast('🔍 ' + t('fetching-product-info'), 'info');
 
-        // Fetch product data from API
-        showToast('🔍 ' + t('fetching-product-info'), 'info');
+            const response = await fetch(`${API_BASE_URL}/nyuko/${productNumber}`);
 
-        const response = await fetch(`${API_BASE_URL}/nyuko/${productNumber}`);
-
-        if (!response.ok) {
-            if (response.status === 404) {
-                showToast('❌ ' + t('product-not-found-error'), 'error');
-            } else {
-                showToast('❌ ' + t('product-fetch-failed'), 'error');
+            if (!response.ok) {
+                if (response.status === 404) {
+                    showToast('❌ ' + t('product-not-found-error'), 'error');
+                } else {
+                    showToast('❌ ' + t('product-fetch-failed'), 'error');
+                }
+                return;
             }
+            
+            productData = await response.json();
+            console.log('✅ Product data fetched:', productData);
+            
+            // Cache the product data
+            nyukoProductCache[productNumber] = productData;
+        }
+        
+        // Validate box quantity matches 収容数
+        if (boxQuantity !== productData.収容数) {
+            showToast(`❌ ${t('box-quantity-mismatch')} ${productData.収容数}${t('box-quantity-suffix')}`, 'error');
+            
+            // Play alert sound on error
+            if (window.audioManager) {
+                audioManager.playAlert();
+            }
+            
+            // Flash red on counter area if product is displayed
+            if (currentDisplayedProduct === productNumber) {
+                flashCounterArea('error');
+            }
+            
             return;
         }
         
-        const productData = await response.json();
-        console.log('✅ Product data fetched:', productData);
+        // Add to list or increment existing entry
+        addOrIncrementProduct(productNumber, productData, boxQuantity);
         
-        // Initialize current product object
-        currentNyukoProduct = {
+        // Update display to show this product
+        updateProductDisplay(productNumber, productData);
+        
+        // Play beep sound on successful scan
+        if (window.audioManager) {
+            audioManager.playBeep();
+        }
+        
+        // Flash success on counter area
+        flashCounterArea('success');
+        
+    } catch (error) {
+        console.error('Error processing product scan:', error);
+        showToast('❌ ' + t('error-occurred'), 'error');
+    }
+}
+
+// Add product to list or increment if already exists
+function addOrIncrementProduct(productNumber, productData, boxQuantity) {
+    // Find existing entry in the list
+    const existingIndex = nyukoInputProducts.findIndex(p => p.品番 === productNumber);
+    
+    if (existingIndex >= 0) {
+        // Increment existing entry
+        nyukoInputProducts[existingIndex].inputBoxes += 1;
+        nyukoInputProducts[existingIndex].inputQuantity += boxQuantity;
+        console.log(`📦 Incremented ${productNumber}: ${nyukoInputProducts[existingIndex].inputBoxes} boxes`);
+    } else {
+        // Add new entry with count = 1
+        nyukoInputProducts.push({
             品番: productData.品番,
             品名: productData.品名,
             背番号: productData.背番号,
             収容数: productData.収容数,
             imageURL: productData.imageURL,
             inventoryExists: productData.inventoryExists,
-            currentPhysicalQuantity: productData.currentPhysicalQuantity,
-            currentReservedQuantity: productData.currentReservedQuantity,
-            countedBoxes: 0,
-            countedPieces: 0
-        };
-        
-        // Open input modal
-        openNyukoInputModal();
-
-        showToast('✅ ' + t('nyuko-start'), 'success');
-
-    } catch (error) {
-        console.error('Error starting product input:', error);
-        showToast('❌ ' + t('error-occurred'), 'error');
+            oldPhysicalQuantity: productData.currentPhysicalQuantity || 0,
+            oldReservedQuantity: productData.currentReservedQuantity || 0,
+            inputQuantity: boxQuantity,
+            inputBoxes: 1
+        });
+        console.log(`📦 Added new product ${productNumber}: 1 box`);
     }
+    
+    // Update the summary list
+    updateNyukoSummaryList();
 }
 
-// Open the input modal
-function openNyukoInputModal() {
-    if (!currentNyukoProduct) return;
+// Update the product display area
+function updateProductDisplay(productNumber, productData) {
+    // Hide initial state, show active product
+    document.getElementById('nyukoInitialState').classList.add('hidden');
+    document.getElementById('nyukoActiveProduct').classList.remove('hidden');
     
-    const modal = document.getElementById('nyukoInputModal');
-    const product = currentNyukoProduct;
+    currentDisplayedProduct = productNumber;
     
-    // Set product info
-    document.getElementById('nyukoModalProductNumber').textContent = product.品番;
-    document.getElementById('nyukoModalSebangou').textContent = product.背番号 || '-';
-    document.getElementById('nyukoModalProductName').textContent = product.品名 || '-';
+    // Update product info
+    document.getElementById('nyukoDisplayProductNumber').textContent = productData.品番;
+    document.getElementById('nyukoDisplaySebangou').textContent = productData.背番号 || '-';
+    document.getElementById('nyukoDisplayProductName').textContent = productData.品名 || '-';
+    document.getElementById('nyukoDisplayBoxSize').textContent = productData.収容数;
     
-    // Set product image
-    const imgElement = document.getElementById('nyukoModalProductImage');
-    if (product.imageURL) {
-        imgElement.src = product.imageURL;
-        imgElement.style.display = 'block';
+    // Update image
+    const imgElement = document.getElementById('nyukoDisplayImage');
+    const noImageElement = document.getElementById('nyukoNoImage');
+    
+    if (productData.imageURL) {
+        imgElement.src = productData.imageURL;
+        imgElement.classList.remove('hidden');
+        noImageElement.classList.add('hidden');
     } else {
-        imgElement.style.display = 'none';
+        imgElement.classList.add('hidden');
+        noImageElement.classList.remove('hidden');
     }
     
-    // Show current inventory if exists
-    const currentInventoryDiv = document.getElementById('nyukoCurrentInventory');
-    if (product.inventoryExists && product.currentPhysicalQuantity > 0) {
-        const currentBoxes = Math.ceil(product.currentPhysicalQuantity / product.収容数);
-        document.getElementById('nyukoCurrentPieces').textContent = `${product.currentPhysicalQuantity} 個`;
-        document.getElementById('nyukoCurrentBoxes').textContent = `= ${currentBoxes} 箱`;
+    // Update current inventory display
+    const currentInventoryDiv = document.getElementById('nyukoDisplayCurrentInventory');
+    if (productData.inventoryExists && productData.currentPhysicalQuantity > 0) {
+        const currentBoxes = Math.ceil(productData.currentPhysicalQuantity / productData.収容数);
+        document.getElementById('nyukoDisplayCurrentQty').textContent = 
+            `${productData.currentPhysicalQuantity}個 (${currentBoxes}箱)`;
         currentInventoryDiv.classList.remove('hidden');
     } else {
         currentInventoryDiv.classList.add('hidden');
     }
     
-    // Set box info
-    document.getElementById('nyukoModalBoxInfo').textContent = `1箱 = ${product.収容数}個`;
-    
-    // Reset counter
-    updateNyukoCounter();
-    
-    // Show modal
-    modal.classList.remove('hidden');
-    isNyukoModalOpen = true;
-    
-    console.log('📋 Input modal opened');
+    // Update counter display
+    updateNyukoCounterDisplay(productNumber);
 }
 
-// Process box scan (when modal is open)
-async function processNyukoBoxScan(scannedProductNumber, scannedBoxQuantity) {
-    if (!currentNyukoProduct) {
-        showToast('❌ ' + t('error-no-product'), 'error');
-        return;
+// Update the counter display for a specific product
+function updateNyukoCounterDisplay(productNumber) {
+    const product = nyukoInputProducts.find(p => p.品番 === productNumber);
+    
+    if (product) {
+        document.getElementById('nyukoDisplayBoxCount').textContent = product.inputBoxes;
+        document.getElementById('nyukoDisplayPieceCount').textContent = `(${product.inputQuantity} 個)`;
+    } else {
+        document.getElementById('nyukoDisplayBoxCount').textContent = '0';
+        document.getElementById('nyukoDisplayPieceCount').textContent = '(0 個)';
     }
+}
 
-    // Validate product number matches
-    if (scannedProductNumber !== currentNyukoProduct.品番) {
-        showToast(`❌ ${t('product-number-mismatch')} ${currentNyukoProduct.品番}`, 'error');
-        
-        // Play alert sound on error
-        if (window.audioManager) {
-            audioManager.playAlert();
-        }
-        
-        // Flash red
-        const counterArea = document.getElementById('nyukoModalCounterArea');
+// Flash counter area for visual feedback
+function flashCounterArea(type) {
+    const counterArea = document.getElementById('nyukoCounterArea');
+    if (!counterArea) return;
+    
+    if (type === 'success') {
+        counterArea.classList.add('bg-green-100', 'border-green-500');
+        setTimeout(() => {
+            counterArea.classList.remove('bg-green-100', 'border-green-500');
+        }, 300);
+    } else if (type === 'error') {
         counterArea.classList.add('bg-red-100', 'border-red-500');
         setTimeout(() => {
             counterArea.classList.remove('bg-red-100', 'border-red-500');
-            counterArea.classList.add('bg-gradient-to-br', 'from-purple-50', 'to-indigo-50', 'border-purple-200');
         }, 1000);
-        
-        return;
     }
-    
-    // Validate box quantity matches 収容数
-    if (scannedBoxQuantity !== currentNyukoProduct.収容数) {
-        showToast(`❌ ${t('box-quantity-mismatch')} ${currentNyukoProduct.収容数}${t('box-quantity-suffix')}`, 'error');
-        
-        // Play alert sound on error
-        if (window.audioManager) {
-            audioManager.playAlert();
-        }
-        
-        return;
-    }
-    
-    // Increment count
-    currentNyukoProduct.countedBoxes += 1;
-    currentNyukoProduct.countedPieces += scannedBoxQuantity;
-    
-    // Update display
-    updateNyukoCounter();
-    
-    // Play beep sound on successful scan
-    if (window.audioManager) {
-        audioManager.playBeep();
-    }
-    
-    // Flash purple
-    const counterArea = document.getElementById('nyukoModalCounterArea');
-    counterArea.classList.add('bg-purple-200', 'border-purple-500');
-    setTimeout(() => {
-        counterArea.classList.remove('bg-purple-200', 'border-purple-500');
-        counterArea.classList.add('bg-gradient-to-br', 'from-purple-50', 'to-indigo-50', 'border-purple-200');
-    }, 300);
-    
-    console.log(`✅ Box scanned: ${currentNyukoProduct.countedBoxes} boxes (${currentNyukoProduct.countedPieces} pieces)`);
-}
-
-// Update counter display
-function updateNyukoCounter() {
-    if (!currentNyukoProduct) return;
-    
-    const countedBoxes = currentNyukoProduct.countedBoxes;
-    const countedPieces = currentNyukoProduct.countedPieces;
-    
-    // Update counter text
-    document.getElementById('nyukoModalCountedBoxes').textContent = `${countedBoxes} 箱`;
-    document.getElementById('nyukoModalCountedPieces').textContent = `(${countedPieces} 個)`;
-}
-
-// Manual adjustment (+/- buttons)
-function adjustNyukoCount(delta) {
-    if (!currentNyukoProduct) return;
-
-    const newBoxCount = currentNyukoProduct.countedBoxes + delta;
-
-    // Prevent negative count
-    if (newBoxCount < 0) {
-        showToast('❌ ' + t('box-count-negative'), 'error');
-        return;
-    }
-    
-    currentNyukoProduct.countedBoxes = newBoxCount;
-    currentNyukoProduct.countedPieces = newBoxCount * currentNyukoProduct.収容数;
-    
-    updateNyukoCounter();
-    
-    console.log(`🔧 Manual adjustment: ${newBoxCount} boxes (${currentNyukoProduct.countedPieces} pieces)`);
-}
-
-// Complete input for current product
-async function completeNyukoInput() {
-    if (!currentNyukoProduct) return;
-
-    const inputPieces = currentNyukoProduct.countedPieces;
-
-    if (inputPieces === 0) {
-        showToast('❌ ' + t('enter-nyuko-quantity'), 'error');
-        return;
-    }
-
-    const message = t('nyuko-confirm')
-        .replace('{0}', inputPieces)
-        .replace('{1}', currentNyukoProduct.countedBoxes);
-
-    if (!confirm(message)) {
-        return;
-    }
-    
-    // Add to input products list
-    nyukoInputProducts.push({
-        品番: currentNyukoProduct.品番,
-        品名: currentNyukoProduct.品名,
-        背番号: currentNyukoProduct.背番号,
-        収容数: currentNyukoProduct.収容数,
-        imageURL: currentNyukoProduct.imageURL,
-        inventoryExists: currentNyukoProduct.inventoryExists,
-        oldPhysicalQuantity: currentNyukoProduct.currentPhysicalQuantity,
-        oldReservedQuantity: currentNyukoProduct.currentReservedQuantity,
-        inputQuantity: inputPieces,
-        inputBoxes: currentNyukoProduct.countedBoxes
-    });
-    
-    // Close modal
-    closeNyukoModal();
-
-    // Update summary list
-    updateNyukoSummaryList();
-
-    showToast('✅ ' + t('nyuko-complete'), 'success');
-}
-
-// Close input modal
-function closeNyukoModal() {
-    document.getElementById('nyukoInputModal').classList.add('hidden');
-    isNyukoModalOpen = false;
-    currentNyukoProduct = null;
-    
-    // Stop any playing alert sounds when modal closes
-    if (window.audioManager) {
-        audioManager.stopAlert();
-    }
-    
-    console.log('📋 Input modal closed');
 }
 
 // Update summary list display
 function updateNyukoSummaryList() {
-    const summaryList = document.getElementById('nyukoSummaryList');
     const itemsList = document.getElementById('nyukoItemsList');
     const itemCount = document.getElementById('nyukoItemCount');
-    
-    // Show summary list
-    summaryList.classList.remove('hidden');
-    document.getElementById('nyukoScannerArea').classList.add('hidden');
+    const emptyState = document.getElementById('nyukoEmptyState');
+    const submitBtn = document.getElementById('submitNyukoBtn');
     
     // Update count
     itemCount.textContent = `(${nyukoInputProducts.length})`;
     
-    // Clear and rebuild list
-    itemsList.innerHTML = '';
-    
-    nyukoInputProducts.forEach((product, index) => {
-        const row = createNyukoSummaryRow(product, index);
-        itemsList.appendChild(row);
-    });
+    // Show/hide empty state and submit button
+    if (nyukoInputProducts.length === 0) {
+        emptyState.classList.remove('hidden');
+        itemsList.classList.add('hidden');
+        submitBtn.classList.add('hidden');
+    } else {
+        emptyState.classList.add('hidden');
+        itemsList.classList.remove('hidden');
+        submitBtn.classList.remove('hidden');
+        
+        // Clear and rebuild list
+        itemsList.innerHTML = '';
+        
+        nyukoInputProducts.forEach((product, index) => {
+            const row = createNyukoSummaryRow(product, index);
+            itemsList.appendChild(row);
+        });
+    }
 }
 
 // Create summary row element
 function createNyukoSummaryRow(product, index) {
     const row = document.createElement('div');
     row.className = 'p-4 hover:bg-gray-50 transition-colors';
+    row.id = `nyuko-row-${product.品番}`;
     
     const oldBoxes = product.inventoryExists ? Math.ceil(product.oldPhysicalQuantity / product.収容数) : 0;
     const newTotalPieces = product.oldPhysicalQuantity + product.inputQuantity;
     const newTotalBoxes = Math.ceil(newTotalPieces / product.収容数);
     
+    // Check if this is the currently displayed product
+    const isActive = currentDisplayedProduct === product.品番;
+    const activeClass = isActive ? 'ring-2 ring-purple-400 bg-purple-50' : '';
+    
     row.innerHTML = `
-        <div class="flex items-center justify-between">
-            <div class="flex items-center space-x-4 flex-1">
+        <div class="flex items-center justify-between ${activeClass} rounded-lg p-2 -m-2">
+            <div class="flex items-center space-x-4 flex-1 cursor-pointer" onclick="showProductInDisplay('${product.品番}')">
                 ${product.imageURL ? `
                     <img src="${product.imageURL}" alt="${product.品番}" class="w-16 h-16 object-contain rounded border border-gray-200">
                 ` : `
@@ -4645,9 +4581,12 @@ function createNyukoSummaryRow(product, index) {
                 `}
                 <div class="flex-1">
                     <div class="flex items-center space-x-2">
-                        <h4 class="font-bold text-gray-900">${product.品番}</h4>
+                        <h4 class="font-bold text-gray-900">${product.品番} <span class="text-purple-600">(${product.背番号 || '-'})</span></h4>
                         ${!product.inventoryExists ? `
                             <span class="px-2 py-1 bg-purple-100 text-purple-700 text-xs font-bold rounded">NEW</span>
+                        ` : ''}
+                        ${isActive ? `
+                            <span class="px-2 py-1 bg-purple-500 text-white text-xs font-bold rounded animate-pulse">表示中</span>
                         ` : ''}
                     </div>
                     <p class="text-sm text-gray-600">${product.品名 || '-'}</p>
@@ -4662,15 +4601,12 @@ function createNyukoSummaryRow(product, index) {
                             <span class="text-purple-600 font-bold">${newTotalPieces}個 (${newTotalBoxes}箱)</span>
                         </span>
                         <span class="text-xs text-green-600 font-medium">
-                            (+${product.inputQuantity}個)
+                            (+${product.inputQuantity}個 / ${product.inputBoxes}箱)
                         </span>
                     </div>
                 </div>
             </div>
             <div class="flex items-center space-x-2">
-                <button onclick="editNyukoProduct(${index})" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors">
-                    <i class="fas fa-edit mr-1"></i>編集
-                </button>
                 <button onclick="deleteNyukoProduct(${index})" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors">
                     <i class="fas fa-trash mr-1"></i>削除
                 </button>
@@ -4681,36 +4617,12 @@ function createNyukoSummaryRow(product, index) {
     return row;
 }
 
-// Edit input product
-function editNyukoProduct(index) {
-    const product = nyukoInputProducts[index];
-    
-    // Remove from list
-    nyukoInputProducts.splice(index, 1);
-    
-    // Set as current product and reopen modal
-    currentNyukoProduct = {
-        品番: product.品番,
-        品名: product.品名,
-        背番号: product.背番号,
-        収容数: product.収容数,
-        imageURL: product.imageURL,
-        inventoryExists: product.inventoryExists,
-        currentPhysicalQuantity: product.oldPhysicalQuantity,
-        currentReservedQuantity: product.oldReservedQuantity,
-        countedBoxes: product.inputBoxes,
-        countedPieces: product.inputQuantity
-    };
-    
-    openNyukoInputModal();
-    
-    // Update summary list
-    if (nyukoInputProducts.length === 0) {
-        // Reset to scanner area if no more products
-        document.getElementById('nyukoSummaryList').classList.add('hidden');
-        document.getElementById('nyukoScannerArea').classList.remove('hidden');
-    } else {
-        updateNyukoSummaryList();
+// Show a product in the display area (when clicking on list item)
+function showProductInDisplay(productNumber) {
+    const productData = nyukoProductCache[productNumber];
+    if (productData) {
+        updateProductDisplay(productNumber, productData);
+        updateNyukoSummaryList(); // Refresh to update active indicator
     }
 }
 
@@ -4722,16 +4634,24 @@ function deleteNyukoProduct(index) {
         return;
     }
 
+    const deletedProductNumber = product.品番;
     nyukoInputProducts.splice(index, 1);
-
-    if (nyukoInputProducts.length === 0) {
-        // Reset to scanner area
-        document.getElementById('nyukoSummaryList').classList.add('hidden');
-        document.getElementById('nyukoScannerArea').classList.remove('hidden');
-    } else {
-        updateNyukoSummaryList();
+    
+    // If we deleted the currently displayed product, clear or update the display
+    if (currentDisplayedProduct === deletedProductNumber) {
+        if (nyukoInputProducts.length > 0) {
+            // Show the first product in the list
+            const firstProduct = nyukoInputProducts[0];
+            showProductInDisplay(firstProduct.品番);
+        } else {
+            // Reset to initial state
+            currentDisplayedProduct = null;
+            document.getElementById('nyukoInitialState').classList.remove('hidden');
+            document.getElementById('nyukoActiveProduct').classList.add('hidden');
+        }
     }
-
+    
+    updateNyukoSummaryList();
     showToast(t('deleted'), 'info');
 }
 

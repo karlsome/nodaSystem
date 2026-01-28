@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "../FreyaAdmin"
+		},
+		{
+			"path": "../Kurachi"
+		},
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"liveServer.settings.port": 5501,
+		"liveServer.settings.multiRootWorkspaceName": "Kurachi"
+	}
+}
