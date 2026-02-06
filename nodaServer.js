@@ -3562,15 +3562,39 @@ app.post('/api/tanaoroshi/submit', async (req, res) => {
                 // Calculate new available quantity (reservedQuantity stays the same)
                 const newAvailableQuantity = newPhysicalQuantity - oldReservedQuantity;
                 
+                console.log(`🔍 [TANAOROSHI] Getting latest record for 品番: ${品番}`);
+                
                 // Get the previous running quantity to calculate new running quantity
-                const previousRecord = await inventoryCollection
-                    .find({ 品番: 品番 })
-                    .sort({ timeStamp: -1 })
-                    .limit(1)
-                    .toArray();
+                // Use aggregation to properly handle timeStamp conversion and sorting
+                const previousRecord = await inventoryCollection.aggregate([
+                    { $match: { 品番: 品番 } },
+                    {
+                        $addFields: {
+                            timeStampDate: {
+                                $cond: {
+                                    if: { $eq: [{ $type: "$timeStamp" }, "string"] },
+                                    then: { $dateFromString: { dateString: "$timeStamp" } },
+                                    else: { $toDate: "$timeStamp" }
+                                }
+                            }
+                        }
+                    },
+                    { $sort: { timeStampDate: -1 } },
+                    { $limit: 1 }
+                ]).toArray();
+                
+                console.log(`📊 [TANAOROSHI] Latest record:`, previousRecord[0] ? {
+                    timeStamp: previousRecord[0].timeStamp,
+                    physicalQuantity: previousRecord[0].physicalQuantity,
+                    lastQuantity: previousRecord[0].lastQuantity,
+                    action: previousRecord[0].action
+                } : 'NO RECORD FOUND');
                 
                 const previousRunningQuantity = previousRecord.length > 0 ? previousRecord[0].runningQuantity : 0;
+                const previousPhysicalQuantity = previousRecord.length > 0 ? previousRecord[0].physicalQuantity : 0;
                 const newRunningQuantity = previousRunningQuantity + difference;
+                
+                console.log(`📊 [TANAOROSHI] Previous: ${previousPhysicalQuantity}, New: ${newPhysicalQuantity}, Diff: ${difference}`);
 
                 // Determine action and note
                 let action, note;
@@ -3596,7 +3620,7 @@ app.post('/api/tanaoroshi/submit', async (req, res) => {
                     reservedQuantity: oldReservedQuantity, // Keep the same
                     availableQuantity: newAvailableQuantity,
                     runningQuantity: newRunningQuantity,
-                    lastQuantity: newPhysicalQuantity,
+                    lastQuantity: previousPhysicalQuantity, // Use previous physical quantity, not new
                     
                     action: action,
                     source: `tablet 棚卸し - ${submittedBy}`,
@@ -3664,18 +3688,38 @@ app.get('/api/nyuko/:productNumber', async (req, res) => {
         const db = client.db("submittedDB");
         const inventoryCollection = db.collection("nodaInventoryDB");
         
+        console.log(`🔍 [NYUKO API] Getting latest inventory record for 品番: ${productNumber}`);
+        
         // Get the latest inventory record for this product
-        const currentInventory = await inventoryCollection
-            .find({ 品番: productNumber })
-            .sort({ timeStamp: -1 })
-            .limit(1)
-            .toArray();
+        // Use aggregation to properly handle timeStamp conversion and sorting
+        const currentInventory = await inventoryCollection.aggregate([
+            { $match: { 品番: productNumber } },
+            {
+                $addFields: {
+                    timeStampDate: {
+                        $cond: {
+                            if: { $eq: [{ $type: "$timeStamp" }, "string"] },
+                            then: { $dateFromString: { dateString: "$timeStamp" } },
+                            else: { $toDate: "$timeStamp" }
+                        }
+                    }
+                }
+            },
+            { $sort: { timeStampDate: -1 } },
+            { $limit: 1 }
+        ]).toArray();
 
         // Check if product exists in inventory
         const inventoryExists = currentInventory.length > 0;
         const latestRecord = inventoryExists ? currentInventory[0] : null;
+        
+        console.log(`📊 [NYUKO API] Latest inventory:`, latestRecord ? {
+            timeStamp: latestRecord.timeStamp,
+            physicalQuantity: latestRecord.physicalQuantity,
+            action: latestRecord.action
+        } : 'NO INVENTORY RECORD');
 
-        res.json({
+        const responseData = {
             // Master data
             品番: masterData.品番,
             品名: masterData.品名,
@@ -3692,7 +3736,15 @@ app.get('/api/nyuko/:productNumber', async (req, res) => {
             currentReservedQuantity: inventoryExists ? (latestRecord.reservedQuantity || 0) : 0,
             currentAvailableQuantity: inventoryExists ? (latestRecord.availableQuantity || 0) : 0,
             currentRunningQuantity: inventoryExists ? (latestRecord.runningQuantity || 0) : 0
+        };
+        
+        console.log(`📤 [NYUKO API] Sending response for ${productNumber}:`, {
+            currentPhysicalQuantity: responseData.currentPhysicalQuantity,
+            currentReservedQuantity: responseData.currentReservedQuantity,
+            inventoryExists: responseData.inventoryExists
         });
+
+        res.json(responseData);
 
     } catch (error) {
         console.error('Error fetching nyuko data:', error);
@@ -3769,15 +3821,39 @@ app.post('/api/nyuko/submit', async (req, res) => {
                     const newPhysicalQuantity = oldPhysicalQuantity + inputQuantity;
                     const newAvailableQuantity = newPhysicalQuantity - oldReservedQuantity;
                     
+                    console.log(`🔍 [NYUKO] Getting latest record for 品番: ${品番}`);
+                    
                     // Get previous running quantity
-                    const previousRecord = await inventoryCollection
-                        .find({ 品番: 品番 })
-                        .sort({ timeStamp: -1 })
-                        .limit(1)
-                        .toArray();
+                    // Use aggregation to properly handle timeStamp conversion and sorting
+                    const previousRecord = await inventoryCollection.aggregate([
+                        { $match: { 品番: 品番 } },
+                        {
+                            $addFields: {
+                                timeStampDate: {
+                                    $cond: {
+                                        if: { $eq: [{ $type: "$timeStamp" }, "string"] },
+                                        then: { $dateFromString: { dateString: "$timeStamp" } },
+                                        else: { $toDate: "$timeStamp" }
+                                    }
+                                }
+                            }
+                        },
+                        { $sort: { timeStampDate: -1 } },
+                        { $limit: 1 }
+                    ]).toArray();
+                    
+                    console.log(`📊 [NYUKO] Latest record:`, previousRecord[0] ? {
+                        timeStamp: previousRecord[0].timeStamp,
+                        physicalQuantity: previousRecord[0].physicalQuantity,
+                        lastQuantity: previousRecord[0].lastQuantity,
+                        action: previousRecord[0].action
+                    } : 'NO RECORD FOUND');
                     
                     const previousRunningQuantity = previousRecord.length > 0 ? previousRecord[0].runningQuantity : 0;
+                    const previousPhysicalQuantity = previousRecord.length > 0 ? previousRecord[0].physicalQuantity : 0;
                     const newRunningQuantity = previousRunningQuantity + inputQuantity;
+                    
+                    console.log(`📊 [NYUKO] Previous: ${previousPhysicalQuantity}, Adding: ${inputQuantity}, New: ${newPhysicalQuantity}`);
 
                     transactionRecord = {
                         背番号: 背番号,
@@ -3789,7 +3865,7 @@ app.post('/api/nyuko/submit', async (req, res) => {
                         reservedQuantity: oldReservedQuantity,
                         availableQuantity: newAvailableQuantity,
                         runningQuantity: newRunningQuantity,
-                        lastQuantity: newPhysicalQuantity,
+                        lastQuantity: previousPhysicalQuantity, // Use previous physical quantity, not new
                         
                         action: `Warehouse Input (+${inputQuantity})`,
                         source: `tablet 入庫 - ${submittedBy}`,

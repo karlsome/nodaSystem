@@ -13,8 +13,8 @@ let todaysTasks = []; // Initialize empty array for tasks
 let factory = null; // Factory location from URL parameter
 
 // API base URL - change this to your server URL
-//const API_BASE_URL = 'http://localhost:3001/api';
-const API_BASE_URL = 'https://nodasystem.onrender.com/api';
+const API_BASE_URL = 'http://localhost:3001/api';
+//const API_BASE_URL = 'https://nodasystem.onrender.com/api';
 
 // Debug localStorage on page load
 console.log('🔄 Page loaded, checking localStorage availability...');
@@ -3652,6 +3652,7 @@ let currentTanaoroshiProduct = null; // Currently counting product (strict mode 
 let tanaoroshiScanBuffer = ''; // Buffer for QR scan input
 const TANAOROSHI_STORAGE_KEY = 'nodaSystem_tanaoroshiCountedProducts';
 const TANAOROSHI_CACHE_KEY = 'nodaSystem_tanaoroshiProductCache';
+const TANAOROSHI_CACHE_EXPIRATION = 5 * 60 * 1000; // 5 minutes in milliseconds
 
 // Initialize tanaoroshi when inventory screen is shown
 function openInventorySystem() {
@@ -3665,6 +3666,11 @@ function openInventorySystem() {
 
 function initializeTanaoroshi() {
     console.log('🔄 Initializing Tanaoroshi system...');
+    
+    // Clear product cache to ensure fresh data
+    console.log('🗑️ Clearing tanaoroshi product cache...');
+    tanaoroshiProductCache = {};
+    localStorage.removeItem(TANAOROSHI_CACHE_KEY);
     
     // Load from localStorage if available
     loadTanaoroshiFromStorage();
@@ -3848,13 +3854,28 @@ async function startCountingProduct(productNumber, boxQuantity) {
     try {
         let productData;
         
-        // Check if we have cached data for this product
-        if (tanaoroshiProductCache[productNumber]) {
-            productData = tanaoroshiProductCache[productNumber];
+        // Check if we have cached data for this product (with expiration check)
+        const cachedEntry = tanaoroshiProductCache[productNumber];
+        const now = Date.now();
+        
+        if (cachedEntry && cachedEntry.timestamp && (now - cachedEntry.timestamp) < TANAOROSHI_CACHE_EXPIRATION) {
+            productData = cachedEntry.data;
             console.log('📋 Using cached product data:', productNumber);
+            console.log('📦 Cache age:', Math.floor((now - cachedEntry.timestamp) / 1000), 'seconds');
+            console.log('📦 Cached data details:', {
+                currentPhysicalQuantity: productData.currentPhysicalQuantity,
+                currentReservedQuantity: productData.currentReservedQuantity,
+                inventoryExists: productData.inventoryExists
+            });
         } else {
+            if (cachedEntry && cachedEntry.timestamp) {
+                console.log('⏰ Cache expired for:', productNumber, '- fetching fresh data');
+            } else {
+                console.log('🔍 No cache found for:', productNumber, '- fetching from API');
+            }
+            
             // Fetch product data from API
-            console.log(`🔍 Fetching product data: ${productNumber}`);
+            console.log(`🔍 Fetching product data from API: ${productNumber}`);
             showToast('🔍 ' + t('fetching-product-info'), 'info');
 
             const response = await fetch(`${API_BASE_URL}/tanaoroshi/${productNumber}`);
@@ -3869,10 +3890,20 @@ async function startCountingProduct(productNumber, boxQuantity) {
             }
             
             productData = await response.json();
-            console.log('✅ Product data fetched:', productData);
+            console.log('✅ Product data fetched from API:', productData);
+            console.log('📦 API returned inventory:', {
+                品番: productData.品番,
+                currentPhysicalQuantity: productData.currentPhysicalQuantity,
+                currentReservedQuantity: productData.currentReservedQuantity,
+                inventoryExists: productData.inventoryExists
+            });
             
-            // Cache the product data and save to storage
-            tanaoroshiProductCache[productNumber] = productData;
+            // Cache the product data with timestamp
+            tanaoroshiProductCache[productNumber] = {
+                data: productData,
+                timestamp: Date.now()
+            };
+            console.log('💾 Cached product data for:', productNumber, 'at', new Date().toLocaleString());
             saveTanaoroshiToStorage();
         }
         
@@ -4333,6 +4364,8 @@ async function submitTanaoroshiCount() {
         tanaoroshiCountedProducts = [];
         tanaoroshiProductCache = {};
         currentTanaoroshiProduct = null;
+        
+        console.log('🗑️ Cleared tanaoroshi cache after successful submission');
 
         // Reset UI immediately
         document.getElementById('tanaoroshiInitialState').classList.remove('hidden');
@@ -4367,6 +4400,7 @@ async function submitTanaoroshiCount() {
 // Global variables for nyuko
 let nyukoInputProducts = []; // Array to store input products (accumulated)
 let nyukoProductCache = {}; // Cache for fetched product data
+const NYUKO_CACHE_EXPIRATION = 5 * 60 * 1000; // 5 minutes
 let currentDisplayedProduct = null; // Currently displayed product number
 let nyukoScanBuffer = ''; // Buffer for QR scan input
 const NYUKO_STORAGE_KEY = 'nodaSystem_nyukoInputProducts';
@@ -4378,6 +4412,13 @@ function openNyukoSystem() {
     if (window.audioManager) {
         audioManager.activateForMode('nyuko');
     }
+    
+    // Clear product cache to ensure fresh data
+    console.log('🗑️ Clearing nyukoProductCache on open...');
+    console.log('📦 Cache before clear:', Object.keys(nyukoProductCache));
+    nyukoProductCache = {};
+    console.log('✅ Cache cleared');
+    
     showScreen('nyuko');
     initializeNyuko();
 }
@@ -4525,13 +4566,28 @@ async function processNyukoProductScan(productNumber, boxQuantity) {
     try {
         let productData;
         
-        // Check if we have cached data for this product
-        if (nyukoProductCache[productNumber]) {
-            productData = nyukoProductCache[productNumber];
+        // Check if we have cached data for this product (with expiration check)
+        const cachedEntry = nyukoProductCache[productNumber];
+        const now = Date.now();
+        
+        if (cachedEntry && cachedEntry.timestamp && (now - cachedEntry.timestamp) < NYUKO_CACHE_EXPIRATION) {
+            productData = cachedEntry.data;
             console.log('📋 Using cached product data:', productNumber);
+            console.log('📦 Cache age:', Math.floor((now - cachedEntry.timestamp) / 1000), 'seconds');
+            console.log('📦 Cached data details:', {
+                currentPhysicalQuantity: productData.currentPhysicalQuantity,
+                currentReservedQuantity: productData.currentReservedQuantity,
+                inventoryExists: productData.inventoryExists
+            });
         } else {
+            if (cachedEntry && cachedEntry.timestamp) {
+                console.log('⏰ Cache expired for:', productNumber, '- fetching fresh data');
+            } else {
+                console.log('🔍 No cache found for:', productNumber, '- fetching from API');
+            }
+            
             // Fetch product data from API
-            console.log(`🔍 Fetching product data: ${productNumber}`);
+            console.log(`🔍 Fetching product data from API: ${productNumber}`);
             showToast('🔍 ' + t('fetching-product-info'), 'info');
 
             const response = await fetch(`${API_BASE_URL}/nyuko/${productNumber}`);
@@ -4555,10 +4611,20 @@ async function processNyukoProductScan(productNumber, boxQuantity) {
             }
             
             productData = await response.json();
-            console.log('✅ Product data fetched:', productData);
+            console.log('✅ Product data fetched from API:', productData);
+            console.log('📦 API returned inventory:', {
+                品番: productData.品番,
+                currentPhysicalQuantity: productData.currentPhysicalQuantity,
+                currentReservedQuantity: productData.currentReservedQuantity,
+                inventoryExists: productData.inventoryExists
+            });
             
-            // Cache the product data
-            nyukoProductCache[productNumber] = productData;
+            // Cache the product data with timestamp
+            nyukoProductCache[productNumber] = {
+                data: productData,
+                timestamp: Date.now()
+            };
+            console.log('💾 Cached product data for:', productNumber, 'at', new Date().toLocaleString());
         }
         
         // Validate box quantity matches 収容数
@@ -4621,6 +4687,13 @@ function addOrIncrementProduct(productNumber, productData, boxQuantity) {
         console.log(`📦 Incremented ${productNumber}: ${nyukoInputProducts[existingIndex].inputBoxes} boxes`);
     } else {
         // Add new entry with count = 1
+        console.log('📝 Adding new product to list:', {
+            品番: productData.品番,
+            oldPhysicalQuantity: productData.currentPhysicalQuantity || 0,
+            oldReservedQuantity: productData.currentReservedQuantity || 0,
+            inputQuantity: boxQuantity
+        });
+        
         nyukoInputProducts.push({
             品番: productData.品番,
             品名: productData.品名,
@@ -4951,6 +5024,18 @@ async function submitNyukoInput() {
         // Clear localStorage after successful submission
         localStorage.removeItem(NYUKO_STORAGE_KEY);
         localStorage.removeItem(NYUKO_CACHE_KEY);
+        
+        // Clear in-memory cache to force fresh data fetch on next scan
+        console.log('🗑️ Clearing nyukoProductCache...');
+        console.log('📦 Cache before clear:', Object.keys(nyukoProductCache));
+        nyukoProductCache = {};
+        console.log('✅ Cache cleared, nyukoProductCache is now empty:', Object.keys(nyukoProductCache).length === 0);
+        
+        // Reset state
+        nyukoInputProducts = [];
+        console.log('📦 Cache before clear:', Object.keys(nyukoProductCache));
+        nyukoProductCache = {};
+        console.log('✅ Cache cleared');
         
         // Reset state
         nyukoInputProducts = [];
