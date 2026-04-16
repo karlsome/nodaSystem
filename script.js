@@ -2713,6 +2713,7 @@ window.resetAllTanaoroshiProducts = resetAllTanaoroshiProducts;
 
 // Nyuko (入庫) system functions
 window.openNyukoSystem = openNyukoSystem;
+window.decrementNyukoProduct = decrementNyukoProduct;
 window.deleteNyukoProduct = deleteNyukoProduct;
 window.submitNyukoInput = submitNyukoInput;
 window.showProductInDisplay = showProductInDisplay;
@@ -4883,6 +4884,9 @@ function createNyukoSummaryRow(product, index) {
                 </div>
             </div>
             <div class="flex items-center space-x-2">
+                <button onclick="decrementNyukoProduct(${index})" class="w-10 h-10 bg-orange-100 hover:bg-orange-200 text-orange-700 rounded-lg transition-colors flex items-center justify-center text-lg font-bold" title="1箱減らす">
+                    −
+                </button>
                 <button onclick="deleteNyukoProduct(${index})" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors">
                     <i class="fas fa-trash mr-1"></i>削除
                 </button>
@@ -4900,6 +4904,46 @@ function showProductInDisplay(productNumber) {
         updateProductDisplay(productNumber, productData);
         updateNyukoSummaryList(); // Refresh to update active indicator
     }
+}
+
+// Decrement input product by 1 box
+function decrementNyukoProduct(index) {
+    const product = nyukoInputProducts[index];
+    if (!product) return;
+
+    if (product.inputBoxes <= 1) {
+        // Last box — remove the product entirely
+        if (!confirm(`${product.品番} の最後の1箱です。完全に削除しますか？`)) return;
+        const deletedProductNumber = product.品番;
+        nyukoInputProducts.splice(index, 1);
+        saveNyukoToStorage();
+        if (currentDisplayedProduct === deletedProductNumber) {
+            if (nyukoInputProducts.length > 0) {
+                showProductInDisplay(nyukoInputProducts[0].品番);
+            } else {
+                currentDisplayedProduct = null;
+                document.getElementById('nyukoInitialState').classList.remove('hidden');
+                document.getElementById('nyukoActiveProduct').classList.add('hidden');
+            }
+        }
+        updateNyukoSummaryList();
+        showToast('削除しました', 'info');
+        return;
+    }
+
+    // Decrement by 1 box
+    product.inputBoxes -= 1;
+    product.inputQuantity -= product.収容数;
+    saveNyukoToStorage();
+
+    // If this is the currently displayed product, refresh counter
+    if (currentDisplayedProduct === product.品番) {
+        updateNyukoCounterDisplay(product.品番);
+        flashCounterArea('error');
+    }
+
+    updateNyukoSummaryList();
+    showToast(`${product.品番} を1箱減らしました`, 'info');
 }
 
 // Delete input product
