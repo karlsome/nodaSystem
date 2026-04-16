@@ -121,6 +121,11 @@ button {
     color: #1e40af;
 }
 
+.status-paused {
+    background-color: #ffedd5;
+    color: #9a3412;
+}
+
 .status-completed {
     background-color: #d1fae5;
     color: #065f46;
@@ -191,6 +196,34 @@ button {
 
 .picking-item:hover {
     background-color: #f9fafb;
+}
+
+.picking-view-tab {
+    min-height: 40px;
+    min-width: 0;
+}
+
+.picking-view-tab.active {
+    background-color: #ffffff;
+    color: #111827;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.picking-table-scroll {
+    max-height: min(70vh, 720px);
+    overflow: auto;
+}
+
+.picking-detail-table {
+    border-collapse: separate;
+    border-spacing: 0;
+    min-width: 1180px;
+}
+
+.picking-detail-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 20;
 }
 
 /* Progress indicators */

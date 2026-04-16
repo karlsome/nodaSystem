@@ -11,6 +11,17 @@ let socket = null;
 let recentActivities = []; // Initialize empty array for activities
 let todaysTasks = []; // Initialize empty array for tasks
 let factory = null; // Factory location from URL parameter
+const masterDataCache = new Map();
+let pickingDetailLoadToken = 0;
+let currentPickingDetailView = 'cards';
+let latestPickingLockStatus = {
+    isLocked: false,
+    activeRequestNumber: null,
+    startedBy: null,
+    startedAt: null
+};
+let pausedReminderIntervalId = null;
+const PAUSED_REQUEST_REMINDER_INTERVAL_MS = 30000;
 
 // API base URL - change this to your server URL
 //const API_BASE_URL = 'http://localhost:3001/api';
@@ -58,6 +69,8 @@ function initializeApp() {
         console.log('❌ No saved worker found, showing login screen');
         showScreen('login');
     }
+
+    startPausedRequestsReminderTimer();
 }
 
 // Extract factory location from URL parameter
@@ -384,6 +397,8 @@ function updateConnectionStatus(connected) {
 
 // Global lock status handling
 function updateLockUI(lockStatus) {
+    latestPickingLockStatus = lockStatus;
+
     const isLocked = lockStatus.isLocked;
     const activeRequestNumber = lockStatus.activeRequestNumber;
     const startedBy = lockStatus.startedBy;
@@ -391,6 +406,10 @@ function updateLockUI(lockStatus) {
     // Update all start buttons
     const startButtons = document.querySelectorAll('.start-picking-btn');
     startButtons.forEach(button => {
+        if (button.id === 'startPickingBtn') {
+            return;
+        }
+
         if (isLocked) {
             button.disabled = true;
             button.classList.add('opacity-50', 'cursor-not-allowed');
@@ -404,6 +423,7 @@ function updateLockUI(lockStatus) {
     
     // Show lock notification if system is locked
     if (isLocked && activeRequestNumber) {
+        closePausedRequestsReminderModal();
         showLockNotification(activeRequestNumber, startedBy);
     } else {
         hideLockNotification();
@@ -440,7 +460,9 @@ function hideLockNotification() {
 }
 
 // Check and update lock status from server
-async function checkAndUpdateLockStatus() {
+async function checkAndUpdateLockStatus(options = {}) {
+    const { refreshDevices = true } = options;
+
     try {
         const response = await fetch(`${API_BASE_URL}/picking-lock-status`);
         if (response.ok) {
@@ -448,14 +470,18 @@ async function checkAndUpdateLockStatus() {
             updateLockUI(lockStatus);
             
             // 🚨 NEW: If there's an active request that's locked, trigger ESP32 refresh
-            if (lockStatus.isLocked && lockStatus.activeRequestNumber) {
+            if (refreshDevices && lockStatus.isLocked && lockStatus.activeRequestNumber) {
                 console.log(`🔄 Lock detected for ${lockStatus.activeRequestNumber}, triggering ESP32 refresh`);
                 await refreshESP32Devices(lockStatus.activeRequestNumber);
             }
+
+            return lockStatus;
         }
     } catch (error) {
         console.error('Error checking lock status:', error);
     }
+
+    return latestPickingLockStatus;
 }
 
 // Screen management functions
@@ -472,6 +498,160 @@ function showScreen(screenName) {
     // Show selected screen
     document.getElementById(screenName + 'Screen').classList.remove('hidden');
     currentScreen = screenName;
+
+    if (currentScreen !== 'home' && currentScreen !== 'picking' && currentScreen !== 'pickingDetail') {
+        closePausedRequestsReminderModal();
+    }
+}
+
+function startPausedRequestsReminderTimer() {
+    if (pausedReminderIntervalId) {
+        return;
+    }
+
+    pausedReminderIntervalId = setInterval(() => {
+        maybeShowPausedRequestsReminder();
+    }, PAUSED_REQUEST_REMINDER_INTERVAL_MS);
+}
+
+function hasBlockingModalOpen() {
+    return Array.from(document.querySelectorAll('.fixed.inset-0')).some(modal => {
+        if (modal.classList.contains('hidden')) {
+            return false;
+        }
+
+        return modal.id !== 'toast' && modal.id !== 'pausedRequestsReminderModal';
+    });
+}
+
+function isPausedReminderEligible() {
+    if (!currentWorker) {
+        return false;
+    }
+
+    if (document.hidden) {
+        return false;
+    }
+
+    if (currentScreen !== 'home' && currentScreen !== 'picking' && currentScreen !== 'pickingDetail') {
+        return false;
+    }
+
+    if (hasBlockingModalOpen()) {
+        return false;
+    }
+
+    if (latestPickingLockStatus.isLocked) {
+        return false;
+    }
+
+    if (currentScreen === 'pickingDetail' && currentRequest && currentRequest.status === 'in-progress') {
+        return false;
+    }
+
+    return true;
+}
+
+async function fetchPausedRequestsForReminder() {
+    const response = await fetch(`${API_BASE_URL}/request-numbers`);
+    if (!response.ok) {
+        throw new Error('Failed to fetch paused requests');
+    }
+
+    const requests = await response.json();
+    let pausedRequests = requests.filter(request => request.status === 'paused');
+
+    if (currentScreen === 'pickingDetail' && currentRequestNumber) {
+        pausedRequests = pausedRequests.filter(request => request.requestNumber !== currentRequestNumber);
+    }
+
+    pausedRequests.sort((a, b) => {
+        const dateA = new Date(a.createdAt || 0);
+        const dateB = new Date(b.createdAt || 0);
+        return dateA - dateB;
+    });
+
+    return pausedRequests;
+}
+
+function closePausedRequestsReminderModal() {
+    const modal = document.getElementById('pausedRequestsReminderModal');
+    if (modal) {
+        modal.classList.add('hidden');
+    }
+}
+
+function openPausedReminderRequest(requestNumber) {
+    closePausedRequestsReminderModal();
+    viewPickingDetail(requestNumber);
+}
+
+function renderPausedRequestsReminder(pausedRequests) {
+    const modal = document.getElementById('pausedRequestsReminderModal');
+    const listContainer = document.getElementById('pausedRequestsReminderList');
+    const t = window.t || ((key) => key);
+
+    if (!modal || !listContainer) {
+        return;
+    }
+
+    listContainer.innerHTML = '';
+
+    pausedRequests.forEach(request => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'w-full text-left bg-white border border-orange-200 hover:border-orange-300 hover:bg-orange-50 rounded-xl px-4 py-4 transition-colors';
+        button.onclick = () => openPausedReminderRequest(request.requestNumber);
+
+        const createdAt = request.createdAt
+            ? new Date(request.createdAt).toLocaleDateString('ja-JP')
+            : '--';
+
+        button.innerHTML = `
+            <div class="flex items-start justify-between gap-4">
+                <div>
+                    <div class="flex items-center gap-3 flex-wrap">
+                        <h4 class="text-lg font-bold text-gray-900">${request.requestNumber}</h4>
+                        <span class="status-badge status-paused">${t('status-paused')}</span>
+                    </div>
+                    <p class="text-sm text-gray-600 mt-1">${request.itemCount}項目 • 合計数量: ${request.totalQuantity}</p>
+                    <p class="text-xs text-gray-500 mt-2">作成日: ${createdAt}</p>
+                </div>
+                <div class="text-orange-500 text-xl pt-1">
+                    <i class="fas fa-chevron-right"></i>
+                </div>
+            </div>
+        `;
+
+        listContainer.appendChild(button);
+    });
+
+    modal.classList.remove('hidden');
+}
+
+async function maybeShowPausedRequestsReminder() {
+    try {
+        if (!isPausedReminderEligible()) {
+            closePausedRequestsReminderModal();
+            return;
+        }
+
+        const lockStatus = await checkAndUpdateLockStatus({ refreshDevices: false });
+        if (lockStatus && lockStatus.isLocked) {
+            closePausedRequestsReminderModal();
+            return;
+        }
+
+        const pausedRequests = await fetchPausedRequestsForReminder();
+        if (pausedRequests.length === 0) {
+            closePausedRequestsReminderModal();
+            return;
+        }
+
+        renderPausedRequestsReminder(pausedRequests);
+    } catch (error) {
+        console.error('Error showing paused requests reminder:', error);
+    }
 }
 
 function openInventorySystem() {
@@ -1363,9 +1543,9 @@ function displayPickingRequests() {
     
     // Apply status filter
     if (currentFilter === 'all') {
-        // Show pending, in-progress, completed, partial-inventory, and waiting-for-inventory
+        // Show pending, in-progress, paused, completed, partial-inventory, and waiting-for-inventory
         filteredRequests = filteredRequests.filter(req => 
-            req.status === 'pending' || req.status === 'in-progress' || req.status === 'completed' || req.status === 'partial-inventory' || req.status === 'waiting-for-inventory'
+            req.status === 'pending' || req.status === 'in-progress' || req.status === 'paused' || req.status === 'completed' || req.status === 'partial-inventory' || req.status === 'waiting-for-inventory'
         );
     } else {
         filteredRequests = filteredRequests.filter(req => req.status === currentFilter);
@@ -1465,19 +1645,26 @@ async function fetchMasterData(品番) {
 async function viewPickingDetail(requestNumber) {
     try {
         currentRequestNumber = requestNumber;
+        currentPickingDetailView = 'cards';
+        const loadToken = ++pickingDetailLoadToken;
         
         // Show loading state immediately to prevent stale data display
         showPickingDetailLoadingState(requestNumber);
         showScreen('pickingDetail');
-        
-        const response = await fetch(`${API_BASE_URL}/picking-requests/group/${requestNumber}`);
-        if (!response.ok) {
-            throw new Error('Failed to fetch picking request details');
+
+        const request = await fetchBasePickingDetail(requestNumber);
+        if (loadToken !== pickingDetailLoadToken) {
+            return;
         }
-        
-        const request = await response.json();
+
         currentRequest = request;
-        displayPickingDetail(request);
+        await displayPickingDetail(createPendingPickingDetail(request), {
+            livePending: true,
+            skipMasterData: true
+        });
+
+        await checkAndUpdateLockStatus();
+        hydratePickingDetail(requestNumber, loadToken);
         
     } catch (error) {
         console.error('Error loading picking request details:', error);
@@ -1486,7 +1673,9 @@ async function viewPickingDetail(requestNumber) {
     }
 }
 
-async function displayPickingDetail(request) {
+async function displayPickingDetail(request, options = {}) {
+    const { livePending = false, skipMasterData = false } = options;
+
     if (!request) {
         console.error('No request provided to displayPickingDetail');
         hidePickingDetailLoadingState();
@@ -1500,52 +1689,55 @@ async function displayPickingDetail(request) {
         console.error('Request missing lineItems:', request);
         request.lineItems = [];
     }
+
+    const renderRequest = {
+        ...request,
+        lineItems: request.lineItems.map(item => ({
+            ...item,
+            isLivePending: livePending
+        }))
+    };
     
     // Enrich line items with master data and box quantities
-    await enrichLineItemsWithMasterData(request.lineItems);
-    
-    // ===== NEW: Fetch picking progress from helper collection =====
-    try {
-        const helperResponse = await fetch(`${API_BASE_URL}/picking-requests/${request.requestNumber}/helper`);
-        if (helperResponse.ok) {
-            const helperData = await helperResponse.json();
-            // Merge helper data with line items
-            request.lineItems.forEach(item => {
-                const helperItem = helperData.lineItems.find(h => h.lineNumber === item.lineNumber);
-                if (helperItem) {
-                    item.pickedQuantity = helperItem.pickedQuantity || 0;
-                    item.remainingQuantity = helperItem.remainingQuantity || item.quantity;
-                    item.pickingComplete = helperItem.pickingComplete || false;
-                    item.pickedBoxes = item.収容数 > 1 ? Math.floor(item.pickedQuantity / item.収容数) : item.pickedQuantity;
-                    item.remainingBoxes = item.収容数 > 1 ? Math.ceil(item.remainingQuantity / item.収容数) : item.remainingQuantity;
-                }
-            });
-            console.log('📊 Picking progress merged with line items:', request.lineItems);
-        }
-    } catch (error) {
-        console.log('No picking progress data available:', error.message);
+    if (!skipMasterData) {
+        await enrichLineItemsWithMasterData(renderRequest.lineItems);
+        console.log('📊 Live request detail loaded:', renderRequest.lineItems);
     }
     
     // Hide loading state and show actual content
     hidePickingDetailLoadingState();
     
     // Update header
-    document.getElementById('pickingDetailTitle').textContent = `${t('picking-detail')}: ${request.requestNumber}`;
-    document.getElementById('pickingDetailSubtitle').textContent = `${request.lineItems.length}${t('items-suffix')}${t('items-picking')}`;
+    document.getElementById('pickingDetailTitle').textContent = `${t('picking-detail')}: ${renderRequest.requestNumber}`;
+    document.getElementById('pickingDetailSubtitle').textContent = livePending
+        ? `${renderRequest.lineItems.length}${t('items-suffix')}${t('items-picking')} ・ 最新在庫を確認中...`
+        : `${renderRequest.lineItems.length}${t('items-suffix')}${t('items-picking')}`;
     
     // Update request info
     const infoContainer = document.getElementById('pickingRequestInfo');
-    const completedItems = request.lineItems.filter(item => item.status === 'completed').length;
+    const completedItems = renderRequest.lineItems.filter(item => item.status === 'completed').length;
+    const isInventoryWaitingStatus = renderRequest.status === 'partial-inventory' || renderRequest.status === 'waiting-for-inventory';
     
     // Check if this is a partial-inventory request - ONLY count items that are NOT completed
-    const insufficientItems = request.lineItems.filter(item => 
-        item.status !== 'completed' && 
-        (item.inventoryStatus === 'none' || (item.shortfallQuantity && item.shortfallQuantity > 0))
+    const insufficientItems = renderRequest.lineItems.filter(item => 
+        item.status !== 'completed' && isItemInventoryShort(item)
     );
     
     // Add warning banner for partial-inventory status - ONLY if request is not completed
     let warningBanner = '';
-    if (request.status !== 'completed' && request.status === 'partial-inventory' && insufficientItems.length > 0) {
+    if (livePending) {
+        warningBanner = `
+            <div class="col-span-4 mb-4 bg-blue-50 border-l-4 border-blue-500 p-4 rounded-lg">
+                <div class="flex items-center space-x-3">
+                    <i class="fas fa-spinner fa-spin text-blue-600 text-2xl"></i>
+                    <div>
+                        <h4 class="text-lg font-bold text-blue-800">最新在庫を確認中</h4>
+                        <p class="text-sm text-blue-700">依頼内容を表示しています。箱数と在庫不足はまもなく更新されます。</p>
+                    </div>
+                </div>
+            </div>
+        `;
+    } else if (renderRequest.status !== 'completed' && (isInventoryWaitingStatus || renderRequest.status === 'paused') && insufficientItems.length > 0) {
         warningBanner = `
             <div class="col-span-4 mb-4 bg-red-50 border-l-4 border-red-500 p-4 rounded-lg">
                 <div class="flex items-center space-x-3">
@@ -1563,61 +1755,82 @@ async function displayPickingDetail(request) {
         ${warningBanner}
         <div class="text-center">
             <p class="text-sm text-gray-500">依頼番号</p>
-            <p class="text-lg font-semibold text-gray-900">${request.requestNumber}</p>
+            <p class="text-lg font-semibold text-gray-900">${renderRequest.requestNumber}</p>
         </div>
         <div class="text-center">
             <p class="text-sm text-gray-500">ステータス</p>
-            <span id="requestStatusBadge" class="status-badge ${getStatusClass(request.status)}">
-                ${getStatusText(request.status)}
+            <span id="requestStatusBadge" class="status-badge ${getStatusClass(renderRequest.status)}">
+                ${getStatusText(renderRequest.status)}
             </span>
         </div>
         <div class="text-center">
             <p class="text-sm text-gray-500">進捗</p>
-            <p class="text-lg font-semibold text-gray-900 request-progress">${completedItems}/${request.lineItems.length}</p>
+            <p class="text-lg font-semibold text-gray-900 request-progress">${completedItems}/${renderRequest.lineItems.length}</p>
         </div>
         <div class="text-center">
             <p class="text-sm text-gray-500">作成者</p>
-            <p class="text-lg font-semibold text-gray-900">${request.createdBy}</p>
+            <p class="text-lg font-semibold text-gray-900">${renderRequest.createdBy}</p>
         </div>
     `;
     
     // Update items list
-    const itemsContainer = document.getElementById('pickingItemsList');
-    itemsContainer.innerHTML = '';
-    
-    request.lineItems.forEach((item, index) => {
-        const itemElement = createPickingItemElement(item, index + 1);
-        itemsContainer.appendChild(itemElement);
-    });
+    renderPickingItemsViews(renderRequest.lineItems);
     
     // Update start button state
     const startBtn = document.getElementById('startPickingBtn');
+    const pauseBtn = document.getElementById('pausePickingBtn');
     startBtn.classList.add('start-picking-btn'); // Add class for lock handling
+
+    if (pauseBtn) {
+        pauseBtn.className = 'hidden px-6 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors font-medium';
+        pauseBtn.disabled = false;
+        pauseBtn.onclick = pausePickingProcess;
+    }
     
-    if (request.status === 'pending' || request.status === 'partial-inventory') {
+    if (renderRequest.status === 'pending' || renderRequest.status === 'partial-inventory' || renderRequest.status === 'waiting-for-inventory') {
         startBtn.disabled = false;
         startBtn.onclick = startPickingProcess;
         startBtn.innerHTML = `<i class="fas fa-play mr-2"></i>${t('start-button')}`;
         startBtn.className = 'px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors font-medium';
-    } else if (request.status === 'in-progress') {
+    } else if (renderRequest.status === 'paused') {
+        startBtn.disabled = false;
+        startBtn.onclick = startPickingProcess;
+        startBtn.innerHTML = `<i class="fas fa-play mr-2"></i>${t('resume-button')}`;
+        startBtn.className = 'px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors font-medium';
+    } else if (renderRequest.status === 'in-progress') {
         startBtn.disabled = true;
         startBtn.onclick = null;
         startBtn.innerHTML = `<i class="fas fa-clock mr-2"></i>${t('in-progress-button')}`;
-    } else if (request.status === 'completed') {
+        startBtn.className = 'px-6 py-2 bg-slate-200 text-slate-700 rounded-lg cursor-not-allowed font-medium';
+        if (pauseBtn) {
+            pauseBtn.classList.remove('hidden');
+        }
+    } else if (renderRequest.status === 'completed') {
         startBtn.disabled = false;
         startBtn.onclick = completeAndBackToList;
         startBtn.innerHTML = `<i class="fas fa-check mr-2"></i>${t('completed-button')}`;
         startBtn.className = 'px-8 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors text-lg font-medium';
+    } else {
+        startBtn.disabled = true;
+        startBtn.onclick = null;
+        startBtn.innerHTML = `<i class="fas fa-ban mr-2"></i>${getStatusText(renderRequest.status)}`;
+        startBtn.className = 'px-6 py-2 bg-gray-300 text-gray-700 rounded-lg cursor-not-allowed font-medium';
     }
 }
 
 // Enrich line items with master data to calculate box quantities
 async function enrichLineItemsWithMasterData(lineItems) {
     try {
+        const uniquePartNumbers = [...new Set(lineItems.map(item => item.品番).filter(Boolean))];
+        const masterEntries = await Promise.all(uniquePartNumbers.map(async partNumber => {
+            const masterData = await fetchMasterData(partNumber);
+            return [partNumber, masterData];
+        }));
+        const masterDataMap = new Map(masterEntries);
+
         for (const item of lineItems) {
-            // Fetch master data for this item
-            const masterData = await fetchMasterData(item.品番);
-            
+            const masterData = masterDataMap.get(item.品番);
+
             if (masterData && masterData.収容数) {
                 const 収容数 = parseInt(masterData.収容数);
                 if (収容数 > 0) {
@@ -1641,25 +1854,357 @@ async function enrichLineItemsWithMasterData(lineItems) {
 
 // Fetch master data from server
 async function fetchMasterData(品番) {
-    try {
-        const response = await fetch(`${API_BASE_URL}/master-data/${encodeURIComponent(品番)}`);
-        if (response.ok) {
-            const data = await response.json();
-            return data;
-        }
+    if (!品番) {
         return null;
+    }
+
+    if (masterDataCache.has(品番)) {
+        return masterDataCache.get(品番);
+    }
+
+    const requestPromise = (async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/master-data/${encodeURIComponent(品番)}`);
+            if (response.ok) {
+                const data = await response.json();
+                return data;
+            }
+            return null;
+        } catch (error) {
+            console.error(`Error fetching master data for ${品番}:`, error);
+            masterDataCache.delete(品番);
+            return null;
+        }
+    })();
+
+    masterDataCache.set(品番, requestPromise);
+
+    try {
+        return await requestPromise;
     } catch (error) {
-        console.error(`Error fetching master data for ${品番}:`, error);
+        console.error(`Error resolving master data for ${品番}:`, error);
+        masterDataCache.delete(品番);
         return null;
     }
 }
 
+async function fetchBasePickingDetail(requestNumber) {
+    const timestamp = Date.now();
+    const response = await fetch(`${API_BASE_URL}/picking-requests/${requestNumber}?_=${timestamp}`);
+    if (!response.ok) {
+        throw new Error('Failed to fetch base picking request details');
+    }
+
+    return await response.json();
+}
+
+async function fetchLivePickingDetail(requestNumber) {
+    const timestamp = Date.now();
+    const response = await fetch(`${API_BASE_URL}/picking-requests/group/${requestNumber}?_=${timestamp}`);
+    if (!response.ok) {
+        throw new Error(`Failed to fetch live picking request details: ${response.status}`);
+    }
+
+    return await response.json();
+}
+
+function createPendingPickingDetail(request) {
+    return {
+        ...request,
+        lineItems: Array.isArray(request.lineItems)
+            ? request.lineItems.map(item => ({
+                ...item,
+                isLivePending: true
+            }))
+            : []
+    };
+}
+
+async function hydratePickingDetail(requestNumber, loadToken, options = {}) {
+    const { refreshDevices = false, showFailureToast = true } = options;
+
+    try {
+        const liveRequest = await fetchLivePickingDetail(requestNumber);
+        if (loadToken !== pickingDetailLoadToken || currentRequestNumber !== requestNumber) {
+            return;
+        }
+
+        currentRequest = liveRequest;
+        await displayPickingDetail(liveRequest, {
+            livePending: false,
+            skipMasterData: false
+        });
+
+        await checkAndUpdateLockStatus();
+
+        if (refreshDevices) {
+            await refreshESP32Devices(requestNumber);
+        }
+    } catch (error) {
+        if (loadToken !== pickingDetailLoadToken || currentRequestNumber !== requestNumber) {
+            return;
+        }
+
+        console.error('Error hydrating picking request details:', error);
+        if (showFailureToast) {
+            showToast('最新在庫の読み込みに失敗しました。依頼内容のみ表示しています', 'error');
+        }
+    }
+}
+
+function getDisplayInventoryStatus(item) {
+    if (item.isLivePending) {
+        return 'checking';
+    }
+
+    return item.liveInventoryStatus || item.inventoryStatus || 'sufficient';
+}
+
+function getDisplayShortfallQuantity(item) {
+    if (item.isLivePending) {
+        return 0;
+    }
+
+    if (typeof item.liveShortfallQuantity === 'number') {
+        return item.liveShortfallQuantity;
+    }
+
+    if (typeof item.shortfallQuantity === 'number') {
+        return item.shortfallQuantity;
+    }
+
+    return 0;
+}
+
+function isItemInventoryShort(item) {
+    if (item.isLivePending) {
+        return false;
+    }
+
+    const inventoryStatus = getDisplayInventoryStatus(item);
+    const shortfallQuantity = getDisplayShortfallQuantity(item);
+
+    return inventoryStatus === 'none' || shortfallQuantity > 0;
+}
+
+function switchPickingDetailView(view) {
+    currentPickingDetailView = view === 'table' ? 'table' : 'cards';
+    updatePickingDetailViewTabs();
+    updatePickingDetailViewContainers();
+}
+
+function updatePickingDetailViewTabs() {
+    const cardTab = document.getElementById('pickingCardViewTab');
+    const tableTab = document.getElementById('pickingTableViewTab');
+
+    if (!cardTab || !tableTab) {
+        return;
+    }
+
+    cardTab.classList.toggle('active', currentPickingDetailView === 'cards');
+    cardTab.classList.toggle('text-gray-700', currentPickingDetailView === 'cards');
+    cardTab.classList.toggle('text-gray-500', currentPickingDetailView !== 'cards');
+
+    tableTab.classList.toggle('active', currentPickingDetailView === 'table');
+    tableTab.classList.toggle('text-gray-700', currentPickingDetailView === 'table');
+    tableTab.classList.toggle('text-gray-500', currentPickingDetailView !== 'table');
+}
+
+function updatePickingDetailViewContainers() {
+    const cardContainer = document.getElementById('pickingItemsCardView');
+    const tableContainer = document.getElementById('pickingItemsTableView');
+
+    if (!cardContainer || !tableContainer) {
+        return;
+    }
+
+    cardContainer.classList.toggle('hidden', currentPickingDetailView !== 'cards');
+    tableContainer.classList.toggle('hidden', currentPickingDetailView !== 'table');
+}
+
+function renderPickingItemsViews(lineItems) {
+    const cardContainer = document.getElementById('pickingItemsCardView');
+    const tableContainer = document.getElementById('pickingItemsTableView');
+
+    if (!cardContainer || !tableContainer) {
+        return;
+    }
+
+    cardContainer.innerHTML = '';
+    lineItems.forEach((item, index) => {
+        const itemElement = createPickingItemElement(item, index + 1);
+        cardContainer.appendChild(itemElement);
+    });
+
+    tableContainer.innerHTML = createPickingItemsTable(lineItems);
+    updatePickingDetailViewTabs();
+    updatePickingDetailViewContainers();
+}
+
+function getPickingItemStatusLabel(item) {
+    if (item.status === 'completed') {
+        return '完了';
+    }
+
+    if (item.status === 'paused') {
+        return '一時停止';
+    }
+
+    if (item.status === 'in-progress') {
+        return '進行中';
+    }
+
+    return '待機中';
+}
+
+function getPickingItemStatusBadgeClass(item) {
+    if (item.status === 'completed') {
+        return 'bg-green-100 text-green-800';
+    }
+
+    if (item.status === 'paused') {
+        return 'bg-orange-100 text-orange-800';
+    }
+
+    if (item.status === 'in-progress') {
+        return 'bg-yellow-100 text-yellow-800';
+    }
+
+    return 'bg-gray-100 text-gray-700';
+}
+
+function getPickingTableRowTone(item) {
+    if (item.isLivePending) {
+        return 'bg-blue-50';
+    }
+
+    if (item.status === 'completed') {
+        return 'bg-green-50';
+    }
+
+    if (item.status === 'paused') {
+        return 'bg-orange-50';
+    }
+
+    if (isItemInventoryShort(item)) {
+        return 'bg-red-50';
+    }
+
+    if (item.status === 'in-progress') {
+        return 'bg-yellow-50';
+    }
+
+    return 'bg-white';
+}
+
+function getPickingTableNote(item) {
+    if (item.isLivePending) {
+        return '最新在庫と箱数を確認中';
+    }
+
+    if (item.status === 'completed') {
+        return item.completedAt
+            ? `完了 ${new Date(item.completedAt).toLocaleString('ja-JP')}`
+            : '完了済み';
+    }
+
+    if (item.status === 'paused') {
+        if (item.pickedQuantity !== undefined && item.pickedQuantity > 0) {
+            return `一時停止中 ${item.pickedQuantity}枚取得済み / 残り ${item.remainingQuantity || 0}枚`;
+        }
+
+        return '一時停止中';
+    }
+
+    if (item.status === 'in-progress' && item.pickedQuantity !== undefined && item.pickedQuantity > 0) {
+        return `取得済み ${item.pickedQuantity}枚 / 残り ${item.remainingQuantity || 0}枚`;
+    }
+
+    if (isItemInventoryShort(item)) {
+        return `不足 ${Math.max(0, getDisplayShortfallQuantity(item))}個`;
+    }
+
+    return '準備完了';
+}
+
+function createPickingItemsTable(lineItems) {
+    const rowsHtml = lineItems.map((item, index) => {
+        const rowTone = getPickingTableRowTone(item);
+        const cellClass = `${rowTone} border-b border-gray-100 px-4 py-3 align-top text-sm text-gray-700`;
+        const stickyCellClass = `sticky left-0 z-10 ${rowTone} border-b border-gray-100 px-4 py-3 align-top text-sm font-semibold text-gray-900`;
+        const boxCount = item.isLivePending
+            ? '--'
+            : (item.boxQuantity !== undefined ? item.boxQuantity : item.quantity);
+        const physicalQuantity = item.isLivePending
+            ? '--'
+            : (typeof item.currentPhysicalQuantity === 'number' ? item.currentPhysicalQuantity : '--');
+        const availableQuantity = item.isLivePending
+            ? '--'
+            : (typeof item.currentAvailableQuantity === 'number' ? item.currentAvailableQuantity : '--');
+        const shortfallQuantity = item.isLivePending ? '--' : Math.max(0, getDisplayShortfallQuantity(item));
+        const statusLabel = getPickingItemStatusLabel(item);
+        const statusBadgeClass = getPickingItemStatusBadgeClass(item);
+        const note = getPickingTableNote(item);
+
+        return `
+            <tr class="${rowTone}">
+                <td class="${stickyCellClass}">
+                    <div class="flex items-center justify-center h-10 w-10 rounded-xl bg-blue-100 text-lg font-bold text-blue-600 mx-auto">
+                        ${index + 1}
+                    </div>
+                </td>
+                <td class="${cellClass}">
+                    <div class="font-semibold text-gray-900">${item.品番}</div>
+                </td>
+                <td class="${cellClass}">
+                    <div class="font-medium text-gray-900">${item.背番号}</div>
+                </td>
+                <td class="${cellClass} text-right font-semibold text-gray-900">${item.quantity}</td>
+                <td class="${cellClass} text-right font-semibold text-gray-900">${boxCount}</td>
+                <td class="${cellClass} text-right">${physicalQuantity}</td>
+                <td class="${cellClass} text-right">${availableQuantity}</td>
+                <td class="${cellClass} text-right font-semibold ${item.isLivePending ? 'text-blue-600' : shortfallQuantity === 0 ? 'text-green-600' : 'text-red-600'}">${shortfallQuantity}</td>
+                <td class="${cellClass}">
+                    <span class="inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${statusBadgeClass}">${statusLabel}</span>
+                </td>
+                <td class="${cellClass}">
+                    <div class="min-w-[180px] whitespace-normal text-sm ${item.isLivePending ? 'text-blue-700' : 'text-gray-600'}">${note}</div>
+                </td>
+            </tr>
+        `;
+    }).join('');
+
+    return `
+        <div class="picking-table-scroll">
+            <table class="w-full picking-detail-table">
+                <thead>
+                    <tr class="bg-slate-50 text-left text-sm font-semibold text-gray-700 shadow-sm">
+                        <th class="sticky left-0 z-30 bg-slate-50 border-b border-gray-200 px-4 py-3 text-center">行</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3">品番</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3">背番号</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3 text-right">数量(PCS)</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3 text-right">箱数</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3 text-right">物理在庫</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3 text-right">利用可能在庫</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3 text-right">不足</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3">ステータス</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3">メモ</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${rowsHtml}
+                </tbody>
+            </table>
+        </div>
+    `;
+}
+
 function createPickingItemElement(item, index) {
     const itemDiv = document.createElement('div');
+    const isLivePending = !!item.isLivePending;
     
     // Check if item has insufficient inventory - BUT NOT if already completed
-    const hasInsufficientInventory = item.status !== 'completed' && 
-        (item.inventoryStatus === 'none' || (item.shortfallQuantity && item.shortfallQuantity > 0));
+    const hasInsufficientInventory = !isLivePending && item.status !== 'completed' && isItemInventoryShort(item);
     
     // Apply red background for items with insufficient inventory (only if not completed)
     itemDiv.className = hasInsufficientInventory 
@@ -1681,6 +2226,10 @@ function createPickingItemElement(item, index) {
         statusIcon = '<i class="fas fa-check-circle text-green-500"></i>';
         statusText = '完了';
         statusClass = 'text-green-600';
+    } else if (item.status === 'paused') {
+        statusIcon = '<i class="fas fa-pause-circle text-orange-500"></i>';
+        statusText = '一時停止';
+        statusClass = 'text-orange-600';
     } else if (item.status === 'in-progress') {
         statusIcon = '<i class="fas fa-clock text-yellow-500"></i>';
         statusText = '進行中';
@@ -1696,17 +2245,21 @@ function createPickingItemElement(item, index) {
          <p class="text-xs text-gray-500">作業者: ${item.completedBy || 'N/A'}</p>` : '';
 
     // Use box quantity if available, otherwise use piece quantity
-    const displayQuantity = item.boxQuantity !== undefined ? item.boxQuantity : item.quantity;
-    const quantityUnit = item.boxQuantity !== undefined ? '個' : '個';
-    const quantityDetail = item.boxQuantity !== undefined && item.収容数 > 1 
+    const displayQuantity = isLivePending ? null : (item.boxQuantity !== undefined ? item.boxQuantity : item.quantity);
+    const quantityUnit = isLivePending ? '確認中' : '個';
+    const quantityDetail = !isLivePending && item.boxQuantity !== undefined && item.収容数 > 1 
         ? `<span class="text-xs text-gray-500">(${item.quantity}個 ÷ ${item.収容数})</span>` 
         : '';
+    const quantitySummary = isLivePending
+        ? `数量: ${item.quantity}個`
+        : `数量: ${displayQuantity}${quantityUnit} ${quantityDetail}`;
     
     // ===== NEW: Show picking progress =====
     let pickingProgressHTML = '';
-    if (item.status === 'in-progress' && item.pickedQuantity !== undefined && item.pickedQuantity > 0) {
+    if ((item.status === 'in-progress' || item.status === 'paused') && item.pickedQuantity !== undefined && item.pickedQuantity > 0) {
         const pickedBoxes = item.pickedBoxes || (item.収容数 > 1 ? Math.floor(item.pickedQuantity / item.収容数) : item.pickedQuantity);
         const remainingBoxes = item.remainingBoxes || (item.収容数 > 1 ? Math.ceil(item.remainingQuantity / item.収容数) : item.remainingQuantity);
+        const remainingLabel = item.status === 'paused' ? '一時停止中' : '待機中';
         
         pickingProgressHTML = `
             <div class="mt-2 bg-blue-50 border border-blue-200 px-3 py-2 rounded-lg">
@@ -1719,7 +2272,7 @@ function createPickingItemElement(item, index) {
                 <div class="flex items-center space-x-2 mt-1">
                     <i class="fas fa-hourglass-half text-orange-500"></i>
                     <span class="text-sm font-semibold text-orange-600">
-                        残り ${remainingBoxes}個 (${item.remainingQuantity}枚) 待機中
+                        残り ${remainingBoxes}個 (${item.remainingQuantity}枚) ${remainingLabel}
                     </span>
                 </div>
             </div>
@@ -1728,9 +2281,15 @@ function createPickingItemElement(item, index) {
     
     // Add inventory warning for insufficient items - ONLY if not completed
     let inventoryWarning = '';
-    if (hasInsufficientInventory) {
-        // Show how much is actually short based on remaining quantity
-        const actualShortfall = item.remainingQuantity !== undefined ? item.remainingQuantity : (item.shortfallQuantity || item.quantity);
+    if (isLivePending) {
+        inventoryWarning = `
+            <div class="mt-2 flex items-center space-x-2 bg-blue-50 px-3 py-2 rounded-lg">
+                <i class="fas fa-spinner fa-spin text-blue-600"></i>
+                <span class="text-sm font-semibold text-blue-700">最新在庫と箱数を確認中...</span>
+            </div>
+        `;
+    } else if (hasInsufficientInventory) {
+        const actualShortfall = Math.max(0, getDisplayShortfallQuantity(item));
         inventoryWarning = `
             <div class="mt-2 flex items-center space-x-2 bg-red-100 px-3 py-2 rounded-lg">
                 <i class="fas fa-exclamation-triangle text-red-600"></i>
@@ -1747,12 +2306,12 @@ function createPickingItemElement(item, index) {
                 </div>
                 <div>
                     <h4 class="text-lg font-semibold text-gray-900">品番: ${item.品番}</h4>
-                    <div class="flex items-center">
-                        <div class="device-status-indicator w-3 h-3 rounded-full ${item.status === 'in-progress' ? 'bg-yellow-400' : item.status === 'completed' ? 'bg-green-500' : 'bg-gray-400'} mr-2"></div>
+                    <div class="flex items-center ${statusClass}">
+                        <div class="device-status-indicator w-3 h-3 rounded-full ${item.status === 'in-progress' ? 'bg-yellow-400' : item.status === 'paused' ? 'bg-orange-400' : item.status === 'completed' ? 'bg-green-500' : 'bg-gray-400'} mr-2"></div>
                         <p class="text-gray-600">背番号: <span class="font-medium">${item.背番号}</span></p>
                     </div>
                     <p class="text-sm text-gray-500">
-                        数量: ${displayQuantity}${quantityUnit} ${quantityDetail}
+                        ${quantitySummary}
                     </p>
                     <div class="completion-info mt-1">${completedInfo}</div>
                     ${pickingProgressHTML}
@@ -1761,15 +2320,15 @@ function createPickingItemElement(item, index) {
             </div>
             <div class="text-right flex items-center space-x-4">
                 <div>
-                    <div class="text-2xl font-bold text-gray-900">${displayQuantity}</div>
+                    <div class="text-2xl font-bold text-gray-900">${isLivePending ? '--' : displayQuantity}</div>
                     <div class="text-sm text-gray-500">${quantityUnit}</div>
-                    ${quantityDetail ? `<div class="text-xs text-gray-400 mt-1">${item.quantity}個</div>` : ''}
+                    ${isLivePending || quantityDetail ? `<div class="text-xs text-gray-400 mt-1">${item.quantity}個</div>` : ''}
                 </div>
                 <div class="flex flex-col items-center space-y-2">
                     <div class="text-2xl status-icon">
                         ${statusIcon}
                     </div>
-                    <div class="status-badge ${item.status === 'completed' ? 'bg-green-100 text-green-800' : item.status === 'in-progress' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-800'} px-2 py-1 rounded-full text-xs font-medium">
+                    <div class="status-badge ${item.status === 'completed' ? 'bg-green-100 text-green-800' : item.status === 'paused' ? 'bg-orange-100 text-orange-800' : item.status === 'in-progress' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-800'} px-2 py-1 rounded-full text-xs font-medium">
                         ${statusText}
                     </div>
                 </div>
@@ -1782,6 +2341,8 @@ function createPickingItemElement(item, index) {
 
 // Start picking process
 async function startPickingProcess() {
+    const t = window.t || ((key) => key);
+
     if (!currentWorker) {
         showToast(t('login-required'), 'error');
         return;
@@ -1816,16 +2377,57 @@ async function startPickingProcess() {
         }
         
         const result = await response.json();
-        showToast('ピッキングプロセスを開始しました！', 'success');
+        showToast(result.resumed ? t('picking-resumed') : t('picking-started'), 'success');
         
         // Refresh the detail view and notify ESP32 devices
         setTimeout(async () => {
             await refreshPickingDetail();
+            await loadPickingRequests();
         }, 1000);
         
     } catch (error) {
         console.error('Error starting picking process:', error);
-        showToast('ピッキング開始に失敗しました', 'error');
+        showToast(t('picking-start-failed'), 'error');
+    }
+}
+
+async function pausePickingProcess() {
+    const t = window.t || ((key) => key);
+
+    if (!currentWorker) {
+        showToast(t('login-required'), 'error');
+        return;
+    }
+
+    if (!currentRequestNumber) {
+        showToast(t('no-request-selected'), 'error');
+        return;
+    }
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/picking-requests/${currentRequestNumber}/pause`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                pausedBy: currentWorker
+            })
+        });
+
+        if (!response.ok) {
+            const errorPayload = await response.json().catch(() => ({}));
+            throw new Error(errorPayload.details || errorPayload.error || 'Failed to pause picking process');
+        }
+
+        await response.json();
+        showToast(t('picking-paused'), 'success');
+        await loadPickingRequests();
+        await refreshPickingDetail();
+        await checkAndUpdateLockStatus();
+    } catch (error) {
+        console.error('Error pausing picking process:', error);
+        showToast(t('picking-pause-failed'), 'error');
     }
 }
 
@@ -1878,28 +2480,27 @@ async function startIndividualPicking(lineNumber, deviceId) {
 async function refreshPickingDetail() {
     if (currentRequestNumber) {
         console.log('🔄 Refreshing picking detail for request:', currentRequestNumber);
+        const loadToken = ++pickingDetailLoadToken;
         try {
-            // Show loading state during refresh
-            showPickingDetailLoadingState(currentRequestNumber);
-            
-            // Add cache-busting parameter to ensure we get fresh data
-            const timestamp = new Date().getTime();
-            const response = await fetch(`${API_BASE_URL}/picking-requests/group/${currentRequestNumber}?_=${timestamp}`);
-            
-            if (!response.ok) {
-                throw new Error(`Failed to fetch picking request details: ${response.status}`);
+            if (!currentRequest || currentRequest.requestNumber !== currentRequestNumber) {
+                showPickingDetailLoadingState(currentRequestNumber);
+
+                const request = await fetchBasePickingDetail(currentRequestNumber);
+                if (loadToken !== pickingDetailLoadToken) {
+                    return;
+                }
+
+                currentRequest = request;
+                await displayPickingDetail(createPendingPickingDetail(request), {
+                    livePending: true,
+                    skipMasterData: true
+                });
             }
-            
-            const request = await response.json();
-            console.log('📄 Refreshed data received:', request);
-            currentRequest = request;
-            displayPickingDetail(request);
-            
-            // Check lock status after refreshing detail
-            await checkAndUpdateLockStatus();
-            
-            // Also refresh ESP32 devices for this request
-            await refreshESP32Devices(currentRequestNumber);
+
+            await hydratePickingDetail(currentRequestNumber, loadToken, {
+                refreshDevices: true,
+                showFailureToast: true
+            });
             
             console.log('✅ Refresh completed successfully');
         } catch (error) {
@@ -2062,6 +2663,11 @@ function updateProgressCounter() {
             startBtn.className = 'px-8 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors text-lg font-medium';
             console.log('✅ 完了 button activated - no refresh needed!');
         }
+
+        const pauseBtn = document.getElementById('pausePickingBtn');
+        if (pauseBtn) {
+            pauseBtn.classList.add('hidden');
+        }
         
         // Update currentRequest status in memory
         if (currentRequest) {
@@ -2163,6 +2769,7 @@ function getStatusClass(status) {
     switch (status) {
         case 'pending': return 'status-pending';
         case 'in-progress': return 'status-in-progress';
+        case 'paused': return 'status-paused';
         case 'completed': return 'status-completed';
         case 'partial-inventory': return 'status-partial-inventory';
         case 'waiting-for-inventory': return 'status-partial-inventory';
@@ -2175,6 +2782,7 @@ function getStatusText(status) {
     switch (status) {
         case 'pending': return t('status-pending');
         case 'in-progress': return t('status-in-progress');
+        case 'paused': return t('status-paused');
         case 'completed': return t('status-completed');
         case 'partial-inventory': return '在庫不足';
         case 'waiting-for-inventory': return '在庫待ち';
@@ -2209,20 +2817,41 @@ function showPickingDetailLoadingState(requestNumber) {
     `;
     
     // Show loading in items list
-    const itemsContainer = document.getElementById('pickingItemsList');
-    itemsContainer.innerHTML = `
+    const cardContainer = document.getElementById('pickingItemsCardView');
+    const tableContainer = document.getElementById('pickingItemsTableView');
+    if (cardContainer) {
+        cardContainer.innerHTML = `
         <div class="p-12 text-center">
             <div class="animate-spin w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full mx-auto mb-6"></div>
             <p class="text-lg text-gray-600">ピッキング項目を読み込んでいます...</p>
             <p class="text-sm text-gray-500 mt-2">しばらくお待ちください</p>
         </div>
     `;
+    }
+
+    if (tableContainer) {
+        tableContainer.innerHTML = `
+            <div class="p-12 text-center text-gray-500">
+                <div class="animate-spin w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full mx-auto mb-6"></div>
+                <p class="text-lg text-gray-600">テーブルを準備しています...</p>
+            </div>
+        `;
+    }
+
+    updatePickingDetailViewTabs();
+    updatePickingDetailViewContainers();
     
     // Disable start button during loading
     const startBtn = document.getElementById('startPickingBtn');
+    const pauseBtn = document.getElementById('pausePickingBtn');
     if (startBtn) {
         startBtn.disabled = true;
         startBtn.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i>読み込み中...`;
+    }
+
+    if (pauseBtn) {
+        pauseBtn.classList.add('hidden');
+        pauseBtn.disabled = true;
     }
 }
 
@@ -2233,6 +2862,11 @@ function hidePickingDetailLoadingState() {
     const startBtn = document.getElementById('startPickingBtn');
     if (startBtn) {
         startBtn.disabled = false;
+    }
+
+    const pauseBtn = document.getElementById('pausePickingBtn');
+    if (pauseBtn) {
+        pauseBtn.disabled = false;
     }
 }
 
@@ -2691,8 +3325,12 @@ window.filterByStatus = filterByStatus;
 window.filterByDate = filterByDate;
 window.refreshPickingRequests = refreshPickingRequests;
 window.startPickingProcess = startPickingProcess;
+window.pausePickingProcess = pausePickingProcess;
 // window.startIndividualPicking = startIndividualPicking; // Removed - ESP32 handles picking automatically
 window.refreshPickingDetail = refreshPickingDetail;
+window.switchPickingDetailView = switchPickingDetailView;
+window.closePausedRequestsReminderModal = closePausedRequestsReminderModal;
+window.openPausedReminderRequest = openPausedReminderRequest;
 window.completeAndBackToList = completeAndBackToList;
 window.clearInventoryList = clearInventoryList;
 window.submitInventoryCount = submitInventoryCount;

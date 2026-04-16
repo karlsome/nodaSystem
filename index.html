@@ -185,7 +185,7 @@
 
                 <!-- Status Filter -->
                 <div class="mb-4">
-                    <div class="flex space-x-2">
+                    <div class="flex flex-wrap gap-2">
                         <button onclick="filterByStatus('all')" class="status-filter active px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-i18n="filter-all">
                             全て
                         </button>
@@ -194,6 +194,9 @@
                         </button>
                         <button onclick="filterByStatus('in-progress')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-i18n="filter-in-progress">
                             進行中
+                        </button>
+                        <button onclick="filterByStatus('paused')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-i18n="filter-paused">
+                            一時停止
                         </button>
                         <button onclick="filterByStatus('completed')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-i18n="filter-completed">
                             完了
@@ -228,6 +231,10 @@
                                 class="px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors font-medium">
                             <i class="fas fa-play mr-2"></i><span data-i18n="start-button">開始</span>
                         </button>
+                        <button onclick="pausePickingProcess()" id="pausePickingBtn"
+                                class="hidden px-6 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors font-medium">
+                            <i class="fas fa-pause mr-2"></i><span data-i18n="pause-button">一時停止</span>
+                        </button>
                         <button onclick="refreshPickingDetail()" class="px-4 py-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors">
                             <i class="fas fa-refresh mr-2"></i><span data-i18n="refresh-button">更新</span>
                         </button>
@@ -244,16 +251,31 @@
                 <!-- Items List -->
                 <div class="bg-white rounded-lg border border-gray-200">
                     <div class="px-5 py-4 border-b border-gray-200">
-                        <div class="flex items-center justify-between">
-                            <h3 class="text-lg font-bold text-gray-900" data-i18n="picking-items">ピッキング項目</h3>
+                        <div class="flex items-center justify-between gap-4">
+                            <div class="flex items-center gap-4 flex-wrap">
+                                <h3 class="text-lg font-bold text-gray-900" data-i18n="picking-items">ピッキング項目</h3>
+                                <div class="inline-flex items-center rounded-xl bg-gray-100 p-1" aria-label="ピッキング表示切替">
+                                    <button id="pickingCardViewTab" onclick="switchPickingDetailView('cards')"
+                                            class="picking-view-tab active rounded-lg px-4 py-2 text-sm font-semibold text-gray-700 transition-colors">
+                                        <i class="fas fa-list-ul mr-2"></i>リスト
+                                    </button>
+                                    <button id="pickingTableViewTab" onclick="switchPickingDetailView('table')"
+                                            class="picking-view-tab rounded-lg px-4 py-2 text-sm font-semibold text-gray-500 transition-colors">
+                                        <i class="fas fa-table mr-2"></i>表
+                                    </button>
+                                </div>
+                            </div>
                             <div class="flex items-center space-x-2">
                                 <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse" id="connectionStatus"></div>
                                 <span class="text-xs text-gray-500" id="connectionText" data-i18n="connection-status-connected">接続中</span>
                             </div>
                         </div>
                     </div>
-                    <div id="pickingItemsList" class="divide-y divide-gray-200">
-                        <!-- Items will be populated here -->
+                    <div id="pickingItemsCardView" class="divide-y divide-gray-200">
+                        <!-- Card view items will be populated here -->
+                    </div>
+                    <div id="pickingItemsTableView" class="hidden">
+                        <!-- Table view items will be populated here -->
                     </div>
                 </div>
             </div>
@@ -726,6 +748,29 @@
                         </button>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Paused Requests Reminder Modal -->
+    <div id="pausedRequestsReminderModal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[85vh] overflow-hidden">
+            <div class="flex items-start justify-between px-6 py-5 border-b border-gray-200">
+                <div>
+                    <h3 class="text-xl font-bold text-gray-900" data-i18n="paused-reminder-title">一時停止中の依頼があります</h3>
+                    <p class="text-sm text-gray-600 mt-1" data-i18n="paused-reminder-desc">再開待ちの依頼です。タップすると詳細を開けます。</p>
+                </div>
+                <button onclick="closePausedRequestsReminderModal()" class="w-10 h-10 bg-gray-100 hover:bg-gray-200 rounded-lg flex items-center justify-center text-gray-500 transition-colors">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div id="pausedRequestsReminderList" class="px-6 py-5 space-y-3 max-h-[55vh] overflow-y-auto">
+                <!-- Paused requests will be populated here -->
+            </div>
+            <div class="px-6 py-4 border-t border-gray-200 bg-gray-50 flex justify-end">
+                <button onclick="closePausedRequestsReminderModal()" class="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-100 transition-colors font-medium" data-i18n="close-button">
+                    閉じる
+                </button>
             </div>
         </div>
     </div>

@@ -84,6 +84,10 @@ let globalPickingLock = {
     startedAt: null
 };
 
+const ACTIVE_PICKING_LINE_STATUSES = ['pending', 'in-progress'];
+const LINE_ITEM_STATUS_VALUES = ['pending', 'in-progress', 'paused', 'completed', 'cancelled'];
+const REQUEST_STATUS_VALUES = ['pending', 'in-progress', 'paused', 'completed', 'cancelled', 'partial-inventory', 'waiting-for-inventory'];
+
 // 🔐 MUTEX: Prevent concurrent inventory transactions for the same item
 const inventoryTransactionLocks = new Map(); // key: "背番号" -> { locked: boolean, queue: [] }
 
@@ -91,38 +95,156 @@ const inventoryTransactionLocks = new Map(); // key: "背番号" -> { locked: bo
 async function checkGlobalPickingLock() {
     // Check database for any in-progress orders
     const collection = db.collection(process.env.COLLECTION_NAME);
-    const inProgressOrder = await collection.findOne({ status: 'in-progress' });
-    
-    if (inProgressOrder && !globalPickingLock.isLocked) {
-        // Found an in-progress order, set the lock
-        const previousRequestNumber = globalPickingLock.activeRequestNumber;
-        
-        globalPickingLock = {
+    const inProgressOrder = await collection.findOne(
+        { status: 'in-progress' },
+        { sort: { updatedAt: -1, startedAt: -1, createdAt: -1 } }
+    );
+    const previousRequestNumber = globalPickingLock.activeRequestNumber;
+    const nextLockState = inProgressOrder
+        ? {
             isLocked: true,
             activeRequestNumber: inProgressOrder.requestNumber,
-            startedBy: inProgressOrder.startedBy,
-            startedAt: inProgressOrder.startedAt
+            startedBy: inProgressOrder.startedBy || inProgressOrder.updatedBy || inProgressOrder.createdBy || null,
+            startedAt: inProgressOrder.startedAt || inProgressOrder.updatedAt || null
+        }
+        : {
+            isLocked: false,
+            activeRequestNumber: null,
+            startedBy: null,
+            startedAt: null
         };
-        
-        // 🚨 NEW: If this is a different request or newly in-progress, notify ESP32 devices
-        if (previousRequestNumber !== inProgressOrder.requestNumber) {
+
+    const lockChanged =
+        globalPickingLock.isLocked !== nextLockState.isLocked ||
+        globalPickingLock.activeRequestNumber !== nextLockState.activeRequestNumber ||
+        globalPickingLock.startedBy !== nextLockState.startedBy ||
+        String(globalPickingLock.startedAt || '') !== String(nextLockState.startedAt || '');
+
+    globalPickingLock = nextLockState;
+
+    if (lockChanged) {
+        if (inProgressOrder && previousRequestNumber !== inProgressOrder.requestNumber) {
             console.log(`🔄 Detected new/changed in-progress order: ${inProgressOrder.requestNumber}`);
             await notifyESP32DevicesForRequest(inProgressOrder.requestNumber, 'System Lock Check');
         }
-        
-    } else if (!inProgressOrder && globalPickingLock.isLocked) {
-        // No in-progress orders, release the lock
+
+        broadcastLockStatus();
+    }
+    
+    return globalPickingLock;
+}
+
+async function ensureHelperRecordsForRequest(request, startedBy, factory) {
+    const submittedDb = client.db('submittedDB');
+    const helperCollection = submittedDb.collection('nodaRequestHelperDB');
+    const existingHelpers = await helperCollection.find({ requestNumber: request.requestNumber }).toArray();
+    const helperMap = new Map(existingHelpers.map(helper => [`${helper.lineNumber}`, helper]));
+    const missingRecords = [];
+
+    for (const item of request.lineItems || []) {
+        const key = `${item.lineNumber}`;
+        if (!helperMap.has(key)) {
+            missingRecords.push({
+                requestNumber: request.requestNumber,
+                lineNumber: item.lineNumber,
+                背番号: item.背番号,
+                品番: item.品番,
+                totalQuantity: item.quantity,
+                requestedQuantity: item.quantity,
+                pickedQuantity: 0,
+                remainingQuantity: item.quantity,
+                reservedQuantity: item.reservedQuantity || 0,
+                shortfallQuantity: item.shortfallQuantity || 0,
+                pickingComplete: false,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+                startedBy,
+                factory: factory || request.factory || '野田倉庫'
+            });
+        }
+    }
+
+    if (missingRecords.length > 0) {
+        await helperCollection.insertMany(missingRecords);
+        console.log(`✅ Created ${missingRecords.length} helper records for ${request.requestNumber}`);
+    }
+
+    return helperCollection;
+}
+
+async function setRequestDevicesToIdle(request, message = 'Standby') {
+    const deviceIds = new Set();
+
+    if (request.requestType === 'bulk' && Array.isArray(request.lineItems)) {
+        for (const item of request.lineItems) {
+            if (item.背番号) {
+                deviceIds.add(item.背番号);
+            }
+        }
+    } else if (request.背番号) {
+        deviceIds.add(request.背番号);
+    }
+
+    await Promise.all(Array.from(deviceIds).map(deviceId =>
+        notifyDeviceStatusChange(deviceId, request.requestNumber, 0, 0, '', 'paused', message)
+    ));
+}
+
+async function pausePickingRequest(requestNumber, pausedBy) {
+    await client.connect();
+    const submittedDb = client.db('submittedDB');
+    const requestsCollection = submittedDb.collection('nodaRequestDB');
+    const request = await requestsCollection.findOne({ requestNumber });
+
+    if (!request) {
+        const error = new Error('Picking request not found');
+        error.statusCode = 404;
+        throw error;
+    }
+
+    if (request.status !== 'in-progress') {
+        const error = new Error(`Request is not in progress (current status: ${request.status})`);
+        error.statusCode = 409;
+        throw error;
+    }
+
+    const now = new Date();
+    await requestsCollection.updateOne(
+        { requestNumber },
+        {
+            $set: {
+                status: 'paused',
+                pausedAt: now,
+                pausedBy,
+                updatedAt: now,
+                updatedBy: pausedBy,
+                'lineItems.$[elem].status': 'paused',
+                'lineItems.$[elem].pausedAt': now,
+                'lineItems.$[elem].pausedBy': pausedBy,
+                'lineItems.$[elem].updatedAt': now
+            }
+        },
+        {
+            arrayFilters: [{ 'elem.status': { $in: ACTIVE_PICKING_LINE_STATUSES } }]
+        }
+    );
+
+    if (globalPickingLock.activeRequestNumber === requestNumber) {
         globalPickingLock = {
             isLocked: false,
             activeRequestNumber: null,
             startedBy: null,
             startedAt: null
         };
-        // Notify all tablets that lock is released
         broadcastLockStatus();
+    } else {
+        await checkGlobalPickingLock();
     }
-    
-    return globalPickingLock;
+
+    const updatedRequest = await requestsCollection.findOne({ requestNumber });
+    await setRequestDevicesToIdle(updatedRequest, 'Standby');
+
+    return updatedRequest;
 }
 
 // Function to notify ESP32 devices for a specific request
@@ -143,12 +265,17 @@ async function notifyESP32DevicesForRequest(requestNumber, triggeredBy = 'System
         
         const notifiedDevices = [];
         
+        if (request.status === 'paused') {
+            await setRequestDevicesToIdle(request, 'Standby');
+            return;
+        }
+
         // Check if request is in-progress and notify devices
         if (request.status === 'in-progress') {
             if (request.requestType === 'bulk' && request.lineItems) {
                 // Notify all devices in this bulk request that are in-progress or pending
                 for (const lineItem of request.lineItems) {
-                    if (lineItem.status === 'in-progress' || lineItem.status === 'pending') {
+                    if (ACTIVE_PICKING_LINE_STATUSES.includes(lineItem.status)) {
                         console.log(`🔔 Notifying device ${lineItem.背番号} for line item ${lineItem.lineNumber} (status: ${lineItem.status})`);
                         await notifyDeviceStatusChange(
                             lineItem.背番号, 
@@ -216,7 +343,7 @@ async function getActivePickingForDevice(deviceId) {
             'lineItems': {
                 $elemMatch: {
                     背番号: deviceId,
-                    status: { $in: ['pending', 'in-progress'] }
+                    status: { $in: ACTIVE_PICKING_LINE_STATUSES }
                 }
             }
         };
@@ -228,7 +355,7 @@ async function getActivePickingForDevice(deviceId) {
         if (activeRequest) {
             // Find the specific line item for this device
             const lineItem = activeRequest.lineItems.find(item => 
-                item.背番号 === deviceId && ['pending', 'in-progress'].includes(item.status)
+                item.背番号 === deviceId && ACTIVE_PICKING_LINE_STATUSES.includes(item.status)
             );
             console.log(`📋 Found line item for ${deviceId}:`, lineItem);
             
@@ -454,6 +581,155 @@ async function getMasterDataAndCalculateBoxQuantity(品番, pieceQuantity) {
         console.error(`Error fetching master data for ${品番}:`, error);
         return pieceQuantity; // Fallback to piece quantity
     }
+}
+
+function buildInventoryTimestampExpression() {
+    return {
+        $cond: {
+            if: { $type: "$timeStamp" },
+            then: {
+                $cond: {
+                    if: { $eq: [{ $type: "$timeStamp" }, "string"] },
+                    then: { $dateFromString: { dateString: "$timeStamp" } },
+                    else: { $toDate: "$timeStamp" }
+                }
+            },
+            else: new Date()
+        }
+    };
+}
+
+async function getLatestInventoryMapByBackNumbers(backNumbers) {
+    if (!backNumbers || backNumbers.length === 0) {
+        return new Map();
+    }
+
+    const submittedDb = client.db("submittedDB");
+    const inventoryCollection = submittedDb.collection('nodaInventoryDB');
+    const inventoryResults = await inventoryCollection.aggregate([
+        { $match: { 背番号: { $in: backNumbers } } },
+        {
+            $addFields: {
+                timeStampDate: buildInventoryTimestampExpression()
+            }
+        },
+        { $sort: { 背番号: 1, timeStampDate: -1 } },
+        {
+            $group: {
+                _id: "$背番号",
+                latest: { $first: "$$ROOT" }
+            }
+        }
+    ]).toArray();
+
+    return new Map(inventoryResults.map(result => [result._id, result.latest]));
+}
+
+async function buildPickingRequestDetail(requestNumber) {
+    const collection = db.collection(process.env.COLLECTION_NAME);
+    const request = await collection.findOne({ requestNumber });
+
+    if (!request) {
+        return null;
+    }
+
+    const lineItems = Array.isArray(request.lineItems) ? request.lineItems : [];
+    const backNumbers = [...new Set(lineItems.map(item => item.背番号).filter(Boolean))];
+    const submittedDb = client.db("submittedDB");
+    const helperCollection = submittedDb.collection('nodaRequestHelperDB');
+
+    const [helperRecords, inventoryMap] = await Promise.all([
+        helperCollection.find({ requestNumber }).toArray(),
+        getLatestInventoryMapByBackNumbers(backNumbers)
+    ]);
+
+    const helperMap = new Map(helperRecords.map(record => [record.lineNumber, record]));
+    const sortedLineItems = [...lineItems].sort((a, b) => (a.lineNumber || 0) - (b.lineNumber || 0));
+    const reservedBudgetByBackNumber = new Map();
+
+    if (request.status !== 'in-progress') {
+        sortedLineItems.forEach(item => {
+            if (!item.背番号 || item.status === 'completed') {
+                return;
+            }
+
+            const currentReserved = reservedBudgetByBackNumber.get(item.背番号) || 0;
+            reservedBudgetByBackNumber.set(
+                item.背番号,
+                currentReserved + Math.max(0, item.reservedQuantity || 0)
+            );
+        });
+    }
+
+    const budgetByBackNumber = new Map();
+    sortedLineItems.forEach(item => {
+        if (!item.背番号 || budgetByBackNumber.has(item.背番号)) {
+            return;
+        }
+
+        const inventory = inventoryMap.get(item.背番号);
+        const currentPhysicalQuantity = inventory?.physicalQuantity ?? inventory?.runningQuantity ?? 0;
+        const currentAvailableQuantity = inventory?.availableQuantity ?? inventory?.runningQuantity ?? 0;
+        const reservedBudget = reservedBudgetByBackNumber.get(item.背番号) || 0;
+        const initialBudget = request.status === 'in-progress'
+            ? currentPhysicalQuantity
+            : Math.max(0, currentAvailableQuantity + reservedBudget);
+
+        budgetByBackNumber.set(item.背番号, initialBudget);
+    });
+
+    const lineItemMap = new Map();
+    sortedLineItems.forEach(item => {
+        const helperRecord = helperMap.get(item.lineNumber);
+        const inventory = inventoryMap.get(item.背番号);
+        const currentPhysicalQuantity = inventory?.physicalQuantity ?? inventory?.runningQuantity ?? 0;
+        const currentReservedQuantity = inventory?.reservedQuantity ?? 0;
+        const currentAvailableQuantity = inventory?.availableQuantity ?? inventory?.runningQuantity ?? 0;
+        const pickedQuantity = helperRecord ? helperRecord.pickedQuantity || 0 : 0;
+        const remainingQuantity = helperRecord ? helperRecord.remainingQuantity ?? item.quantity : undefined;
+        const pickingComplete = helperRecord ? !!helperRecord.pickingComplete : item.status === 'completed';
+        const currentBudget = budgetByBackNumber.get(item.背番号) || 0;
+
+        let compareQuantity = 0;
+        if (item.status !== 'completed' && request.status !== 'completed') {
+            compareQuantity = request.status === 'in-progress'
+                ? (remainingQuantity ?? item.quantity)
+                : item.quantity;
+        }
+
+        const liveAllocatedQuantity = Math.max(0, Math.min(currentBudget, compareQuantity));
+        const liveShortfallQuantity = Math.max(0, compareQuantity - currentBudget);
+
+        let liveInventoryStatus = 'sufficient';
+        if (compareQuantity > 0 && liveShortfallQuantity > 0) {
+            liveInventoryStatus = currentBudget > 0 ? 'insufficient' : 'none';
+        }
+
+        budgetByBackNumber.set(item.背番号, Math.max(0, currentBudget - liveAllocatedQuantity));
+
+        lineItemMap.set(item.lineNumber, {
+            ...item,
+            pickedQuantity,
+            ...(remainingQuantity !== undefined ? { remainingQuantity } : {}),
+            pickingComplete,
+            currentPhysicalQuantity,
+            currentReservedQuantity,
+            currentAvailableQuantity,
+            effectiveAvailableQuantity: currentBudget,
+            liveAllocatedQuantity,
+            liveInventoryStatus,
+            liveShortfallQuantity,
+            storedInventoryStatus: item.inventoryStatus || 'sufficient',
+            storedShortfallQuantity: item.shortfallQuantity || 0,
+            inventoryStatus: liveInventoryStatus,
+            shortfallQuantity: liveShortfallQuantity
+        });
+    });
+
+    return {
+        ...request,
+        lineItems: lineItems.map(item => lineItemMap.get(item.lineNumber) || item)
+    };
 }
 
 // ==================== MQTT INTEGRATION ====================
@@ -1023,8 +1299,7 @@ app.get('/api/picking-requests/:requestNumber', async (req, res) => {
 app.get('/api/picking-requests/group/:requestNumber', async (req, res) => {
     try {
         const { requestNumber } = req.params;
-        const collection = db.collection(process.env.COLLECTION_NAME);
-        const request = await collection.findOne({ requestNumber });
+        const request = await buildPickingRequestDetail(requestNumber);
         
         if (!request) {
             return res.status(404).json({ error: 'No picking requests found for this request number' });
@@ -1062,23 +1337,49 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
         if (!request) {
             return res.status(404).json({ error: 'Picking request not found' });
         }
+
+        const isResume = request.status === 'paused';
+        if (!['pending', 'partial-inventory', 'waiting-for-inventory', 'paused'].includes(request.status)) {
+            return res.status(409).json({
+                error: 'Invalid request status',
+                message: `Cannot start request from status: ${request.status}`
+            });
+        }
+
+        const now = new Date();
+        const requestUpdateFields = {
+            status: 'in-progress',
+            startedBy,
+            updatedAt: now,
+            updatedBy: startedBy,
+            factory: factory || request.factory || '野田倉庫'
+        };
+        const lineItemUpdateFields = {
+            'lineItems.$[elem].status': 'in-progress',
+            'lineItems.$[elem].updatedAt': now
+        };
+
+        if (isResume) {
+            requestUpdateFields.resumedAt = now;
+            requestUpdateFields.resumedBy = startedBy;
+            lineItemUpdateFields['lineItems.$[elem].resumedAt'] = now;
+            lineItemUpdateFields['lineItems.$[elem].resumedBy'] = startedBy;
+        } else {
+            requestUpdateFields.startedAt = now;
+            lineItemUpdateFields['lineItems.$[elem].startedAt'] = now;
+        }
         
-        // Update request status to in-progress and update all pending line items to in-progress
+        // Update request status to in-progress and update the relevant line items to in-progress
         await collection.updateOne(
             { requestNumber },
             { 
                 $set: { 
-                    status: 'in-progress',
-                    startedBy,
-                    startedAt: new Date(),
-                    updatedAt: new Date(),
-                    factory: factory || '野田倉庫', // Store factory information
-                    'lineItems.$[elem].status': 'in-progress',
-                    'lineItems.$[elem].startedAt': new Date()
+                    ...requestUpdateFields,
+                    ...lineItemUpdateFields
                 }
             },
             {
-                arrayFilters: [{ 'elem.status': 'pending' }]
+                arrayFilters: [{ 'elem.status': { $in: isResume ? ['paused'] : ['pending'] } }]
             }
         );
         
@@ -1087,7 +1388,7 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
             isLocked: true,
             activeRequestNumber: requestNumber,
             startedBy: startedBy,
-            startedAt: new Date()
+            startedAt: now
         };
         
         // Broadcast lock status to all tablets
@@ -1096,40 +1397,35 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
         // Get updated request with new status
         const updatedRequest = await collection.findOne({ requestNumber });
         
-        // ===== CREATE HELPER RECORDS for picking progress tracking =====
-        console.log(`📝 Creating helper records in nodaRequestHelperDB for ${requestNumber}`);
-        const submittedDb = client.db("submittedDB");
+        // ===== CREATE OR PRESERVE HELPER RECORDS for picking progress tracking =====
+        const submittedDb = client.db('submittedDB');
         const helperCollection = submittedDb.collection('nodaRequestHelperDB');
-        
-        // Clear any existing helper records for this request
-        await helperCollection.deleteMany({ requestNumber });
-        
-        // Create helper record for each line item
-        const helperRecords = updatedRequest.lineItems.map(item => ({
-            requestNumber,
-            lineNumber: item.lineNumber,
-            背番号: item.背番号,
-            品番: item.品番,
-            totalQuantity: item.quantity,
-            requestedQuantity: item.quantity,
-            pickedQuantity: 0,
-            remainingQuantity: item.quantity,
-            reservedQuantity: item.reservedQuantity || 0,
-            shortfallQuantity: item.shortfallQuantity || 0,
-            pickingComplete: false,
-            createdAt: new Date(),
-            updatedAt: new Date(),
-            startedBy: startedBy,
-            factory: factory || '野田倉庫'
-        }));
-        
-        if (helperRecords.length > 0) {
-            await helperCollection.insertMany(helperRecords);
-            console.log(`✅ Created ${helperRecords.length} helper records for tracking picking progress`);
+
+        if (!isResume) {
+            console.log(`📝 Resetting helper records in nodaRequestHelperDB for ${requestNumber}`);
+            await helperCollection.deleteMany({ requestNumber });
+            await ensureHelperRecordsForRequest(updatedRequest, startedBy, factory || updatedRequest.factory);
+        } else {
+            await ensureHelperRecordsForRequest(updatedRequest, startedBy, factory || updatedRequest.factory);
+            await helperCollection.updateMany(
+                {
+                    requestNumber,
+                    pickingComplete: false
+                },
+                {
+                    $set: {
+                        updatedAt: now,
+                        resumedAt: now,
+                        resumedBy: startedBy,
+                        factory: factory || updatedRequest.factory || '野田倉庫'
+                    }
+                }
+            );
+            console.log(`✅ Preserved helper records for paused request ${requestNumber}`);
         }
         
         // Explicitly notify ESP32 devices of the new picking order
-        console.log(`🚀 Start picking triggered for request ${requestNumber} by ${startedBy}`);
+        console.log(`🚀 ${isResume ? 'Resume' : 'Start'} picking triggered for request ${requestNumber} by ${startedBy}`);
         await notifyESP32DevicesForRequest(requestNumber, startedBy);
         
         // Send picking data to all connected devices
@@ -1143,76 +1439,35 @@ app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
                 status: item.status
             }))
         };
-        
-        // Broadcast to all IoT devices (MQTT + Socket.IO)
-        console.log(`🚀 Broadcasting to both MQTT and Socket.IO devices`);
-        console.log(`📋 Processing ${updatedRequest.lineItems.length} line items for device commands`);
-        
-        // Send to MQTT devices (new hybrid approach) - with box quantities
-        for (const item of updatedRequest.lineItems) {
-            const deviceId = item.背番号;
-            console.log(`\n🔍 Processing line ${item.lineNumber} for device ${deviceId}:`);
-            console.log(`   Status: ${item.status}`);
-            console.log(`   品番: ${item.品番}`);
-            console.log(`   Quantity: ${item.quantity}`);
-            
-            if (item.status === 'in-progress') {
-                const boxQuantity = await calculateBoxQuantity(item.品番, item.quantity);
-                console.log(`   📦 Calculated box quantity: ${boxQuantity}`);
-                console.log(`   🟢 Sending GREEN command to device ${deviceId}`);
-                
-                publishDeviceCommand(deviceId, {
-                    color: 'green',
-                    quantity: boxQuantity,
-                    message: `Pick ${boxQuantity}`,
-                    requestNumber,
-                    lineNumber: item.lineNumber,
-                    品番: item.品番
-                });
-            } else {
-                console.log(`   🔴 Sending RED command to device ${deviceId} (status: ${item.status})`);
-                
-                publishDeviceCommand(deviceId, {
-                    color: 'red',
-                    quantity: null,
-                    message: 'No Pick'
-                });
-            }
-        }
-        
-        console.log(`\n✅ Finished sending commands to all ${updatedRequest.lineItems.length} devices`);
 
-        // Send to Socket.IO devices (existing functionality) - with box quantities
-        for (const [deviceId, deviceSocket] of connectedDevices.entries()) {
-            const deviceItem = updatedRequest.lineItems.find(item => item.背番号 === deviceId);
-            
-            if (deviceItem && deviceItem.status === 'in-progress') {
-                const boxQuantity = await calculateBoxQuantity(deviceItem.品番, deviceItem.quantity);
-                // Device has items to pick - show green with quantity
-                deviceSocket.emit('display-update', {
-                    color: 'green',
-                    quantity: boxQuantity,
-                    message: `Pick ${boxQuantity}`,
-                    requestNumber,
-                    lineNumber: deviceItem.lineNumber,
-                    品番: deviceItem.品番
-                });
-            } else {
-                // Device has no items - show red
-                deviceSocket.emit('display-update', {
-                    color: 'red',
-                    quantity: null,
-                    message: 'No Pick'
-                });
-            }
-        }
-        
-        console.log(`Picking started for ${requestNumber} by ${startedBy}`);
-        res.json({ message: 'Picking process started', pickingData });
+        console.log(`Picking ${isResume ? 'resumed' : 'started'} for ${requestNumber} by ${startedBy}`);
+        res.json({
+            message: isResume ? 'Picking process resumed' : 'Picking process started',
+            resumed: isResume,
+            pickingData
+        });
         
     } catch (error) {
         console.error('Error starting picking process:', error);
-        res.status(500).json({ error: 'Failed to start picking process' });
+        res.status(error.statusCode || 500).json({ error: 'Failed to start picking process', details: error.message });
+    }
+});
+
+app.post('/api/picking-requests/:requestNumber/pause', async (req, res) => {
+    try {
+        const { requestNumber } = req.params;
+        const { pausedBy } = req.body;
+
+        const updatedRequest = await pausePickingRequest(requestNumber, pausedBy || 'Unknown');
+
+        res.json({
+            message: 'Picking process paused',
+            requestNumber: updatedRequest.requestNumber,
+            pausedBy: pausedBy || 'Unknown'
+        });
+    } catch (error) {
+        console.error('Error pausing picking process:', error);
+        res.status(error.statusCode || 500).json({ error: 'Failed to pause picking process', details: error.message });
     }
 });
 
@@ -2261,7 +2516,7 @@ app.put('/api/picking-requests/:requestNumber/line/:lineNumber/status', async (r
         const { requestNumber, lineNumber } = req.params;
         const { status, completedBy } = req.body;
         
-        if (!['pending', 'in-progress', 'completed', 'cancelled'].includes(status)) {
+        if (!LINE_ITEM_STATUS_VALUES.includes(status)) {
             return res.status(400).json({ error: 'Invalid status' });
         }
         
@@ -2316,12 +2571,25 @@ app.get('/api/devices/status', (req, res) => {
 app.get('/api/request-numbers', async (req, res) => {
     try {
         const collection = db.collection(process.env.COLLECTION_NAME);
-        const requests = await collection.find({}).sort({ createdAt: -1 }).toArray();
+        const requests = await collection.find(
+            {},
+            {
+                projection: {
+                    requestNumber: 1,
+                    status: 1,
+                    createdAt: 1,
+                    pickupDate: 1,
+                    'lineItems.quantity': 1,
+                    'lineItems.status': 1
+                }
+            }
+        ).sort({ createdAt: -1 }).toArray();
         
         const requestsWithInfo = requests.map(request => {
-            const totalQuantity = request.lineItems.reduce((sum, item) => sum + item.quantity, 0);
-            const completedItems = request.lineItems.filter(item => item.status === 'completed').length;
-            const totalItems = request.lineItems.length;
+            const lineItems = Array.isArray(request.lineItems) ? request.lineItems : [];
+            const totalQuantity = lineItems.reduce((sum, item) => sum + (item.quantity || 0), 0);
+            const completedItems = lineItems.filter(item => item.status === 'completed').length;
+            const totalItems = lineItems.length;
             
             return {
                 requestNumber: request.requestNumber,
@@ -2501,7 +2769,7 @@ app.get('/api/mqtt/devices', (req, res) => {
 // ==================== END MQTT DEVICE API ENDPOINTS ====================
 
 // Function to notify ESP32 devices when status changes
-async function notifyDeviceStatusChange(deviceId, requestNumber, lineNumber, quantity, 品番, newStatus) {
+async function notifyDeviceStatusChange(deviceId, requestNumber, lineNumber, quantity, 品番, newStatus, idleMessage = 'Standby') {
     console.log(`📢 Notifying device ${deviceId} of status change: ${newStatus} (MQTT + Socket.IO)`);
     
     let command = null;
@@ -2571,6 +2839,15 @@ async function notifyDeviceStatusChange(deviceId, requestNumber, lineNumber, qua
             color: 'red',
             quantity: 0,
             message: 'Completed',
+            requestNumber: '',
+            lineNumber: 0,
+            品番: ''
+        };
+    } else if (newStatus === 'paused' || newStatus === 'pending' || newStatus === 'cancelled') {
+        command = {
+            color: 'red',
+            quantity: 0,
+            message: idleMessage,
             requestNumber: '',
             lineNumber: 0,
             品番: ''
@@ -2766,6 +3043,107 @@ app.post("/api/noda-requests", async (req, res) => {
           console.log(`   LineItems count: ${request.lineItems?.length || 0}`);
           console.log(`   Is bulk request: ${request.requestType === 'bulk'}`);
           console.log(`   Has lineItems array: ${Array.isArray(request.lineItems)}`);
+
+                    if (!REQUEST_STATUS_VALUES.includes(newStatus)) {
+                        return res.status(400).json({ error: 'Invalid status' });
+                    }
+
+                    if (oldStatus !== newStatus && newStatus === 'paused') {
+                        const pausedRequest = await pausePickingRequest(request.requestNumber, userName);
+                        return res.json({
+                            success: true,
+                            message: `Request status changed from ${oldStatus} to ${newStatus}`,
+                            pausedRequestNumber: pausedRequest.requestNumber
+                        });
+                    }
+
+                    if (oldStatus !== newStatus && newStatus === 'in-progress') {
+                        await checkGlobalPickingLock();
+                        if (globalPickingLock.isLocked && globalPickingLock.activeRequestNumber !== request.requestNumber) {
+                            return res.status(423).json({
+                                error: 'System locked',
+                                message: `Another picking operation is in progress: ${globalPickingLock.activeRequestNumber}`,
+                                activeRequest: globalPickingLock.activeRequestNumber,
+                                startedBy: globalPickingLock.startedBy,
+                                startedAt: globalPickingLock.startedAt
+                            });
+                        }
+
+                        const isResume = oldStatus === 'paused';
+                        if (!['pending', 'partial-inventory', 'waiting-for-inventory', 'paused'].includes(oldStatus)) {
+                            return res.status(409).json({
+                                error: 'Invalid request status',
+                                message: `Cannot move request to in-progress from status: ${oldStatus}`
+                            });
+                        }
+
+                        const now = new Date();
+                        const requestUpdateFields = {
+                            status: 'in-progress',
+                            startedBy: userName,
+                            updatedAt: now,
+                            updatedBy: userName,
+                            factory: request.factory || '野田倉庫'
+                        };
+                        const lineItemUpdateFields = {
+                            'lineItems.$[elem].status': 'in-progress',
+                            'lineItems.$[elem].updatedAt': now
+                        };
+
+                        if (isResume) {
+                            requestUpdateFields.resumedAt = now;
+                            requestUpdateFields.resumedBy = userName;
+                            lineItemUpdateFields['lineItems.$[elem].resumedAt'] = now;
+                            lineItemUpdateFields['lineItems.$[elem].resumedBy'] = userName;
+                        } else {
+                            requestUpdateFields.startedAt = now;
+                            lineItemUpdateFields['lineItems.$[elem].startedAt'] = now;
+                        }
+
+                        await requestsCollection.updateOne(
+                            { _id: new ObjectId(requestId) },
+                            {
+                                $set: {
+                                    ...requestUpdateFields,
+                                    ...lineItemUpdateFields
+                                }
+                            },
+                            {
+                                arrayFilters: [{ 'elem.status': { $in: isResume ? ['paused'] : ['pending'] } }]
+                            }
+                        );
+
+                        const updatedRequest = await requestsCollection.findOne({ _id: new ObjectId(requestId) });
+                        const helperCollection = db.collection('nodaRequestHelperDB');
+
+                        if (!isResume) {
+                            await helperCollection.deleteMany({ requestNumber: updatedRequest.requestNumber });
+                            await ensureHelperRecordsForRequest(updatedRequest, userName, updatedRequest.factory);
+                        } else {
+                            await ensureHelperRecordsForRequest(updatedRequest, userName, updatedRequest.factory);
+                            await helperCollection.updateMany(
+                                { requestNumber: updatedRequest.requestNumber, pickingComplete: false },
+                                { $set: { updatedAt: now, resumedAt: now, resumedBy: userName } }
+                            );
+                        }
+
+                        globalPickingLock = {
+                            isLocked: true,
+                            activeRequestNumber: updatedRequest.requestNumber,
+                            startedBy: userName,
+                            startedAt: now
+                        };
+                        broadcastLockStatus();
+
+                        await notifyESP32DevicesForRequest(updatedRequest.requestNumber, userName);
+
+                        return res.json({
+                            success: true,
+                            message: `Request status changed from ${oldStatus} to ${newStatus}`,
+                            resumed: isResume,
+                            requestNumber: updatedRequest.requestNumber
+                        });
+                    }
 
           // Handle inventory changes based on status transition
           if (oldStatus !== newStatus) {
@@ -2993,7 +3371,7 @@ app.put('/api/admin/request/:requestId/line/:lineNumber/status', async (req, res
         const { requestId, lineNumber } = req.params;
         const { status, userName = 'Admin' } = req.body;
         
-        if (!['pending', 'in-progress', 'completed', 'cancelled'].includes(status)) {
+        if (!LINE_ITEM_STATUS_VALUES.includes(status)) {
             return res.status(400).json({ error: 'Invalid status' });
         }
         
@@ -3065,7 +3443,7 @@ app.put('/api/admin/request/:requestId/status', async (req, res) => {
         const { requestId } = req.params;
         const { status, userName = 'Admin' } = req.body;
         
-        if (!['pending', 'in-progress', 'completed', 'cancelled'].includes(status)) {
+        if (!REQUEST_STATUS_VALUES.includes(status)) {
             return res.status(400).json({ error: 'Invalid status' });
         }
         
@@ -3080,43 +3458,132 @@ app.put('/api/admin/request/:requestId/status', async (req, res) => {
         }
         
         const oldStatus = request.status;
-        
-        // Update the request status
-        const updateData = {
-            status: status,
-            updatedAt: new Date(),
-            updatedBy: userName
-        };
-        
-        if (status === 'completed') {
-            updateData.completedAt = new Date();
-        }
-        
-        const updateResult = await requestsCollection.updateOne(
-            { _id: new ObjectId(requestId) },
-            { $set: updateData }
-        );
-        
-        if (updateResult.matchedCount === 0) {
-            return res.status(404).json({ error: "Failed to update request" });
-        }
-        
+
         // Notify ESP32 devices
         const notifiedDevices = [];
-        if (oldStatus !== status) {
+        if (oldStatus !== status && status === 'paused') {
+            const pausedRequest = await pausePickingRequest(request.requestNumber, userName);
+            if (pausedRequest.requestType === 'bulk' && pausedRequest.lineItems) {
+                notifiedDevices.push(...pausedRequest.lineItems.map(item => item.背番号).filter(Boolean));
+            } else if (pausedRequest.背番号) {
+                notifiedDevices.push(pausedRequest.背番号);
+            }
+        } else if (oldStatus !== status && status === 'in-progress') {
+            await checkGlobalPickingLock();
+            if (globalPickingLock.isLocked && globalPickingLock.activeRequestNumber !== request.requestNumber) {
+                return res.status(423).json({
+                    error: 'System locked',
+                    message: `Another picking operation is in progress: ${globalPickingLock.activeRequestNumber}`,
+                    activeRequest: globalPickingLock.activeRequestNumber,
+                    startedBy: globalPickingLock.startedBy,
+                    startedAt: globalPickingLock.startedAt
+                });
+            }
+
+            const isResume = oldStatus === 'paused';
+            if (!['pending', 'partial-inventory', 'waiting-for-inventory', 'paused'].includes(oldStatus)) {
+                return res.status(409).json({
+                    error: 'Invalid request status',
+                    message: `Cannot move request to in-progress from status: ${oldStatus}`
+                });
+            }
+
+            const now = new Date();
+            const requestUpdateFields = {
+                status: 'in-progress',
+                startedBy: userName,
+                updatedAt: now,
+                updatedBy: userName,
+                factory: request.factory || '野田倉庫'
+            };
+            const lineItemUpdateFields = {
+                'lineItems.$[elem].status': 'in-progress',
+                'lineItems.$[elem].updatedAt': now
+            };
+
+            if (isResume) {
+                requestUpdateFields.resumedAt = now;
+                requestUpdateFields.resumedBy = userName;
+                lineItemUpdateFields['lineItems.$[elem].resumedAt'] = now;
+                lineItemUpdateFields['lineItems.$[elem].resumedBy'] = userName;
+            } else {
+                requestUpdateFields.startedAt = now;
+                lineItemUpdateFields['lineItems.$[elem].startedAt'] = now;
+            }
+
+            await requestsCollection.updateOne(
+                { _id: new ObjectId(requestId) },
+                {
+                    $set: {
+                        ...requestUpdateFields,
+                        ...lineItemUpdateFields
+                    }
+                },
+                {
+                    arrayFilters: [{ 'elem.status': { $in: isResume ? ['paused'] : ['pending'] } }]
+                }
+            );
+
+            const updatedRequest = await requestsCollection.findOne({ _id: new ObjectId(requestId) });
+            const helperCollection = db.collection('nodaRequestHelperDB');
+
+            if (!isResume) {
+                await helperCollection.deleteMany({ requestNumber: updatedRequest.requestNumber });
+                await ensureHelperRecordsForRequest(updatedRequest, userName, updatedRequest.factory);
+            } else {
+                await ensureHelperRecordsForRequest(updatedRequest, userName, updatedRequest.factory);
+                await helperCollection.updateMany(
+                    { requestNumber: updatedRequest.requestNumber, pickingComplete: false },
+                    { $set: { updatedAt: now, resumedAt: now, resumedBy: userName } }
+                );
+            }
+
+            globalPickingLock = {
+                isLocked: true,
+                activeRequestNumber: updatedRequest.requestNumber,
+                startedBy: userName,
+                startedAt: now
+            };
+            broadcastLockStatus();
+
+            await notifyESP32DevicesForRequest(updatedRequest.requestNumber, userName);
+
+            if (updatedRequest.requestType === 'bulk' && updatedRequest.lineItems) {
+                notifiedDevices.push(...updatedRequest.lineItems.filter(item => item.status === 'in-progress').map(item => item.背番号).filter(Boolean));
+            } else if (updatedRequest.背番号) {
+                notifiedDevices.push(updatedRequest.背番号);
+            }
+        } else if (oldStatus !== status) {
+            const updateData = {
+                status: status,
+                updatedAt: new Date(),
+                updatedBy: userName
+            };
+            
+            if (status === 'completed') {
+                updateData.completedAt = new Date();
+            }
+            
+            const updateResult = await requestsCollection.updateOne(
+                { _id: new ObjectId(requestId) },
+                { $set: updateData }
+            );
+            
+            if (updateResult.matchedCount === 0) {
+                return res.status(404).json({ error: 'Failed to update request' });
+            }
+
             if (request.requestType === 'bulk' && request.lineItems) {
-                // Update all line items to match request status
                 await requestsCollection.updateOne(
                     { _id: new ObjectId(requestId) },
                     { 
                         $set: { 
-                            "lineItems.$[].status": status,
-                            "lineItems.$[].updatedAt": new Date()
+                            'lineItems.$[].status': status,
+                            'lineItems.$[].updatedAt': new Date()
                         }
                     }
                 );
                 
-                // Notify all devices in this bulk request
                 for (const lineItem of request.lineItems) {
                     await notifyDeviceStatusChange(
                         lineItem.背番号, 
@@ -3129,7 +3596,6 @@ app.put('/api/admin/request/:requestId/status', async (req, res) => {
                     notifiedDevices.push(lineItem.背番号);
                 }
             } else {
-                // Single request
                 await notifyDeviceStatusChange(
                     request.背番号, 
                     request.requestNumber, 
@@ -3140,6 +3606,8 @@ app.put('/api/admin/request/:requestId/status', async (req, res) => {
                 );
                 notifiedDevices.push(request.背番号);
             }
+
+            await checkGlobalPickingLock();
         }
         
         res.json({ 
@@ -3174,12 +3642,13 @@ app.post('/api/refresh-devices/:requestNumber', async (req, res) => {
         
         const notifiedDevices = [];
         
-        // Check if request is in-progress and notify devices
-        if (request.status === 'in-progress') {
+        if (request.status === 'paused') {
+            await setRequestDevicesToIdle(request, 'Standby');
+        } else if (request.status === 'in-progress') {
             if (request.requestType === 'bulk' && request.lineItems) {
                 // Notify all devices in this bulk request
                 for (const lineItem of request.lineItems) {
-                    if (lineItem.status === 'in-progress') {
+                    if (ACTIVE_PICKING_LINE_STATUSES.includes(lineItem.status)) {
                         await notifyDeviceStatusChange(
                             lineItem.背番号, 
                             request.requestNumber, 
