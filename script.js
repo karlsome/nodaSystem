@@ -13,6 +13,7 @@ let todaysTasks = []; // Initialize empty array for tasks
 let factory = null; // Factory location from URL parameter
 const masterDataCache = new Map();
 let pickingDetailLoadToken = 0;
+let currentPickingDetailView = 'cards';
 
 // API base URL - change this to your server URL
 const API_BASE_URL = 'http://localhost:3001/api';
@@ -1467,6 +1468,7 @@ async function fetchMasterData(品番) {
 async function viewPickingDetail(requestNumber) {
     try {
         currentRequestNumber = requestNumber;
+        currentPickingDetailView = 'cards';
         const loadToken = ++pickingDetailLoadToken;
         
         // Show loading state immediately to prevent stale data display
@@ -1595,13 +1597,7 @@ async function displayPickingDetail(request, options = {}) {
     `;
     
     // Update items list
-    const itemsContainer = document.getElementById('pickingItemsList');
-    itemsContainer.innerHTML = '';
-    
-    renderRequest.lineItems.forEach((item, index) => {
-        const itemElement = createPickingItemElement(item, index + 1);
-        itemsContainer.appendChild(itemElement);
-    });
+    renderPickingItemsViews(renderRequest.lineItems);
     
     // Update start button state
     const startBtn = document.getElementById('startPickingBtn');
@@ -1796,6 +1792,198 @@ function isItemInventoryShort(item) {
     const shortfallQuantity = getDisplayShortfallQuantity(item);
 
     return inventoryStatus === 'none' || shortfallQuantity > 0;
+}
+
+function switchPickingDetailView(view) {
+    currentPickingDetailView = view === 'table' ? 'table' : 'cards';
+    updatePickingDetailViewTabs();
+    updatePickingDetailViewContainers();
+}
+
+function updatePickingDetailViewTabs() {
+    const cardTab = document.getElementById('pickingCardViewTab');
+    const tableTab = document.getElementById('pickingTableViewTab');
+
+    if (!cardTab || !tableTab) {
+        return;
+    }
+
+    cardTab.classList.toggle('active', currentPickingDetailView === 'cards');
+    cardTab.classList.toggle('text-gray-700', currentPickingDetailView === 'cards');
+    cardTab.classList.toggle('text-gray-500', currentPickingDetailView !== 'cards');
+
+    tableTab.classList.toggle('active', currentPickingDetailView === 'table');
+    tableTab.classList.toggle('text-gray-700', currentPickingDetailView === 'table');
+    tableTab.classList.toggle('text-gray-500', currentPickingDetailView !== 'table');
+}
+
+function updatePickingDetailViewContainers() {
+    const cardContainer = document.getElementById('pickingItemsCardView');
+    const tableContainer = document.getElementById('pickingItemsTableView');
+
+    if (!cardContainer || !tableContainer) {
+        return;
+    }
+
+    cardContainer.classList.toggle('hidden', currentPickingDetailView !== 'cards');
+    tableContainer.classList.toggle('hidden', currentPickingDetailView !== 'table');
+}
+
+function renderPickingItemsViews(lineItems) {
+    const cardContainer = document.getElementById('pickingItemsCardView');
+    const tableContainer = document.getElementById('pickingItemsTableView');
+
+    if (!cardContainer || !tableContainer) {
+        return;
+    }
+
+    cardContainer.innerHTML = '';
+    lineItems.forEach((item, index) => {
+        const itemElement = createPickingItemElement(item, index + 1);
+        cardContainer.appendChild(itemElement);
+    });
+
+    tableContainer.innerHTML = createPickingItemsTable(lineItems);
+    updatePickingDetailViewTabs();
+    updatePickingDetailViewContainers();
+}
+
+function getPickingItemStatusLabel(item) {
+    if (item.status === 'completed') {
+        return '完了';
+    }
+
+    if (item.status === 'in-progress') {
+        return '進行中';
+    }
+
+    return '待機中';
+}
+
+function getPickingItemStatusBadgeClass(item) {
+    if (item.status === 'completed') {
+        return 'bg-green-100 text-green-800';
+    }
+
+    if (item.status === 'in-progress') {
+        return 'bg-yellow-100 text-yellow-800';
+    }
+
+    return 'bg-gray-100 text-gray-700';
+}
+
+function getPickingTableRowTone(item) {
+    if (item.isLivePending) {
+        return 'bg-blue-50';
+    }
+
+    if (item.status === 'completed') {
+        return 'bg-green-50';
+    }
+
+    if (isItemInventoryShort(item)) {
+        return 'bg-red-50';
+    }
+
+    if (item.status === 'in-progress') {
+        return 'bg-yellow-50';
+    }
+
+    return 'bg-white';
+}
+
+function getPickingTableNote(item) {
+    if (item.isLivePending) {
+        return '最新在庫と箱数を確認中';
+    }
+
+    if (item.status === 'completed') {
+        return item.completedAt
+            ? `完了 ${new Date(item.completedAt).toLocaleString('ja-JP')}`
+            : '完了済み';
+    }
+
+    if (item.status === 'in-progress' && item.pickedQuantity !== undefined && item.pickedQuantity > 0) {
+        return `取得済み ${item.pickedQuantity}枚 / 残り ${item.remainingQuantity || 0}枚`;
+    }
+
+    if (isItemInventoryShort(item)) {
+        return `不足 ${Math.max(0, getDisplayShortfallQuantity(item))}個`;
+    }
+
+    return '準備完了';
+}
+
+function createPickingItemsTable(lineItems) {
+    const rowsHtml = lineItems.map((item, index) => {
+        const rowTone = getPickingTableRowTone(item);
+        const cellClass = `${rowTone} border-b border-gray-100 px-4 py-3 align-top text-sm text-gray-700`;
+        const stickyCellClass = `sticky left-0 z-10 ${rowTone} border-b border-gray-100 px-4 py-3 align-top text-sm font-semibold text-gray-900`;
+        const boxCount = item.isLivePending
+            ? '--'
+            : (item.boxQuantity !== undefined ? item.boxQuantity : item.quantity);
+        const physicalQuantity = item.isLivePending
+            ? '--'
+            : (typeof item.currentPhysicalQuantity === 'number' ? item.currentPhysicalQuantity : '--');
+        const availableQuantity = item.isLivePending
+            ? '--'
+            : (typeof item.currentAvailableQuantity === 'number' ? item.currentAvailableQuantity : '--');
+        const shortfallQuantity = item.isLivePending ? '--' : Math.max(0, getDisplayShortfallQuantity(item));
+        const statusLabel = getPickingItemStatusLabel(item);
+        const statusBadgeClass = getPickingItemStatusBadgeClass(item);
+        const note = getPickingTableNote(item);
+
+        return `
+            <tr class="${rowTone}">
+                <td class="${stickyCellClass}">
+                    <div class="flex items-center justify-center h-10 w-10 rounded-xl bg-blue-100 text-lg font-bold text-blue-600 mx-auto">
+                        ${index + 1}
+                    </div>
+                </td>
+                <td class="${cellClass}">
+                    <div class="font-semibold text-gray-900">${item.品番}</div>
+                </td>
+                <td class="${cellClass}">
+                    <div class="font-medium text-gray-900">${item.背番号}</div>
+                </td>
+                <td class="${cellClass} text-right font-semibold text-gray-900">${item.quantity}</td>
+                <td class="${cellClass} text-right font-semibold text-gray-900">${boxCount}</td>
+                <td class="${cellClass} text-right">${physicalQuantity}</td>
+                <td class="${cellClass} text-right">${availableQuantity}</td>
+                <td class="${cellClass} text-right font-semibold ${item.isLivePending ? 'text-blue-600' : shortfallQuantity === 0 ? 'text-green-600' : 'text-red-600'}">${shortfallQuantity}</td>
+                <td class="${cellClass}">
+                    <span class="inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${statusBadgeClass}">${statusLabel}</span>
+                </td>
+                <td class="${cellClass}">
+                    <div class="min-w-[180px] whitespace-normal text-sm ${item.isLivePending ? 'text-blue-700' : 'text-gray-600'}">${note}</div>
+                </td>
+            </tr>
+        `;
+    }).join('');
+
+    return `
+        <div class="picking-table-scroll">
+            <table class="w-full picking-detail-table">
+                <thead>
+                    <tr class="bg-slate-50 text-left text-sm font-semibold text-gray-700 shadow-sm">
+                        <th class="sticky left-0 z-30 bg-slate-50 border-b border-gray-200 px-4 py-3 text-center">行</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3">品番</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3">背番号</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3 text-right">数量(PCS)</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3 text-right">箱数</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3 text-right">物理在庫</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3 text-right">利用可能在庫</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3 text-right">不足</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3">ステータス</th>
+                        <th class="bg-slate-50 border-b border-gray-200 px-4 py-3">メモ</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${rowsHtml}
+                </tbody>
+            </table>
+        </div>
+    `;
 }
 
 function createPickingItemElement(item, index) {
@@ -2361,14 +2549,29 @@ function showPickingDetailLoadingState(requestNumber) {
     `;
     
     // Show loading in items list
-    const itemsContainer = document.getElementById('pickingItemsList');
-    itemsContainer.innerHTML = `
+    const cardContainer = document.getElementById('pickingItemsCardView');
+    const tableContainer = document.getElementById('pickingItemsTableView');
+    if (cardContainer) {
+        cardContainer.innerHTML = `
         <div class="p-12 text-center">
             <div class="animate-spin w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full mx-auto mb-6"></div>
             <p class="text-lg text-gray-600">ピッキング項目を読み込んでいます...</p>
             <p class="text-sm text-gray-500 mt-2">しばらくお待ちください</p>
         </div>
     `;
+    }
+
+    if (tableContainer) {
+        tableContainer.innerHTML = `
+            <div class="p-12 text-center text-gray-500">
+                <div class="animate-spin w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full mx-auto mb-6"></div>
+                <p class="text-lg text-gray-600">テーブルを準備しています...</p>
+            </div>
+        `;
+    }
+
+    updatePickingDetailViewTabs();
+    updatePickingDetailViewContainers();
     
     // Disable start button during loading
     const startBtn = document.getElementById('startPickingBtn');
@@ -2845,6 +3048,7 @@ window.refreshPickingRequests = refreshPickingRequests;
 window.startPickingProcess = startPickingProcess;
 // window.startIndividualPicking = startIndividualPicking; // Removed - ESP32 handles picking automatically
 window.refreshPickingDetail = refreshPickingDetail;
+window.switchPickingDetailView = switchPickingDetailView;
 window.completeAndBackToList = completeAndBackToList;
 window.clearInventoryList = clearInventoryList;
 window.submitInventoryCount = submitInventoryCount;

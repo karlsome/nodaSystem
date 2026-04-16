@@ -244,16 +244,31 @@
                 <!-- Items List -->
                 <div class="bg-white rounded-lg border border-gray-200">
                     <div class="px-5 py-4 border-b border-gray-200">
-                        <div class="flex items-center justify-between">
-                            <h3 class="text-lg font-bold text-gray-900" data-i18n="picking-items">ピッキング項目</h3>
+                        <div class="flex items-center justify-between gap-4">
+                            <div class="flex items-center gap-4 flex-wrap">
+                                <h3 class="text-lg font-bold text-gray-900" data-i18n="picking-items">ピッキング項目</h3>
+                                <div class="inline-flex items-center rounded-xl bg-gray-100 p-1" aria-label="ピッキング表示切替">
+                                    <button id="pickingCardViewTab" onclick="switchPickingDetailView('cards')"
+                                            class="picking-view-tab active rounded-lg px-4 py-2 text-sm font-semibold text-gray-700 transition-colors">
+                                        <i class="fas fa-list-ul mr-2"></i>リスト
+                                    </button>
+                                    <button id="pickingTableViewTab" onclick="switchPickingDetailView('table')"
+                                            class="picking-view-tab rounded-lg px-4 py-2 text-sm font-semibold text-gray-500 transition-colors">
+                                        <i class="fas fa-table mr-2"></i>表
+                                    </button>
+                                </div>
+                            </div>
                             <div class="flex items-center space-x-2">
                                 <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse" id="connectionStatus"></div>
                                 <span class="text-xs text-gray-500" id="connectionText" data-i18n="connection-status-connected">接続中</span>
                             </div>
                         </div>
                     </div>
-                    <div id="pickingItemsList" class="divide-y divide-gray-200">
-                        <!-- Items will be populated here -->
+                    <div id="pickingItemsCardView" class="divide-y divide-gray-200">
+                        <!-- Card view items will be populated here -->
+                    </div>
+                    <div id="pickingItemsTableView" class="hidden">
+                        <!-- Table view items will be populated here -->
                     </div>
                 </div>
             </div>
