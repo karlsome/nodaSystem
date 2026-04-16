@@ -1363,9 +1363,9 @@ function displayPickingRequests() {
     
     // Apply status filter
     if (currentFilter === 'all') {
-        // Show pending, in-progress, completed, and partial-inventory
+        // Show pending, in-progress, completed, partial-inventory, and waiting-for-inventory
         filteredRequests = filteredRequests.filter(req => 
-            req.status === 'pending' || req.status === 'in-progress' || req.status === 'completed' || req.status === 'partial-inventory'
+            req.status === 'pending' || req.status === 'in-progress' || req.status === 'completed' || req.status === 'partial-inventory' || req.status === 'waiting-for-inventory'
         );
     } else {
         filteredRequests = filteredRequests.filter(req => req.status === currentFilter);
@@ -2165,6 +2165,7 @@ function getStatusClass(status) {
         case 'in-progress': return 'status-in-progress';
         case 'completed': return 'status-completed';
         case 'partial-inventory': return 'status-partial-inventory';
+        case 'waiting-for-inventory': return 'status-partial-inventory';
         default: return 'status-pending';
     }
 }
@@ -2176,6 +2177,7 @@ function getStatusText(status) {
         case 'in-progress': return t('status-in-progress');
         case 'completed': return t('status-completed');
         case 'partial-inventory': return '在庫不足';
+        case 'waiting-for-inventory': return '在庫待ち';
         default: return t('status-unknown');
     }
 }
