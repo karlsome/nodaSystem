@@ -11,10 +11,12 @@ let socket = null;
 let recentActivities = []; // Initialize empty array for activities
 let todaysTasks = []; // Initialize empty array for tasks
 let factory = null; // Factory location from URL parameter
+const masterDataCache = new Map();
+let pickingDetailLoadToken = 0;
 
 // API base URL - change this to your server URL
-//const API_BASE_URL = 'http://localhost:3001/api';
-const API_BASE_URL = 'https://nodasystem.onrender.com/api';
+const API_BASE_URL = 'http://localhost:3001/api';
+//const API_BASE_URL = 'https://nodasystem.onrender.com/api';
 
 // Debug localStorage on page load
 console.log('🔄 Page loaded, checking localStorage availability...');
@@ -1465,19 +1467,25 @@ async function fetchMasterData(品番) {
 async function viewPickingDetail(requestNumber) {
     try {
         currentRequestNumber = requestNumber;
+        const loadToken = ++pickingDetailLoadToken;
         
         // Show loading state immediately to prevent stale data display
         showPickingDetailLoadingState(requestNumber);
         showScreen('pickingDetail');
-        
-        const response = await fetch(`${API_BASE_URL}/picking-requests/group/${requestNumber}`);
-        if (!response.ok) {
-            throw new Error('Failed to fetch picking request details');
+
+        const request = await fetchBasePickingDetail(requestNumber);
+        if (loadToken !== pickingDetailLoadToken) {
+            return;
         }
-        
-        const request = await response.json();
+
         currentRequest = request;
-        displayPickingDetail(request);
+        await displayPickingDetail(createPendingPickingDetail(request), {
+            livePending: true,
+            skipMasterData: true
+        });
+
+        await checkAndUpdateLockStatus();
+        hydratePickingDetail(requestNumber, loadToken);
         
     } catch (error) {
         console.error('Error loading picking request details:', error);
@@ -1486,7 +1494,9 @@ async function viewPickingDetail(requestNumber) {
     }
 }
 
-async function displayPickingDetail(request) {
+async function displayPickingDetail(request, options = {}) {
+    const { livePending = false, skipMasterData = false } = options;
+
     if (!request) {
         console.error('No request provided to displayPickingDetail');
         hidePickingDetailLoadingState();
@@ -1500,52 +1510,55 @@ async function displayPickingDetail(request) {
         console.error('Request missing lineItems:', request);
         request.lineItems = [];
     }
+
+    const renderRequest = {
+        ...request,
+        lineItems: request.lineItems.map(item => ({
+            ...item,
+            isLivePending: livePending
+        }))
+    };
     
     // Enrich line items with master data and box quantities
-    await enrichLineItemsWithMasterData(request.lineItems);
-    
-    // ===== NEW: Fetch picking progress from helper collection =====
-    try {
-        const helperResponse = await fetch(`${API_BASE_URL}/picking-requests/${request.requestNumber}/helper`);
-        if (helperResponse.ok) {
-            const helperData = await helperResponse.json();
-            // Merge helper data with line items
-            request.lineItems.forEach(item => {
-                const helperItem = helperData.lineItems.find(h => h.lineNumber === item.lineNumber);
-                if (helperItem) {
-                    item.pickedQuantity = helperItem.pickedQuantity || 0;
-                    item.remainingQuantity = helperItem.remainingQuantity || item.quantity;
-                    item.pickingComplete = helperItem.pickingComplete || false;
-                    item.pickedBoxes = item.収容数 > 1 ? Math.floor(item.pickedQuantity / item.収容数) : item.pickedQuantity;
-                    item.remainingBoxes = item.収容数 > 1 ? Math.ceil(item.remainingQuantity / item.収容数) : item.remainingQuantity;
-                }
-            });
-            console.log('📊 Picking progress merged with line items:', request.lineItems);
-        }
-    } catch (error) {
-        console.log('No picking progress data available:', error.message);
+    if (!skipMasterData) {
+        await enrichLineItemsWithMasterData(renderRequest.lineItems);
+        console.log('📊 Live request detail loaded:', renderRequest.lineItems);
     }
     
     // Hide loading state and show actual content
     hidePickingDetailLoadingState();
     
     // Update header
-    document.getElementById('pickingDetailTitle').textContent = `${t('picking-detail')}: ${request.requestNumber}`;
-    document.getElementById('pickingDetailSubtitle').textContent = `${request.lineItems.length}${t('items-suffix')}${t('items-picking')}`;
+    document.getElementById('pickingDetailTitle').textContent = `${t('picking-detail')}: ${renderRequest.requestNumber}`;
+    document.getElementById('pickingDetailSubtitle').textContent = livePending
+        ? `${renderRequest.lineItems.length}${t('items-suffix')}${t('items-picking')} ・ 最新在庫を確認中...`
+        : `${renderRequest.lineItems.length}${t('items-suffix')}${t('items-picking')}`;
     
     // Update request info
     const infoContainer = document.getElementById('pickingRequestInfo');
-    const completedItems = request.lineItems.filter(item => item.status === 'completed').length;
+    const completedItems = renderRequest.lineItems.filter(item => item.status === 'completed').length;
+    const isInventoryWaitingStatus = renderRequest.status === 'partial-inventory' || renderRequest.status === 'waiting-for-inventory';
     
     // Check if this is a partial-inventory request - ONLY count items that are NOT completed
-    const insufficientItems = request.lineItems.filter(item => 
-        item.status !== 'completed' && 
-        (item.inventoryStatus === 'none' || (item.shortfallQuantity && item.shortfallQuantity > 0))
+    const insufficientItems = renderRequest.lineItems.filter(item => 
+        item.status !== 'completed' && isItemInventoryShort(item)
     );
     
     // Add warning banner for partial-inventory status - ONLY if request is not completed
     let warningBanner = '';
-    if (request.status !== 'completed' && request.status === 'partial-inventory' && insufficientItems.length > 0) {
+    if (livePending) {
+        warningBanner = `
+            <div class="col-span-4 mb-4 bg-blue-50 border-l-4 border-blue-500 p-4 rounded-lg">
+                <div class="flex items-center space-x-3">
+                    <i class="fas fa-spinner fa-spin text-blue-600 text-2xl"></i>
+                    <div>
+                        <h4 class="text-lg font-bold text-blue-800">最新在庫を確認中</h4>
+                        <p class="text-sm text-blue-700">依頼内容を表示しています。箱数と在庫不足はまもなく更新されます。</p>
+                    </div>
+                </div>
+            </div>
+        `;
+    } else if (renderRequest.status !== 'completed' && isInventoryWaitingStatus && insufficientItems.length > 0) {
         warningBanner = `
             <div class="col-span-4 mb-4 bg-red-50 border-l-4 border-red-500 p-4 rounded-lg">
                 <div class="flex items-center space-x-3">
@@ -1563,21 +1576,21 @@ async function displayPickingDetail(request) {
         ${warningBanner}
         <div class="text-center">
             <p class="text-sm text-gray-500">依頼番号</p>
-            <p class="text-lg font-semibold text-gray-900">${request.requestNumber}</p>
+            <p class="text-lg font-semibold text-gray-900">${renderRequest.requestNumber}</p>
         </div>
         <div class="text-center">
             <p class="text-sm text-gray-500">ステータス</p>
-            <span id="requestStatusBadge" class="status-badge ${getStatusClass(request.status)}">
-                ${getStatusText(request.status)}
+            <span id="requestStatusBadge" class="status-badge ${getStatusClass(renderRequest.status)}">
+                ${getStatusText(renderRequest.status)}
             </span>
         </div>
         <div class="text-center">
             <p class="text-sm text-gray-500">進捗</p>
-            <p class="text-lg font-semibold text-gray-900 request-progress">${completedItems}/${request.lineItems.length}</p>
+            <p class="text-lg font-semibold text-gray-900 request-progress">${completedItems}/${renderRequest.lineItems.length}</p>
         </div>
         <div class="text-center">
             <p class="text-sm text-gray-500">作成者</p>
-            <p class="text-lg font-semibold text-gray-900">${request.createdBy}</p>
+            <p class="text-lg font-semibold text-gray-900">${renderRequest.createdBy}</p>
         </div>
     `;
     
@@ -1585,7 +1598,7 @@ async function displayPickingDetail(request) {
     const itemsContainer = document.getElementById('pickingItemsList');
     itemsContainer.innerHTML = '';
     
-    request.lineItems.forEach((item, index) => {
+    renderRequest.lineItems.forEach((item, index) => {
         const itemElement = createPickingItemElement(item, index + 1);
         itemsContainer.appendChild(itemElement);
     });
@@ -1594,30 +1607,41 @@ async function displayPickingDetail(request) {
     const startBtn = document.getElementById('startPickingBtn');
     startBtn.classList.add('start-picking-btn'); // Add class for lock handling
     
-    if (request.status === 'pending' || request.status === 'partial-inventory') {
+    if (renderRequest.status === 'pending' || renderRequest.status === 'partial-inventory' || renderRequest.status === 'waiting-for-inventory') {
         startBtn.disabled = false;
         startBtn.onclick = startPickingProcess;
         startBtn.innerHTML = `<i class="fas fa-play mr-2"></i>${t('start-button')}`;
         startBtn.className = 'px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors font-medium';
-    } else if (request.status === 'in-progress') {
+    } else if (renderRequest.status === 'in-progress') {
         startBtn.disabled = true;
         startBtn.onclick = null;
         startBtn.innerHTML = `<i class="fas fa-clock mr-2"></i>${t('in-progress-button')}`;
-    } else if (request.status === 'completed') {
+    } else if (renderRequest.status === 'completed') {
         startBtn.disabled = false;
         startBtn.onclick = completeAndBackToList;
         startBtn.innerHTML = `<i class="fas fa-check mr-2"></i>${t('completed-button')}`;
         startBtn.className = 'px-8 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors text-lg font-medium';
+    } else {
+        startBtn.disabled = true;
+        startBtn.onclick = null;
+        startBtn.innerHTML = `<i class="fas fa-ban mr-2"></i>${getStatusText(renderRequest.status)}`;
+        startBtn.className = 'px-6 py-2 bg-gray-300 text-gray-700 rounded-lg cursor-not-allowed font-medium';
     }
 }
 
 // Enrich line items with master data to calculate box quantities
 async function enrichLineItemsWithMasterData(lineItems) {
     try {
+        const uniquePartNumbers = [...new Set(lineItems.map(item => item.品番).filter(Boolean))];
+        const masterEntries = await Promise.all(uniquePartNumbers.map(async partNumber => {
+            const masterData = await fetchMasterData(partNumber);
+            return [partNumber, masterData];
+        }));
+        const masterDataMap = new Map(masterEntries);
+
         for (const item of lineItems) {
-            // Fetch master data for this item
-            const masterData = await fetchMasterData(item.品番);
-            
+            const masterData = masterDataMap.get(item.品番);
+
             if (masterData && masterData.収容数) {
                 const 収容数 = parseInt(masterData.収容数);
                 if (収容数 > 0) {
@@ -1641,25 +1665,145 @@ async function enrichLineItemsWithMasterData(lineItems) {
 
 // Fetch master data from server
 async function fetchMasterData(品番) {
-    try {
-        const response = await fetch(`${API_BASE_URL}/master-data/${encodeURIComponent(品番)}`);
-        if (response.ok) {
-            const data = await response.json();
-            return data;
-        }
+    if (!品番) {
         return null;
+    }
+
+    if (masterDataCache.has(品番)) {
+        return masterDataCache.get(品番);
+    }
+
+    const requestPromise = (async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/master-data/${encodeURIComponent(品番)}`);
+            if (response.ok) {
+                const data = await response.json();
+                return data;
+            }
+            return null;
+        } catch (error) {
+            console.error(`Error fetching master data for ${品番}:`, error);
+            masterDataCache.delete(品番);
+            return null;
+        }
+    })();
+
+    masterDataCache.set(品番, requestPromise);
+
+    try {
+        return await requestPromise;
     } catch (error) {
-        console.error(`Error fetching master data for ${品番}:`, error);
+        console.error(`Error resolving master data for ${品番}:`, error);
+        masterDataCache.delete(品番);
         return null;
     }
 }
 
+async function fetchBasePickingDetail(requestNumber) {
+    const timestamp = Date.now();
+    const response = await fetch(`${API_BASE_URL}/picking-requests/${requestNumber}?_=${timestamp}`);
+    if (!response.ok) {
+        throw new Error('Failed to fetch base picking request details');
+    }
+
+    return await response.json();
+}
+
+async function fetchLivePickingDetail(requestNumber) {
+    const timestamp = Date.now();
+    const response = await fetch(`${API_BASE_URL}/picking-requests/group/${requestNumber}?_=${timestamp}`);
+    if (!response.ok) {
+        throw new Error(`Failed to fetch live picking request details: ${response.status}`);
+    }
+
+    return await response.json();
+}
+
+function createPendingPickingDetail(request) {
+    return {
+        ...request,
+        lineItems: Array.isArray(request.lineItems)
+            ? request.lineItems.map(item => ({
+                ...item,
+                isLivePending: true
+            }))
+            : []
+    };
+}
+
+async function hydratePickingDetail(requestNumber, loadToken, options = {}) {
+    const { refreshDevices = false, showFailureToast = true } = options;
+
+    try {
+        const liveRequest = await fetchLivePickingDetail(requestNumber);
+        if (loadToken !== pickingDetailLoadToken || currentRequestNumber !== requestNumber) {
+            return;
+        }
+
+        currentRequest = liveRequest;
+        await displayPickingDetail(liveRequest, {
+            livePending: false,
+            skipMasterData: false
+        });
+
+        await checkAndUpdateLockStatus();
+
+        if (refreshDevices) {
+            await refreshESP32Devices(requestNumber);
+        }
+    } catch (error) {
+        if (loadToken !== pickingDetailLoadToken || currentRequestNumber !== requestNumber) {
+            return;
+        }
+
+        console.error('Error hydrating picking request details:', error);
+        if (showFailureToast) {
+            showToast('最新在庫の読み込みに失敗しました。依頼内容のみ表示しています', 'error');
+        }
+    }
+}
+
+function getDisplayInventoryStatus(item) {
+    if (item.isLivePending) {
+        return 'checking';
+    }
+
+    return item.liveInventoryStatus || item.inventoryStatus || 'sufficient';
+}
+
+function getDisplayShortfallQuantity(item) {
+    if (item.isLivePending) {
+        return 0;
+    }
+
+    if (typeof item.liveShortfallQuantity === 'number') {
+        return item.liveShortfallQuantity;
+    }
+
+    if (typeof item.shortfallQuantity === 'number') {
+        return item.shortfallQuantity;
+    }
+
+    return 0;
+}
+
+function isItemInventoryShort(item) {
+    if (item.isLivePending) {
+        return false;
+    }
+
+    const inventoryStatus = getDisplayInventoryStatus(item);
+    const shortfallQuantity = getDisplayShortfallQuantity(item);
+
+    return inventoryStatus === 'none' || shortfallQuantity > 0;
+}
+
 function createPickingItemElement(item, index) {
     const itemDiv = document.createElement('div');
+    const isLivePending = !!item.isLivePending;
     
     // Check if item has insufficient inventory - BUT NOT if already completed
-    const hasInsufficientInventory = item.status !== 'completed' && 
-        (item.inventoryStatus === 'none' || (item.shortfallQuantity && item.shortfallQuantity > 0));
+    const hasInsufficientInventory = !isLivePending && item.status !== 'completed' && isItemInventoryShort(item);
     
     // Apply red background for items with insufficient inventory (only if not completed)
     itemDiv.className = hasInsufficientInventory 
@@ -1696,11 +1840,14 @@ function createPickingItemElement(item, index) {
          <p class="text-xs text-gray-500">作業者: ${item.completedBy || 'N/A'}</p>` : '';
 
     // Use box quantity if available, otherwise use piece quantity
-    const displayQuantity = item.boxQuantity !== undefined ? item.boxQuantity : item.quantity;
-    const quantityUnit = item.boxQuantity !== undefined ? '個' : '個';
-    const quantityDetail = item.boxQuantity !== undefined && item.収容数 > 1 
+    const displayQuantity = isLivePending ? null : (item.boxQuantity !== undefined ? item.boxQuantity : item.quantity);
+    const quantityUnit = isLivePending ? '確認中' : '個';
+    const quantityDetail = !isLivePending && item.boxQuantity !== undefined && item.収容数 > 1 
         ? `<span class="text-xs text-gray-500">(${item.quantity}個 ÷ ${item.収容数})</span>` 
         : '';
+    const quantitySummary = isLivePending
+        ? `数量: ${item.quantity}個`
+        : `数量: ${displayQuantity}${quantityUnit} ${quantityDetail}`;
     
     // ===== NEW: Show picking progress =====
     let pickingProgressHTML = '';
@@ -1728,9 +1875,15 @@ function createPickingItemElement(item, index) {
     
     // Add inventory warning for insufficient items - ONLY if not completed
     let inventoryWarning = '';
-    if (hasInsufficientInventory) {
-        // Show how much is actually short based on remaining quantity
-        const actualShortfall = item.remainingQuantity !== undefined ? item.remainingQuantity : (item.shortfallQuantity || item.quantity);
+    if (isLivePending) {
+        inventoryWarning = `
+            <div class="mt-2 flex items-center space-x-2 bg-blue-50 px-3 py-2 rounded-lg">
+                <i class="fas fa-spinner fa-spin text-blue-600"></i>
+                <span class="text-sm font-semibold text-blue-700">最新在庫と箱数を確認中...</span>
+            </div>
+        `;
+    } else if (hasInsufficientInventory) {
+        const actualShortfall = Math.max(0, getDisplayShortfallQuantity(item));
         inventoryWarning = `
             <div class="mt-2 flex items-center space-x-2 bg-red-100 px-3 py-2 rounded-lg">
                 <i class="fas fa-exclamation-triangle text-red-600"></i>
@@ -1752,7 +1905,7 @@ function createPickingItemElement(item, index) {
                         <p class="text-gray-600">背番号: <span class="font-medium">${item.背番号}</span></p>
                     </div>
                     <p class="text-sm text-gray-500">
-                        数量: ${displayQuantity}${quantityUnit} ${quantityDetail}
+                        ${quantitySummary}
                     </p>
                     <div class="completion-info mt-1">${completedInfo}</div>
                     ${pickingProgressHTML}
@@ -1761,9 +1914,9 @@ function createPickingItemElement(item, index) {
             </div>
             <div class="text-right flex items-center space-x-4">
                 <div>
-                    <div class="text-2xl font-bold text-gray-900">${displayQuantity}</div>
+                    <div class="text-2xl font-bold text-gray-900">${isLivePending ? '--' : displayQuantity}</div>
                     <div class="text-sm text-gray-500">${quantityUnit}</div>
-                    ${quantityDetail ? `<div class="text-xs text-gray-400 mt-1">${item.quantity}個</div>` : ''}
+                    ${isLivePending || quantityDetail ? `<div class="text-xs text-gray-400 mt-1">${item.quantity}個</div>` : ''}
                 </div>
                 <div class="flex flex-col items-center space-y-2">
                     <div class="text-2xl status-icon">
@@ -1878,28 +2031,27 @@ async function startIndividualPicking(lineNumber, deviceId) {
 async function refreshPickingDetail() {
     if (currentRequestNumber) {
         console.log('🔄 Refreshing picking detail for request:', currentRequestNumber);
+        const loadToken = ++pickingDetailLoadToken;
         try {
-            // Show loading state during refresh
-            showPickingDetailLoadingState(currentRequestNumber);
-            
-            // Add cache-busting parameter to ensure we get fresh data
-            const timestamp = new Date().getTime();
-            const response = await fetch(`${API_BASE_URL}/picking-requests/group/${currentRequestNumber}?_=${timestamp}`);
-            
-            if (!response.ok) {
-                throw new Error(`Failed to fetch picking request details: ${response.status}`);
+            if (!currentRequest || currentRequest.requestNumber !== currentRequestNumber) {
+                showPickingDetailLoadingState(currentRequestNumber);
+
+                const request = await fetchBasePickingDetail(currentRequestNumber);
+                if (loadToken !== pickingDetailLoadToken) {
+                    return;
+                }
+
+                currentRequest = request;
+                await displayPickingDetail(createPendingPickingDetail(request), {
+                    livePending: true,
+                    skipMasterData: true
+                });
             }
-            
-            const request = await response.json();
-            console.log('📄 Refreshed data received:', request);
-            currentRequest = request;
-            displayPickingDetail(request);
-            
-            // Check lock status after refreshing detail
-            await checkAndUpdateLockStatus();
-            
-            // Also refresh ESP32 devices for this request
-            await refreshESP32Devices(currentRequestNumber);
+
+            await hydratePickingDetail(currentRequestNumber, loadToken, {
+                refreshDevices: true,
+                showFailureToast: true
+            });
             
             console.log('✅ Refresh completed successfully');
         } catch (error) {

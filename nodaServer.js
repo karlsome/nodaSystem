@@ -456,6 +456,155 @@ async function getMasterDataAndCalculateBoxQuantity(品番, pieceQuantity) {
     }
 }
 
+function buildInventoryTimestampExpression() {
+    return {
+        $cond: {
+            if: { $type: "$timeStamp" },
+            then: {
+                $cond: {
+                    if: { $eq: [{ $type: "$timeStamp" }, "string"] },
+                    then: { $dateFromString: { dateString: "$timeStamp" } },
+                    else: { $toDate: "$timeStamp" }
+                }
+            },
+            else: new Date()
+        }
+    };
+}
+
+async function getLatestInventoryMapByBackNumbers(backNumbers) {
+    if (!backNumbers || backNumbers.length === 0) {
+        return new Map();
+    }
+
+    const submittedDb = client.db("submittedDB");
+    const inventoryCollection = submittedDb.collection('nodaInventoryDB');
+    const inventoryResults = await inventoryCollection.aggregate([
+        { $match: { 背番号: { $in: backNumbers } } },
+        {
+            $addFields: {
+                timeStampDate: buildInventoryTimestampExpression()
+            }
+        },
+        { $sort: { 背番号: 1, timeStampDate: -1 } },
+        {
+            $group: {
+                _id: "$背番号",
+                latest: { $first: "$$ROOT" }
+            }
+        }
+    ]).toArray();
+
+    return new Map(inventoryResults.map(result => [result._id, result.latest]));
+}
+
+async function buildPickingRequestDetail(requestNumber) {
+    const collection = db.collection(process.env.COLLECTION_NAME);
+    const request = await collection.findOne({ requestNumber });
+
+    if (!request) {
+        return null;
+    }
+
+    const lineItems = Array.isArray(request.lineItems) ? request.lineItems : [];
+    const backNumbers = [...new Set(lineItems.map(item => item.背番号).filter(Boolean))];
+    const submittedDb = client.db("submittedDB");
+    const helperCollection = submittedDb.collection('nodaRequestHelperDB');
+
+    const [helperRecords, inventoryMap] = await Promise.all([
+        helperCollection.find({ requestNumber }).toArray(),
+        getLatestInventoryMapByBackNumbers(backNumbers)
+    ]);
+
+    const helperMap = new Map(helperRecords.map(record => [record.lineNumber, record]));
+    const sortedLineItems = [...lineItems].sort((a, b) => (a.lineNumber || 0) - (b.lineNumber || 0));
+    const reservedBudgetByBackNumber = new Map();
+
+    if (request.status !== 'in-progress') {
+        sortedLineItems.forEach(item => {
+            if (!item.背番号 || item.status === 'completed') {
+                return;
+            }
+
+            const currentReserved = reservedBudgetByBackNumber.get(item.背番号) || 0;
+            reservedBudgetByBackNumber.set(
+                item.背番号,
+                currentReserved + Math.max(0, item.reservedQuantity || 0)
+            );
+        });
+    }
+
+    const budgetByBackNumber = new Map();
+    sortedLineItems.forEach(item => {
+        if (!item.背番号 || budgetByBackNumber.has(item.背番号)) {
+            return;
+        }
+
+        const inventory = inventoryMap.get(item.背番号);
+        const currentPhysicalQuantity = inventory?.physicalQuantity ?? inventory?.runningQuantity ?? 0;
+        const currentAvailableQuantity = inventory?.availableQuantity ?? inventory?.runningQuantity ?? 0;
+        const reservedBudget = reservedBudgetByBackNumber.get(item.背番号) || 0;
+        const initialBudget = request.status === 'in-progress'
+            ? currentPhysicalQuantity
+            : Math.max(0, currentAvailableQuantity + reservedBudget);
+
+        budgetByBackNumber.set(item.背番号, initialBudget);
+    });
+
+    const lineItemMap = new Map();
+    sortedLineItems.forEach(item => {
+        const helperRecord = helperMap.get(item.lineNumber);
+        const inventory = inventoryMap.get(item.背番号);
+        const currentPhysicalQuantity = inventory?.physicalQuantity ?? inventory?.runningQuantity ?? 0;
+        const currentReservedQuantity = inventory?.reservedQuantity ?? 0;
+        const currentAvailableQuantity = inventory?.availableQuantity ?? inventory?.runningQuantity ?? 0;
+        const pickedQuantity = helperRecord ? helperRecord.pickedQuantity || 0 : 0;
+        const remainingQuantity = helperRecord ? helperRecord.remainingQuantity ?? item.quantity : undefined;
+        const pickingComplete = helperRecord ? !!helperRecord.pickingComplete : item.status === 'completed';
+        const currentBudget = budgetByBackNumber.get(item.背番号) || 0;
+
+        let compareQuantity = 0;
+        if (item.status !== 'completed' && request.status !== 'completed') {
+            compareQuantity = request.status === 'in-progress'
+                ? (remainingQuantity ?? item.quantity)
+                : item.quantity;
+        }
+
+        const liveAllocatedQuantity = Math.max(0, Math.min(currentBudget, compareQuantity));
+        const liveShortfallQuantity = Math.max(0, compareQuantity - currentBudget);
+
+        let liveInventoryStatus = 'sufficient';
+        if (compareQuantity > 0 && liveShortfallQuantity > 0) {
+            liveInventoryStatus = currentBudget > 0 ? 'insufficient' : 'none';
+        }
+
+        budgetByBackNumber.set(item.背番号, Math.max(0, currentBudget - liveAllocatedQuantity));
+
+        lineItemMap.set(item.lineNumber, {
+            ...item,
+            pickedQuantity,
+            ...(remainingQuantity !== undefined ? { remainingQuantity } : {}),
+            pickingComplete,
+            currentPhysicalQuantity,
+            currentReservedQuantity,
+            currentAvailableQuantity,
+            effectiveAvailableQuantity: currentBudget,
+            liveAllocatedQuantity,
+            liveInventoryStatus,
+            liveShortfallQuantity,
+            storedInventoryStatus: item.inventoryStatus || 'sufficient',
+            storedShortfallQuantity: item.shortfallQuantity || 0,
+            inventoryStatus: liveInventoryStatus,
+            shortfallQuantity: liveShortfallQuantity
+        });
+    });
+
+    return {
+        ...request,
+        lineItems: lineItems.map(item => lineItemMap.get(item.lineNumber) || item)
+    };
+}
+
 // ==================== MQTT INTEGRATION ====================
 
 // Initialize MQTT Client
@@ -1023,8 +1172,7 @@ app.get('/api/picking-requests/:requestNumber', async (req, res) => {
 app.get('/api/picking-requests/group/:requestNumber', async (req, res) => {
     try {
         const { requestNumber } = req.params;
-        const collection = db.collection(process.env.COLLECTION_NAME);
-        const request = await collection.findOne({ requestNumber });
+        const request = await buildPickingRequestDetail(requestNumber);
         
         if (!request) {
             return res.status(404).json({ error: 'No picking requests found for this request number' });
@@ -2316,12 +2464,25 @@ app.get('/api/devices/status', (req, res) => {
 app.get('/api/request-numbers', async (req, res) => {
     try {
         const collection = db.collection(process.env.COLLECTION_NAME);
-        const requests = await collection.find({}).sort({ createdAt: -1 }).toArray();
+        const requests = await collection.find(
+            {},
+            {
+                projection: {
+                    requestNumber: 1,
+                    status: 1,
+                    createdAt: 1,
+                    pickupDate: 1,
+                    'lineItems.quantity': 1,
+                    'lineItems.status': 1
+                }
+            }
+        ).sort({ createdAt: -1 }).toArray();
         
         const requestsWithInfo = requests.map(request => {
-            const totalQuantity = request.lineItems.reduce((sum, item) => sum + item.quantity, 0);
-            const completedItems = request.lineItems.filter(item => item.status === 'completed').length;
-            const totalItems = request.lineItems.length;
+            const lineItems = Array.isArray(request.lineItems) ? request.lineItems : [];
+            const totalQuantity = lineItems.reduce((sum, item) => sum + (item.quantity || 0), 0);
+            const completedItems = lineItems.filter(item => item.status === 'completed').length;
+            const totalItems = lineItems.length;
             
             return {
                 requestNumber: request.requestNumber,
