@@ -29,6 +29,9 @@ const translations = {
         'loading': '読み込み中...',
         'no-requests-title': 'ピッキング依頼がありません',
         'no-requests-desc': '現在処理可能な依頼はありません',
+        'paused-reminder-title': '一時停止中の依頼があります',
+        'paused-reminder-desc': '再開待ちの依頼です。タップすると詳細を開けます。',
+        'close-button': '閉じる',
 
         // Picking Detail Screen
         'picking-detail': 'ピッキング詳細',
@@ -251,6 +254,9 @@ const translations = {
         'loading': 'Loading...',
         'no-requests-title': 'No Picking Requests',
         'no-requests-desc': 'There are currently no requests available for processing',
+        'paused-reminder-title': 'Paused Requests Need Attention',
+        'paused-reminder-desc': 'These requests are waiting to be resumed. Tap one to open its details.',
+        'close-button': 'Close',
 
         // Picking Detail Screen
         'picking-detail': 'Picking Details',

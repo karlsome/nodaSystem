@@ -14,10 +14,18 @@ let factory = null; // Factory location from URL parameter
 const masterDataCache = new Map();
 let pickingDetailLoadToken = 0;
 let currentPickingDetailView = 'cards';
+let latestPickingLockStatus = {
+    isLocked: false,
+    activeRequestNumber: null,
+    startedBy: null,
+    startedAt: null
+};
+let pausedReminderIntervalId = null;
+const PAUSED_REQUEST_REMINDER_INTERVAL_MS = 30000;
 
 // API base URL - change this to your server URL
-const API_BASE_URL = 'http://localhost:3001/api';
-//const API_BASE_URL = 'https://nodasystem.onrender.com/api';
+//const API_BASE_URL = 'http://localhost:3001/api';
+const API_BASE_URL = 'https://nodasystem.onrender.com/api';
 
 // Debug localStorage on page load
 console.log('🔄 Page loaded, checking localStorage availability...');
@@ -61,6 +69,8 @@ function initializeApp() {
         console.log('❌ No saved worker found, showing login screen');
         showScreen('login');
     }
+
+    startPausedRequestsReminderTimer();
 }
 
 // Extract factory location from URL parameter
@@ -387,6 +397,8 @@ function updateConnectionStatus(connected) {
 
 // Global lock status handling
 function updateLockUI(lockStatus) {
+    latestPickingLockStatus = lockStatus;
+
     const isLocked = lockStatus.isLocked;
     const activeRequestNumber = lockStatus.activeRequestNumber;
     const startedBy = lockStatus.startedBy;
@@ -411,6 +423,7 @@ function updateLockUI(lockStatus) {
     
     // Show lock notification if system is locked
     if (isLocked && activeRequestNumber) {
+        closePausedRequestsReminderModal();
         showLockNotification(activeRequestNumber, startedBy);
     } else {
         hideLockNotification();
@@ -447,7 +460,9 @@ function hideLockNotification() {
 }
 
 // Check and update lock status from server
-async function checkAndUpdateLockStatus() {
+async function checkAndUpdateLockStatus(options = {}) {
+    const { refreshDevices = true } = options;
+
     try {
         const response = await fetch(`${API_BASE_URL}/picking-lock-status`);
         if (response.ok) {
@@ -455,14 +470,18 @@ async function checkAndUpdateLockStatus() {
             updateLockUI(lockStatus);
             
             // 🚨 NEW: If there's an active request that's locked, trigger ESP32 refresh
-            if (lockStatus.isLocked && lockStatus.activeRequestNumber) {
+            if (refreshDevices && lockStatus.isLocked && lockStatus.activeRequestNumber) {
                 console.log(`🔄 Lock detected for ${lockStatus.activeRequestNumber}, triggering ESP32 refresh`);
                 await refreshESP32Devices(lockStatus.activeRequestNumber);
             }
+
+            return lockStatus;
         }
     } catch (error) {
         console.error('Error checking lock status:', error);
     }
+
+    return latestPickingLockStatus;
 }
 
 // Screen management functions
@@ -479,6 +498,160 @@ function showScreen(screenName) {
     // Show selected screen
     document.getElementById(screenName + 'Screen').classList.remove('hidden');
     currentScreen = screenName;
+
+    if (currentScreen !== 'home' && currentScreen !== 'picking' && currentScreen !== 'pickingDetail') {
+        closePausedRequestsReminderModal();
+    }
+}
+
+function startPausedRequestsReminderTimer() {
+    if (pausedReminderIntervalId) {
+        return;
+    }
+
+    pausedReminderIntervalId = setInterval(() => {
+        maybeShowPausedRequestsReminder();
+    }, PAUSED_REQUEST_REMINDER_INTERVAL_MS);
+}
+
+function hasBlockingModalOpen() {
+    return Array.from(document.querySelectorAll('.fixed.inset-0')).some(modal => {
+        if (modal.classList.contains('hidden')) {
+            return false;
+        }
+
+        return modal.id !== 'toast' && modal.id !== 'pausedRequestsReminderModal';
+    });
+}
+
+function isPausedReminderEligible() {
+    if (!currentWorker) {
+        return false;
+    }
+
+    if (document.hidden) {
+        return false;
+    }
+
+    if (currentScreen !== 'home' && currentScreen !== 'picking' && currentScreen !== 'pickingDetail') {
+        return false;
+    }
+
+    if (hasBlockingModalOpen()) {
+        return false;
+    }
+
+    if (latestPickingLockStatus.isLocked) {
+        return false;
+    }
+
+    if (currentScreen === 'pickingDetail' && currentRequest && currentRequest.status === 'in-progress') {
+        return false;
+    }
+
+    return true;
+}
+
+async function fetchPausedRequestsForReminder() {
+    const response = await fetch(`${API_BASE_URL}/request-numbers`);
+    if (!response.ok) {
+        throw new Error('Failed to fetch paused requests');
+    }
+
+    const requests = await response.json();
+    let pausedRequests = requests.filter(request => request.status === 'paused');
+
+    if (currentScreen === 'pickingDetail' && currentRequestNumber) {
+        pausedRequests = pausedRequests.filter(request => request.requestNumber !== currentRequestNumber);
+    }
+
+    pausedRequests.sort((a, b) => {
+        const dateA = new Date(a.createdAt || 0);
+        const dateB = new Date(b.createdAt || 0);
+        return dateA - dateB;
+    });
+
+    return pausedRequests;
+}
+
+function closePausedRequestsReminderModal() {
+    const modal = document.getElementById('pausedRequestsReminderModal');
+    if (modal) {
+        modal.classList.add('hidden');
+    }
+}
+
+function openPausedReminderRequest(requestNumber) {
+    closePausedRequestsReminderModal();
+    viewPickingDetail(requestNumber);
+}
+
+function renderPausedRequestsReminder(pausedRequests) {
+    const modal = document.getElementById('pausedRequestsReminderModal');
+    const listContainer = document.getElementById('pausedRequestsReminderList');
+    const t = window.t || ((key) => key);
+
+    if (!modal || !listContainer) {
+        return;
+    }
+
+    listContainer.innerHTML = '';
+
+    pausedRequests.forEach(request => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'w-full text-left bg-white border border-orange-200 hover:border-orange-300 hover:bg-orange-50 rounded-xl px-4 py-4 transition-colors';
+        button.onclick = () => openPausedReminderRequest(request.requestNumber);
+
+        const createdAt = request.createdAt
+            ? new Date(request.createdAt).toLocaleDateString('ja-JP')
+            : '--';
+
+        button.innerHTML = `
+            <div class="flex items-start justify-between gap-4">
+                <div>
+                    <div class="flex items-center gap-3 flex-wrap">
+                        <h4 class="text-lg font-bold text-gray-900">${request.requestNumber}</h4>
+                        <span class="status-badge status-paused">${t('status-paused')}</span>
+                    </div>
+                    <p class="text-sm text-gray-600 mt-1">${request.itemCount}項目 • 合計数量: ${request.totalQuantity}</p>
+                    <p class="text-xs text-gray-500 mt-2">作成日: ${createdAt}</p>
+                </div>
+                <div class="text-orange-500 text-xl pt-1">
+                    <i class="fas fa-chevron-right"></i>
+                </div>
+            </div>
+        `;
+
+        listContainer.appendChild(button);
+    });
+
+    modal.classList.remove('hidden');
+}
+
+async function maybeShowPausedRequestsReminder() {
+    try {
+        if (!isPausedReminderEligible()) {
+            closePausedRequestsReminderModal();
+            return;
+        }
+
+        const lockStatus = await checkAndUpdateLockStatus({ refreshDevices: false });
+        if (lockStatus && lockStatus.isLocked) {
+            closePausedRequestsReminderModal();
+            return;
+        }
+
+        const pausedRequests = await fetchPausedRequestsForReminder();
+        if (pausedRequests.length === 0) {
+            closePausedRequestsReminderModal();
+            return;
+        }
+
+        renderPausedRequestsReminder(pausedRequests);
+    } catch (error) {
+        console.error('Error showing paused requests reminder:', error);
+    }
 }
 
 function openInventorySystem() {
@@ -3156,6 +3329,8 @@ window.pausePickingProcess = pausePickingProcess;
 // window.startIndividualPicking = startIndividualPicking; // Removed - ESP32 handles picking automatically
 window.refreshPickingDetail = refreshPickingDetail;
 window.switchPickingDetailView = switchPickingDetailView;
+window.closePausedRequestsReminderModal = closePausedRequestsReminderModal;
+window.openPausedReminderRequest = openPausedReminderRequest;
 window.completeAndBackToList = completeAndBackToList;
 window.clearInventoryList = clearInventoryList;
 window.submitInventoryCount = submitInventoryCount;
