@@ -2706,6 +2706,7 @@ window.loadFactoryList = loadFactoryList;
 window.selectFactory = selectFactory;
 
 // Tanaoroshi (棚卸し) system functions
+window.decrementCurrentTanaoroshi = decrementCurrentTanaoroshi;
 window.completeTanaoroshiCount = completeTanaoroshiCount;
 window.decrementTanaoroshiProduct = decrementTanaoroshiProduct;
 window.deleteTanaoroshiProduct = deleteTanaoroshiProduct;
@@ -2714,6 +2715,7 @@ window.resetAllTanaoroshiProducts = resetAllTanaoroshiProducts;
 
 // Nyuko (入庫) system functions
 window.openNyukoSystem = openNyukoSystem;
+window.decrementCurrentNyuko = decrementCurrentNyuko;
 window.decrementNyukoProduct = decrementNyukoProduct;
 window.deleteNyukoProduct = deleteNyukoProduct;
 window.submitNyukoInput = submitNyukoInput;
@@ -4087,6 +4089,27 @@ function updateTanaoroshiCounterDisplay() {
     }
 }
 
+// Decrement the currently active (in-progress) tanaoroshi product by 1 box
+function decrementCurrentTanaoroshi() {
+    if (!currentTanaoroshiProduct) return;
+
+    if (currentTanaoroshiProduct.countedBoxes <= 1) {
+        // Reset to 0 without removing — user may still be counting
+        currentTanaoroshiProduct.countedBoxes = 0;
+        currentTanaoroshiProduct.countedPieces = 0;
+        updateTanaoroshiCounterDisplay();
+        flashTanaoroshiCounterArea('error');
+        showToast('カウントを0に戻しました', 'info');
+        return;
+    }
+
+    currentTanaoroshiProduct.countedBoxes -= 1;
+    currentTanaoroshiProduct.countedPieces -= currentTanaoroshiProduct.収容数;
+    updateTanaoroshiCounterDisplay();
+    flashTanaoroshiCounterArea('error');
+    showToast(`1箱減らしました (${currentTanaoroshiProduct.countedBoxes}箱)`, 'info');
+}
+
 // Flash counter area for visual feedback
 function flashTanaoroshiCounterArea(type) {
     const counterArea = document.getElementById('tanaoroshiCounterArea');
@@ -4815,6 +4838,38 @@ function updateNyukoCounterDisplay(productNumber) {
         document.getElementById('nyukoDisplayBoxCount').textContent = '0';
         document.getElementById('nyukoDisplayPieceCount').textContent = '(0 個)';
     }
+}
+
+// Decrement the currently displayed nyuko product by 1 box
+function decrementCurrentNyuko() {
+    if (!currentDisplayedProduct) return;
+
+    const product = nyukoInputProducts.find(p => p.品番 === currentDisplayedProduct);
+    if (!product) return;
+
+    if (product.inputBoxes <= 1) {
+        if (!confirm(`${product.品番} の最後の1箱です。完全に削除しますか？`)) return;
+        nyukoInputProducts.splice(nyukoInputProducts.indexOf(product), 1);
+        saveNyukoToStorage();
+        currentDisplayedProduct = null;
+        if (nyukoInputProducts.length > 0) {
+            showProductInDisplay(nyukoInputProducts[0].品番);
+        } else {
+            document.getElementById('nyukoInitialState').classList.remove('hidden');
+            document.getElementById('nyukoActiveProduct').classList.add('hidden');
+        }
+        updateNyukoSummaryList();
+        showToast('削除しました', 'info');
+        return;
+    }
+
+    product.inputBoxes -= 1;
+    product.inputQuantity -= product.収容数;
+    saveNyukoToStorage();
+    updateNyukoCounterDisplay(currentDisplayedProduct);
+    flashCounterArea('error');
+    updateNyukoSummaryList();
+    showToast(`1箱減らしました (${product.inputBoxes}箱)`, 'info');
 }
 
 // Flash counter area for visual feedback
