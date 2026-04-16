@@ -2707,6 +2707,7 @@ window.selectFactory = selectFactory;
 
 // Tanaoroshi (棚卸し) system functions
 window.completeTanaoroshiCount = completeTanaoroshiCount;
+window.decrementTanaoroshiProduct = decrementTanaoroshiProduct;
 window.deleteTanaoroshiProduct = deleteTanaoroshiProduct;
 window.submitTanaoroshiCount = submitTanaoroshiCount;
 window.resetAllTanaoroshiProducts = resetAllTanaoroshiProducts;
@@ -4237,6 +4238,9 @@ function createTanaoroshiSummaryRow(product, index) {
                 </div>
             </div>
             <div class="flex items-center space-x-2">
+                <button onclick="decrementTanaoroshiProduct(${index})" class="w-10 h-10 bg-orange-100 hover:bg-orange-200 text-orange-700 rounded-lg transition-colors flex items-center justify-center text-lg font-bold" title="1箱減らす">
+                    −
+                </button>
                 <button onclick="deleteTanaoroshiProduct(${index})" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors">
                     <i class="fas fa-trash mr-1"></i>削除
                 </button>
@@ -4245,6 +4249,45 @@ function createTanaoroshiSummaryRow(product, index) {
     `;
     
     return row;
+}
+
+// Decrement counted product by 1 box
+function decrementTanaoroshiProduct(index) {
+    const product = tanaoroshiCountedProducts[index];
+    if (!product) return;
+
+    if (product.countedBoxes <= 1) {
+        if (!confirm(`${product.品番} の最後の1箱です。完全に削除しますか？`)) return;
+        tanaoroshiCountedProducts.splice(index, 1);
+        // If this was the active product, reset it
+        if (currentTanaoroshiProduct && currentTanaoroshiProduct.品番 === product.品番) {
+            currentTanaoroshiProduct = null;
+            document.getElementById('tanaoroshiInitialState').classList.remove('hidden');
+            document.getElementById('tanaoroshiActiveProduct').classList.add('hidden');
+        }
+        saveTanaoroshiToStorage();
+        updateTanaoroshiSummaryList();
+        showToast('削除しました', 'info');
+        return;
+    }
+
+    // Decrement by 1 box
+    product.countedBoxes -= 1;
+    product.countedPieces -= product.収容数;
+    product.newPhysicalQuantity -= product.収容数;
+    product.difference = product.newPhysicalQuantity - product.oldPhysicalQuantity;
+    saveTanaoroshiToStorage();
+
+    // If this is the active product, refresh counter display
+    if (currentTanaoroshiProduct && currentTanaoroshiProduct.品番 === product.品番) {
+        currentTanaoroshiProduct.countedBoxes = product.countedBoxes;
+        currentTanaoroshiProduct.countedPieces = product.countedPieces;
+        updateTanaoroshiCounterDisplay();
+        flashTanaoroshiCounterArea('error');
+    }
+
+    updateTanaoroshiSummaryList();
+    showToast(`${product.品番} を1箱減らしました`, 'info');
 }
 
 // Delete counted product
