@@ -394,6 +394,10 @@ function updateLockUI(lockStatus) {
     // Update all start buttons
     const startButtons = document.querySelectorAll('.start-picking-btn');
     startButtons.forEach(button => {
+        if (button.id === 'startPickingBtn') {
+            return;
+        }
+
         if (isLocked) {
             button.disabled = true;
             button.classList.add('opacity-50', 'cursor-not-allowed');
@@ -1366,9 +1370,9 @@ function displayPickingRequests() {
     
     // Apply status filter
     if (currentFilter === 'all') {
-        // Show pending, in-progress, completed, partial-inventory, and waiting-for-inventory
+        // Show pending, in-progress, paused, completed, partial-inventory, and waiting-for-inventory
         filteredRequests = filteredRequests.filter(req => 
-            req.status === 'pending' || req.status === 'in-progress' || req.status === 'completed' || req.status === 'partial-inventory' || req.status === 'waiting-for-inventory'
+            req.status === 'pending' || req.status === 'in-progress' || req.status === 'paused' || req.status === 'completed' || req.status === 'partial-inventory' || req.status === 'waiting-for-inventory'
         );
     } else {
         filteredRequests = filteredRequests.filter(req => req.status === currentFilter);
@@ -1560,7 +1564,7 @@ async function displayPickingDetail(request, options = {}) {
                 </div>
             </div>
         `;
-    } else if (renderRequest.status !== 'completed' && isInventoryWaitingStatus && insufficientItems.length > 0) {
+    } else if (renderRequest.status !== 'completed' && (isInventoryWaitingStatus || renderRequest.status === 'paused') && insufficientItems.length > 0) {
         warningBanner = `
             <div class="col-span-4 mb-4 bg-red-50 border-l-4 border-red-500 p-4 rounded-lg">
                 <div class="flex items-center space-x-3">
@@ -1601,17 +1605,33 @@ async function displayPickingDetail(request, options = {}) {
     
     // Update start button state
     const startBtn = document.getElementById('startPickingBtn');
+    const pauseBtn = document.getElementById('pausePickingBtn');
     startBtn.classList.add('start-picking-btn'); // Add class for lock handling
+
+    if (pauseBtn) {
+        pauseBtn.className = 'hidden px-6 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors font-medium';
+        pauseBtn.disabled = false;
+        pauseBtn.onclick = pausePickingProcess;
+    }
     
     if (renderRequest.status === 'pending' || renderRequest.status === 'partial-inventory' || renderRequest.status === 'waiting-for-inventory') {
         startBtn.disabled = false;
         startBtn.onclick = startPickingProcess;
         startBtn.innerHTML = `<i class="fas fa-play mr-2"></i>${t('start-button')}`;
         startBtn.className = 'px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors font-medium';
+    } else if (renderRequest.status === 'paused') {
+        startBtn.disabled = false;
+        startBtn.onclick = startPickingProcess;
+        startBtn.innerHTML = `<i class="fas fa-play mr-2"></i>${t('resume-button')}`;
+        startBtn.className = 'px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors font-medium';
     } else if (renderRequest.status === 'in-progress') {
         startBtn.disabled = true;
         startBtn.onclick = null;
         startBtn.innerHTML = `<i class="fas fa-clock mr-2"></i>${t('in-progress-button')}`;
+        startBtn.className = 'px-6 py-2 bg-slate-200 text-slate-700 rounded-lg cursor-not-allowed font-medium';
+        if (pauseBtn) {
+            pauseBtn.classList.remove('hidden');
+        }
     } else if (renderRequest.status === 'completed') {
         startBtn.disabled = false;
         startBtn.onclick = completeAndBackToList;
@@ -1853,6 +1873,10 @@ function getPickingItemStatusLabel(item) {
         return '完了';
     }
 
+    if (item.status === 'paused') {
+        return '一時停止';
+    }
+
     if (item.status === 'in-progress') {
         return '進行中';
     }
@@ -1863,6 +1887,10 @@ function getPickingItemStatusLabel(item) {
 function getPickingItemStatusBadgeClass(item) {
     if (item.status === 'completed') {
         return 'bg-green-100 text-green-800';
+    }
+
+    if (item.status === 'paused') {
+        return 'bg-orange-100 text-orange-800';
     }
 
     if (item.status === 'in-progress') {
@@ -1879,6 +1907,10 @@ function getPickingTableRowTone(item) {
 
     if (item.status === 'completed') {
         return 'bg-green-50';
+    }
+
+    if (item.status === 'paused') {
+        return 'bg-orange-50';
     }
 
     if (isItemInventoryShort(item)) {
@@ -1901,6 +1933,14 @@ function getPickingTableNote(item) {
         return item.completedAt
             ? `完了 ${new Date(item.completedAt).toLocaleString('ja-JP')}`
             : '完了済み';
+    }
+
+    if (item.status === 'paused') {
+        if (item.pickedQuantity !== undefined && item.pickedQuantity > 0) {
+            return `一時停止中 ${item.pickedQuantity}枚取得済み / 残り ${item.remainingQuantity || 0}枚`;
+        }
+
+        return '一時停止中';
     }
 
     if (item.status === 'in-progress' && item.pickedQuantity !== undefined && item.pickedQuantity > 0) {
@@ -2013,6 +2053,10 @@ function createPickingItemElement(item, index) {
         statusIcon = '<i class="fas fa-check-circle text-green-500"></i>';
         statusText = '完了';
         statusClass = 'text-green-600';
+    } else if (item.status === 'paused') {
+        statusIcon = '<i class="fas fa-pause-circle text-orange-500"></i>';
+        statusText = '一時停止';
+        statusClass = 'text-orange-600';
     } else if (item.status === 'in-progress') {
         statusIcon = '<i class="fas fa-clock text-yellow-500"></i>';
         statusText = '進行中';
@@ -2039,9 +2083,10 @@ function createPickingItemElement(item, index) {
     
     // ===== NEW: Show picking progress =====
     let pickingProgressHTML = '';
-    if (item.status === 'in-progress' && item.pickedQuantity !== undefined && item.pickedQuantity > 0) {
+    if ((item.status === 'in-progress' || item.status === 'paused') && item.pickedQuantity !== undefined && item.pickedQuantity > 0) {
         const pickedBoxes = item.pickedBoxes || (item.収容数 > 1 ? Math.floor(item.pickedQuantity / item.収容数) : item.pickedQuantity);
         const remainingBoxes = item.remainingBoxes || (item.収容数 > 1 ? Math.ceil(item.remainingQuantity / item.収容数) : item.remainingQuantity);
+        const remainingLabel = item.status === 'paused' ? '一時停止中' : '待機中';
         
         pickingProgressHTML = `
             <div class="mt-2 bg-blue-50 border border-blue-200 px-3 py-2 rounded-lg">
@@ -2054,7 +2099,7 @@ function createPickingItemElement(item, index) {
                 <div class="flex items-center space-x-2 mt-1">
                     <i class="fas fa-hourglass-half text-orange-500"></i>
                     <span class="text-sm font-semibold text-orange-600">
-                        残り ${remainingBoxes}個 (${item.remainingQuantity}枚) 待機中
+                        残り ${remainingBoxes}個 (${item.remainingQuantity}枚) ${remainingLabel}
                     </span>
                 </div>
             </div>
@@ -2088,8 +2133,8 @@ function createPickingItemElement(item, index) {
                 </div>
                 <div>
                     <h4 class="text-lg font-semibold text-gray-900">品番: ${item.品番}</h4>
-                    <div class="flex items-center">
-                        <div class="device-status-indicator w-3 h-3 rounded-full ${item.status === 'in-progress' ? 'bg-yellow-400' : item.status === 'completed' ? 'bg-green-500' : 'bg-gray-400'} mr-2"></div>
+                    <div class="flex items-center ${statusClass}">
+                        <div class="device-status-indicator w-3 h-3 rounded-full ${item.status === 'in-progress' ? 'bg-yellow-400' : item.status === 'paused' ? 'bg-orange-400' : item.status === 'completed' ? 'bg-green-500' : 'bg-gray-400'} mr-2"></div>
                         <p class="text-gray-600">背番号: <span class="font-medium">${item.背番号}</span></p>
                     </div>
                     <p class="text-sm text-gray-500">
@@ -2110,7 +2155,7 @@ function createPickingItemElement(item, index) {
                     <div class="text-2xl status-icon">
                         ${statusIcon}
                     </div>
-                    <div class="status-badge ${item.status === 'completed' ? 'bg-green-100 text-green-800' : item.status === 'in-progress' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-800'} px-2 py-1 rounded-full text-xs font-medium">
+                    <div class="status-badge ${item.status === 'completed' ? 'bg-green-100 text-green-800' : item.status === 'paused' ? 'bg-orange-100 text-orange-800' : item.status === 'in-progress' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-800'} px-2 py-1 rounded-full text-xs font-medium">
                         ${statusText}
                     </div>
                 </div>
@@ -2123,6 +2168,8 @@ function createPickingItemElement(item, index) {
 
 // Start picking process
 async function startPickingProcess() {
+    const t = window.t || ((key) => key);
+
     if (!currentWorker) {
         showToast(t('login-required'), 'error');
         return;
@@ -2157,16 +2204,57 @@ async function startPickingProcess() {
         }
         
         const result = await response.json();
-        showToast('ピッキングプロセスを開始しました！', 'success');
+        showToast(result.resumed ? t('picking-resumed') : t('picking-started'), 'success');
         
         // Refresh the detail view and notify ESP32 devices
         setTimeout(async () => {
             await refreshPickingDetail();
+            await loadPickingRequests();
         }, 1000);
         
     } catch (error) {
         console.error('Error starting picking process:', error);
-        showToast('ピッキング開始に失敗しました', 'error');
+        showToast(t('picking-start-failed'), 'error');
+    }
+}
+
+async function pausePickingProcess() {
+    const t = window.t || ((key) => key);
+
+    if (!currentWorker) {
+        showToast(t('login-required'), 'error');
+        return;
+    }
+
+    if (!currentRequestNumber) {
+        showToast(t('no-request-selected'), 'error');
+        return;
+    }
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/picking-requests/${currentRequestNumber}/pause`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                pausedBy: currentWorker
+            })
+        });
+
+        if (!response.ok) {
+            const errorPayload = await response.json().catch(() => ({}));
+            throw new Error(errorPayload.details || errorPayload.error || 'Failed to pause picking process');
+        }
+
+        await response.json();
+        showToast(t('picking-paused'), 'success');
+        await loadPickingRequests();
+        await refreshPickingDetail();
+        await checkAndUpdateLockStatus();
+    } catch (error) {
+        console.error('Error pausing picking process:', error);
+        showToast(t('picking-pause-failed'), 'error');
     }
 }
 
@@ -2402,6 +2490,11 @@ function updateProgressCounter() {
             startBtn.className = 'px-8 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors text-lg font-medium';
             console.log('✅ 完了 button activated - no refresh needed!');
         }
+
+        const pauseBtn = document.getElementById('pausePickingBtn');
+        if (pauseBtn) {
+            pauseBtn.classList.add('hidden');
+        }
         
         // Update currentRequest status in memory
         if (currentRequest) {
@@ -2503,6 +2596,7 @@ function getStatusClass(status) {
     switch (status) {
         case 'pending': return 'status-pending';
         case 'in-progress': return 'status-in-progress';
+        case 'paused': return 'status-paused';
         case 'completed': return 'status-completed';
         case 'partial-inventory': return 'status-partial-inventory';
         case 'waiting-for-inventory': return 'status-partial-inventory';
@@ -2515,6 +2609,7 @@ function getStatusText(status) {
     switch (status) {
         case 'pending': return t('status-pending');
         case 'in-progress': return t('status-in-progress');
+        case 'paused': return t('status-paused');
         case 'completed': return t('status-completed');
         case 'partial-inventory': return '在庫不足';
         case 'waiting-for-inventory': return '在庫待ち';
@@ -2575,9 +2670,15 @@ function showPickingDetailLoadingState(requestNumber) {
     
     // Disable start button during loading
     const startBtn = document.getElementById('startPickingBtn');
+    const pauseBtn = document.getElementById('pausePickingBtn');
     if (startBtn) {
         startBtn.disabled = true;
         startBtn.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i>読み込み中...`;
+    }
+
+    if (pauseBtn) {
+        pauseBtn.classList.add('hidden');
+        pauseBtn.disabled = true;
     }
 }
 
@@ -2588,6 +2689,11 @@ function hidePickingDetailLoadingState() {
     const startBtn = document.getElementById('startPickingBtn');
     if (startBtn) {
         startBtn.disabled = false;
+    }
+
+    const pauseBtn = document.getElementById('pausePickingBtn');
+    if (pauseBtn) {
+        pauseBtn.disabled = false;
     }
 }
 
@@ -3046,6 +3152,7 @@ window.filterByStatus = filterByStatus;
 window.filterByDate = filterByDate;
 window.refreshPickingRequests = refreshPickingRequests;
 window.startPickingProcess = startPickingProcess;
+window.pausePickingProcess = pausePickingProcess;
 // window.startIndividualPicking = startIndividualPicking; // Removed - ESP32 handles picking automatically
 window.refreshPickingDetail = refreshPickingDetail;
 window.switchPickingDetailView = switchPickingDetailView;

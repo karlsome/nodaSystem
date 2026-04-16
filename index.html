@@ -185,7 +185,7 @@
 
                 <!-- Status Filter -->
                 <div class="mb-4">
-                    <div class="flex space-x-2">
+                    <div class="flex flex-wrap gap-2">
                         <button onclick="filterByStatus('all')" class="status-filter active px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-i18n="filter-all">
                             全て
                         </button>
@@ -194,6 +194,9 @@
                         </button>
                         <button onclick="filterByStatus('in-progress')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-i18n="filter-in-progress">
                             進行中
+                        </button>
+                        <button onclick="filterByStatus('paused')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-i18n="filter-paused">
+                            一時停止
                         </button>
                         <button onclick="filterByStatus('completed')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-i18n="filter-completed">
                             完了
@@ -227,6 +230,10 @@
                         <button onclick="startPickingProcess()" id="startPickingBtn"
                                 class="px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors font-medium">
                             <i class="fas fa-play mr-2"></i><span data-i18n="start-button">開始</span>
+                        </button>
+                        <button onclick="pausePickingProcess()" id="pausePickingBtn"
+                                class="hidden px-6 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors font-medium">
+                            <i class="fas fa-pause mr-2"></i><span data-i18n="pause-button">一時停止</span>
                         </button>
                         <button onclick="refreshPickingDetail()" class="px-4 py-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors">
                             <i class="fas fa-refresh mr-2"></i><span data-i18n="refresh-button">更新</span>

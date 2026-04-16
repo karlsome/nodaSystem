@@ -24,6 +24,7 @@ const translations = {
         'filter-all': '全て',
         'filter-pending': '待機中',
         'filter-in-progress': '進行中',
+        'filter-paused': '一時停止',
         'filter-completed': '完了',
         'loading': '読み込み中...',
         'no-requests-title': 'ピッキング依頼がありません',
@@ -32,6 +33,8 @@ const translations = {
         // Picking Detail Screen
         'picking-detail': 'ピッキング詳細',
         'start-button': '開始',
+        'resume-button': '再開',
+        'pause-button': '一時停止',
         'picking-items': 'ピッキング項目',
         'connection-status-connected': '接続中',
         'connection-status-disconnected': '切断',
@@ -47,6 +50,7 @@ const translations = {
         // Status Labels
         'status-pending': '待機中',
         'status-in-progress': '進行中',
+        'status-paused': '一時停止',
         'status-completed': '完了',
         'status-unknown': '不明',
 
@@ -84,7 +88,10 @@ const translations = {
         'lock-by': 'によって処理中です',
         'other-order-processing': '他の注文が処理中です',
         'picking-started': 'ピッキングプロセスを開始しました！',
+        'picking-resumed': 'ピッキングを再開しました！',
         'picking-start-failed': 'ピッキング開始に失敗しました',
+        'picking-paused': 'ピッキングを一時停止しました',
+        'picking-pause-failed': 'ピッキングの一時停止に失敗しました',
         'picking-complete-back': 'ピッキング完了！リストに戻ります',
         'requests-refreshed': 'ピッキング依頼を更新しました',
         'refresh-failed': '更新に失敗しました',
@@ -239,6 +246,7 @@ const translations = {
         'filter-all': 'All',
         'filter-pending': 'Pending',
         'filter-in-progress': 'In Progress',
+        'filter-paused': 'Paused',
         'filter-completed': 'Completed',
         'loading': 'Loading...',
         'no-requests-title': 'No Picking Requests',
@@ -247,6 +255,8 @@ const translations = {
         // Picking Detail Screen
         'picking-detail': 'Picking Details',
         'start-button': 'Start',
+        'resume-button': 'Resume',
+        'pause-button': 'Pause',
         'picking-items': 'Picking Items',
         'connection-status-connected': 'Connected',
         'connection-status-disconnected': 'Disconnected',
@@ -262,6 +272,7 @@ const translations = {
         // Status Labels
         'status-pending': 'Pending',
         'status-in-progress': 'In Progress',
+        'status-paused': 'Paused',
         'status-completed': 'Completed',
         'status-unknown': 'Unknown',
 
@@ -299,7 +310,10 @@ const translations = {
         'lock-by': '',
         'other-order-processing': 'Another order is being processed',
         'picking-started': 'Picking process started!',
+        'picking-resumed': 'Picking resumed!',
         'picking-start-failed': 'Failed to start picking',
+        'picking-paused': 'Picking paused',
+        'picking-pause-failed': 'Failed to pause picking',
         'picking-complete-back': 'Picking complete! Returning to list',
         'requests-refreshed': 'Picking requests refreshed',
         'refresh-failed': 'Refresh failed',

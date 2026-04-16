@@ -121,6 +121,11 @@ button {
     color: #1e40af;
 }
 
+.status-paused {
+    background-color: #ffedd5;
+    color: #9a3412;
+}
+
 .status-completed {
     background-color: #d1fae5;
     color: #065f46;
