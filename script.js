@@ -428,6 +428,72 @@ function updateLockUI(lockStatus) {
     } else {
         hideLockNotification();
     }
+
+    updatePickingDetailActionButtons();
+}
+
+function updatePickingDetailActionButtons(requestStatus = currentRequest?.status) {
+    const startBtn = document.getElementById('startPickingBtn');
+    const pauseBtn = document.getElementById('pausePickingBtn');
+    const t = window.t || ((key) => key);
+
+    if (!startBtn || !requestStatus) {
+        return;
+    }
+
+    startBtn.classList.add('start-picking-btn');
+
+    if (pauseBtn) {
+        pauseBtn.className = 'hidden px-6 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors font-medium';
+        pauseBtn.disabled = false;
+        pauseBtn.onclick = pausePickingProcess;
+    }
+
+    if (requestStatus === 'pending' || requestStatus === 'partial-inventory' || requestStatus === 'waiting-for-inventory') {
+        startBtn.disabled = false;
+        startBtn.onclick = startPickingProcess;
+        startBtn.innerHTML = `<i class="fas fa-play mr-2"></i>${t('start-button')}`;
+        startBtn.className = 'px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors font-medium';
+    } else if (requestStatus === 'paused') {
+        startBtn.disabled = false;
+        startBtn.onclick = startPickingProcess;
+        startBtn.innerHTML = `<i class="fas fa-play mr-2"></i>${t('resume-button')}`;
+        startBtn.className = 'px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors font-medium';
+    } else if (requestStatus === 'in-progress') {
+        startBtn.disabled = true;
+        startBtn.onclick = null;
+        startBtn.innerHTML = `<i class="fas fa-clock mr-2"></i>${t('in-progress-button')}`;
+        startBtn.className = 'px-6 py-2 bg-slate-200 text-slate-700 rounded-lg cursor-not-allowed font-medium';
+        if (pauseBtn) {
+            pauseBtn.classList.remove('hidden');
+        }
+    } else if (requestStatus === 'completed') {
+        startBtn.disabled = false;
+        startBtn.onclick = completeAndBackToList;
+        startBtn.innerHTML = `<i class="fas fa-check mr-2"></i>${t('completed-button')}`;
+        startBtn.className = 'px-8 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors text-lg font-medium';
+    } else {
+        startBtn.disabled = true;
+        startBtn.onclick = null;
+        startBtn.innerHTML = `<i class="fas fa-ban mr-2"></i>${getStatusText(requestStatus)}`;
+        startBtn.className = 'px-6 py-2 bg-gray-300 text-gray-700 rounded-lg cursor-not-allowed font-medium';
+    }
+
+    const isLockedByAnotherRequest = latestPickingLockStatus?.isLocked &&
+        latestPickingLockStatus.activeRequestNumber &&
+        currentRequestNumber &&
+        latestPickingLockStatus.activeRequestNumber !== currentRequestNumber;
+    const canStartWhenUnlocked = requestStatus === 'pending' ||
+        requestStatus === 'partial-inventory' ||
+        requestStatus === 'waiting-for-inventory' ||
+        requestStatus === 'paused';
+
+    if (isLockedByAnotherRequest && canStartWhenUnlocked) {
+        startBtn.disabled = true;
+        startBtn.onclick = null;
+        startBtn.innerHTML = `<i class="fas fa-lock mr-2"></i>${t('other-order-processing')}`;
+        startBtn.className = 'px-6 py-2 bg-slate-200 text-slate-700 rounded-lg cursor-not-allowed font-medium';
+    }
 }
 
 function showLockNotification(activeRequestNumber, startedBy) {
@@ -1776,46 +1842,7 @@ async function displayPickingDetail(request, options = {}) {
     // Update items list
     renderPickingItemsViews(renderRequest.lineItems);
     
-    // Update start button state
-    const startBtn = document.getElementById('startPickingBtn');
-    const pauseBtn = document.getElementById('pausePickingBtn');
-    startBtn.classList.add('start-picking-btn'); // Add class for lock handling
-
-    if (pauseBtn) {
-        pauseBtn.className = 'hidden px-6 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors font-medium';
-        pauseBtn.disabled = false;
-        pauseBtn.onclick = pausePickingProcess;
-    }
-    
-    if (renderRequest.status === 'pending' || renderRequest.status === 'partial-inventory' || renderRequest.status === 'waiting-for-inventory') {
-        startBtn.disabled = false;
-        startBtn.onclick = startPickingProcess;
-        startBtn.innerHTML = `<i class="fas fa-play mr-2"></i>${t('start-button')}`;
-        startBtn.className = 'px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors font-medium';
-    } else if (renderRequest.status === 'paused') {
-        startBtn.disabled = false;
-        startBtn.onclick = startPickingProcess;
-        startBtn.innerHTML = `<i class="fas fa-play mr-2"></i>${t('resume-button')}`;
-        startBtn.className = 'px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors font-medium';
-    } else if (renderRequest.status === 'in-progress') {
-        startBtn.disabled = true;
-        startBtn.onclick = null;
-        startBtn.innerHTML = `<i class="fas fa-clock mr-2"></i>${t('in-progress-button')}`;
-        startBtn.className = 'px-6 py-2 bg-slate-200 text-slate-700 rounded-lg cursor-not-allowed font-medium';
-        if (pauseBtn) {
-            pauseBtn.classList.remove('hidden');
-        }
-    } else if (renderRequest.status === 'completed') {
-        startBtn.disabled = false;
-        startBtn.onclick = completeAndBackToList;
-        startBtn.innerHTML = `<i class="fas fa-check mr-2"></i>${t('completed-button')}`;
-        startBtn.className = 'px-8 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors text-lg font-medium';
-    } else {
-        startBtn.disabled = true;
-        startBtn.onclick = null;
-        startBtn.innerHTML = `<i class="fas fa-ban mr-2"></i>${getStatusText(renderRequest.status)}`;
-        startBtn.className = 'px-6 py-2 bg-gray-300 text-gray-700 rounded-lg cursor-not-allowed font-medium';
-    }
+    updatePickingDetailActionButtons(renderRequest.status);
 }
 
 // Enrich line items with master data to calculate box quantities
