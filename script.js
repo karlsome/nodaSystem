@@ -2151,6 +2151,18 @@ function getDisplayShortfallQuantity(item) {
     return 0;
 }
 
+function getDisplayShortfallLabel(item) {
+    const shortfallQuantity = Math.max(0, getDisplayShortfallQuantity(item));
+    const boxCapacity = Number(item.収容数) || 0;
+
+    if (boxCapacity > 1 && shortfallQuantity > 0) {
+        const shortfallBoxes = Math.ceil(shortfallQuantity / boxCapacity);
+        return `${shortfallQuantity}個 (${shortfallBoxes}箱)`;
+    }
+
+    return `${shortfallQuantity}個`;
+}
+
 function isItemInventoryShort(item) {
     if (item.isLivePending) {
         return false;
@@ -2296,7 +2308,7 @@ function getPickingTableNote(item) {
     }
 
     if (isItemInventoryShort(item)) {
-        return `不足 ${Math.max(0, getDisplayShortfallQuantity(item))}個`;
+        return `不足 ${getDisplayShortfallLabel(item)}`;
     }
 
     return '準備完了';
@@ -2464,11 +2476,11 @@ function createPickingItemElement(item, index) {
             </div>
         `;
     } else if (hasInsufficientInventory) {
-        const actualShortfall = Math.max(0, getDisplayShortfallQuantity(item));
+        const shortfallLabel = getDisplayShortfallLabel(item);
         inventoryWarning = `
             <div class="mt-2 flex items-center space-x-2 bg-red-100 px-3 py-2 rounded-lg">
                 <i class="fas fa-exclamation-triangle text-red-600"></i>
-                <span class="text-sm font-semibold text-red-700">在庫不足: ${actualShortfall}個不足</span>
+                <span class="text-sm font-semibold text-red-700">在庫不足: ${shortfallLabel} 不足</span>
             </div>
         `;
     }
