@@ -20,6 +20,14 @@ let latestPickingLockStatus = {
     startedBy: null,
     startedAt: null
 };
+let allRequestsPagination = {
+    currentPage: 1,
+    pageSize: 10,
+    totalItems: 0,
+    totalPages: 0,
+    hasPreviousPage: false,
+    hasNextPage: false
+};
 let pausedReminderIntervalId = null;
 const PAUSED_REQUEST_REMINDER_INTERVAL_MS = 30000;
 
@@ -1578,13 +1586,30 @@ async function checkAndUpdateLockStatus() {
 async function loadPickingRequests() {
     try {
         showLoading(true);
-        
-        const response = await fetch(`${API_BASE_URL}/request-numbers`);
+
+        const requestUrl = new URL(`${API_BASE_URL}/request-numbers`);
+        if (currentFilter === 'all') {
+            requestUrl.searchParams.set('paginate', 'true');
+            requestUrl.searchParams.set('page', String(allRequestsPagination.currentPage));
+            requestUrl.searchParams.set('limit', String(allRequestsPagination.pageSize));
+        }
+
+        const response = await fetch(requestUrl.toString());
         if (!response.ok) {
             throw new Error('Failed to fetch picking requests');
         }
-        
-        pickingRequests = await response.json();
+
+        const responseData = await response.json();
+        if (currentFilter === 'all') {
+            pickingRequests = Array.isArray(responseData.requests) ? responseData.requests : [];
+            allRequestsPagination = {
+                ...allRequestsPagination,
+                ...(responseData.pagination || {})
+            };
+        } else {
+            pickingRequests = Array.isArray(responseData) ? responseData : [];
+        }
+
         displayPickingRequests();
         
         // Check lock status after loading requests
@@ -1603,6 +1628,7 @@ function displayPickingRequests() {
     const container = document.getElementById('pickingRequestsList');
 
     updatePickingFilterButtons();
+    updatePickingPaginationControls();
     
     if (!pickingRequests || pickingRequests.length === 0) {
         displayNoRequests();
@@ -1615,12 +1641,7 @@ function displayPickingRequests() {
     // Apply status filter
     if (currentFilter === 'today') {
         filteredRequests = filteredRequests.filter(isWithinTodayPickingWindow);
-    } else if (currentFilter === 'all') {
-        // Show pending, in-progress, paused, completed, partial-inventory, and waiting-for-inventory
-        filteredRequests = filteredRequests.filter(req => 
-            req.status === 'pending' || req.status === 'in-progress' || req.status === 'paused' || req.status === 'completed' || req.status === 'partial-inventory' || req.status === 'waiting-for-inventory'
-        );
-    } else {
+    } else if (currentFilter !== 'all') {
         filteredRequests = filteredRequests.filter(req => req.status === currentFilter);
     }
     
@@ -1642,12 +1663,86 @@ function displayPickingRequests() {
         const requestCard = createPickingRequestCard(request);
         container.appendChild(requestCard);
     });
+
+    updatePickingPaginationControls(filteredRequests.length);
 }
 
 function updatePickingFilterButtons() {
     document.querySelectorAll('.status-filter').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.filterStatus === currentFilter);
     });
+}
+
+function updatePickingPaginationControls(currentItemCount = pickingRequests.length) {
+    const controls = document.getElementById('pickingPaginationControls');
+    const pageSizeSelect = document.getElementById('pickingPageSizeSelect');
+    const summary = document.getElementById('pickingPaginationSummary');
+    const pageInfo = document.getElementById('pickingPaginationPageInfo');
+    const prevBtn = document.getElementById('pickingPrevPageBtn');
+    const nextBtn = document.getElementById('pickingNextPageBtn');
+
+    if (!controls || !pageSizeSelect || !summary || !pageInfo || !prevBtn || !nextBtn) {
+        return;
+    }
+
+    if (currentFilter !== 'all') {
+        controls.classList.add('hidden');
+        return;
+    }
+
+    controls.classList.remove('hidden');
+    pageSizeSelect.value = String(allRequestsPagination.pageSize);
+
+    const totalItems = allRequestsPagination.totalItems || 0;
+    const totalPages = allRequestsPagination.totalPages || 0;
+    const currentPage = allRequestsPagination.currentPage || 1;
+
+    if (totalItems === 0 || currentItemCount === 0) {
+        summary.textContent = '0 / 0';
+    } else {
+        const startItem = (currentPage - 1) * allRequestsPagination.pageSize + 1;
+        const endItem = startItem + currentItemCount - 1;
+        summary.textContent = `${startItem}-${endItem} / ${totalItems}`;
+    }
+
+    pageInfo.textContent = `${currentPage} / ${Math.max(totalPages, 1)}`;
+    setPickingPaginationButtonState(prevBtn, !!allRequestsPagination.hasPreviousPage);
+    setPickingPaginationButtonState(nextBtn, !!allRequestsPagination.hasNextPage);
+}
+
+function setPickingPaginationButtonState(button, isEnabled) {
+    if (!button) {
+        return;
+    }
+
+    button.disabled = !isEnabled;
+    button.classList.toggle('opacity-50', !isEnabled);
+    button.classList.toggle('cursor-not-allowed', !isEnabled);
+}
+
+async function changePickingPage(direction) {
+    if (currentFilter !== 'all') {
+        return;
+    }
+
+    const nextPage = allRequestsPagination.currentPage + Number(direction);
+    if (nextPage < 1 || (allRequestsPagination.totalPages > 0 && nextPage > allRequestsPagination.totalPages)) {
+        return;
+    }
+
+    allRequestsPagination.currentPage = nextPage;
+    await loadPickingRequests();
+}
+
+async function changePickingPageSize(nextPageSize) {
+    const parsedPageSize = Number.parseInt(nextPageSize, 10);
+    if (![10, 50, 100].includes(parsedPageSize)) {
+        return;
+    }
+
+    allRequestsPagination.pageSize = parsedPageSize;
+    allRequestsPagination.currentPage = 1;
+    await loadPickingRequests();
 }
 
 function getRequestDateFromRequestNumber(requestNumber) {
@@ -2803,6 +2898,8 @@ function displayNoRequests() {
     const container = document.getElementById('pickingRequestsList');
     const t = window.t || ((key) => key);
 
+    updatePickingPaginationControls(0);
+
     container.innerHTML = `
         <div class="text-center py-12">
             <div class="w-24 h-24 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-6">
@@ -2815,10 +2912,16 @@ function displayNoRequests() {
 }
 
 // Filter functions
-function filterByStatus(status) {
+async function filterByStatus(status) {
+    const previousFilter = currentFilter;
     currentFilter = status;
+
+    if (status === 'all' && previousFilter !== 'all') {
+        allRequestsPagination.currentPage = 1;
+    }
+
     updatePickingFilterButtons();
-    displayPickingRequests();
+    await loadPickingRequests();
 }
 
 function filterByDate() {
@@ -3398,6 +3501,8 @@ window.backToPickingList = backToPickingList;
 window.filterByStatus = filterByStatus;
 window.filterByDate = filterByDate;
 window.refreshPickingRequests = refreshPickingRequests;
+window.changePickingPage = changePickingPage;
+window.changePickingPageSize = changePickingPageSize;
 window.startPickingProcess = startPickingProcess;
 window.pausePickingProcess = pausePickingProcess;
 // window.startIndividualPicking = startIndividualPicking; // Removed - ESP32 handles picking automatically

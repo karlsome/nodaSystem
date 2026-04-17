@@ -207,6 +207,27 @@
                     </div>
                 </div>
 
+                <div id="pickingPaginationControls" class="hidden mb-4 flex flex-col gap-3 rounded-lg border border-gray-200 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div class="flex flex-wrap items-center gap-2 text-sm text-gray-600">
+                        <label for="pickingPageSizeSelect" data-i18n="pagination-limit-label">表示件数</label>
+                        <select id="pickingPageSizeSelect" onchange="changePickingPageSize(this.value)" class="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200">
+                            <option value="10">10</option>
+                            <option value="50">50</option>
+                            <option value="100">100</option>
+                        </select>
+                        <span id="pickingPaginationSummary" class="font-medium text-gray-700">0 / 0</span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button id="pickingPrevPageBtn" onclick="changePickingPage(-1)" class="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-50">
+                            <span data-i18n="pagination-prev">前へ</span>
+                        </button>
+                        <span id="pickingPaginationPageInfo" class="min-w-[72px] text-center text-sm font-medium text-gray-700">1 / 1</span>
+                        <button id="pickingNextPageBtn" onclick="changePickingPage(1)" class="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-50">
+                            <span data-i18n="pagination-next">次へ</span>
+                        </button>
+                    </div>
+                </div>
+
                 <!-- Picking Requests List -->
                 <div id="pickingRequestsList" class="space-y-3">
                     <!-- Loading state -->

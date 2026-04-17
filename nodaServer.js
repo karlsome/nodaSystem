@@ -1333,6 +1333,34 @@ app.get('/api/picking-requests/group/:requestNumber', async (req, res) => {
     }
 });
 
+function buildPickingRequestSummary(request) {
+    const lineItems = Array.isArray(request.lineItems) ? request.lineItems : [];
+    const totalQuantity = lineItems.reduce((sum, item) => sum + (item.quantity || 0), 0);
+    const completedItems = lineItems.filter(item => item.status === 'completed').length;
+    const totalItems = lineItems.length;
+
+    return {
+        requestNumber: request.requestNumber,
+        totalQuantity,
+        status: request.status,
+        createdAt: request.createdAt,
+        itemCount: totalItems,
+        completedItems,
+        pickupDate: request.pickupDate
+    };
+}
+
+function normalizePickingPaginationLimit(limitValue) {
+    const allowedLimits = new Set([10, 50, 100]);
+    const parsedLimit = Number(limitValue);
+
+    if (!Number.isInteger(parsedLimit) || !allowedLimits.has(parsedLimit)) {
+        return 10;
+    }
+
+    return parsedLimit;
+}
+
 // Start picking process - send to all IoT devices
 app.post('/api/picking-requests/:requestNumber/start', async (req, res) => {
     try {
@@ -2592,38 +2620,51 @@ app.get('/api/devices/status', (req, res) => {
 app.get('/api/request-numbers', async (req, res) => {
     try {
         const collection = db.collection(process.env.COLLECTION_NAME);
+        const shouldPaginate = req.query.paginate === 'true';
+        const projection = {
+            requestNumber: 1,
+            status: 1,
+            createdAt: 1,
+            pickupDate: 1,
+            'lineItems.quantity': 1,
+            'lineItems.status': 1
+        };
+
+        if (shouldPaginate) {
+            const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+            const limit = normalizePickingPaginationLimit(req.query.limit);
+            const totalItems = await collection.countDocuments({});
+            const totalPages = totalItems > 0 ? Math.ceil(totalItems / limit) : 0;
+            const currentPage = totalPages > 0 ? Math.min(page, totalPages) : 1;
+            const skip = totalPages > 0 ? (currentPage - 1) * limit : 0;
+
+            const requests = await collection.find(
+                {},
+                { projection }
+            ).sort({ createdAt: 1, _id: 1 }).skip(skip).limit(limit).toArray();
+
+            res.json({
+                requests: requests.map(buildPickingRequestSummary),
+                pagination: {
+                    currentPage,
+                    pageSize: limit,
+                    totalItems,
+                    totalPages,
+                    hasPreviousPage: currentPage > 1,
+                    hasNextPage: totalPages > 0 && currentPage < totalPages
+                }
+            });
+            return;
+        }
+
         const requests = await collection.find(
             {},
             {
-                projection: {
-                    requestNumber: 1,
-                    status: 1,
-                    createdAt: 1,
-                    pickupDate: 1,
-                    'lineItems.quantity': 1,
-                    'lineItems.status': 1
-                }
+                projection
             }
         ).sort({ createdAt: -1 }).toArray();
-        
-        const requestsWithInfo = requests.map(request => {
-            const lineItems = Array.isArray(request.lineItems) ? request.lineItems : [];
-            const totalQuantity = lineItems.reduce((sum, item) => sum + (item.quantity || 0), 0);
-            const completedItems = lineItems.filter(item => item.status === 'completed').length;
-            const totalItems = lineItems.length;
-            
-            return {
-                requestNumber: request.requestNumber,
-                totalQuantity,
-                status: request.status,
-                createdAt: request.createdAt,
-                itemCount: totalItems,
-                completedItems,
-                pickupDate: request.pickupDate
-            };
-        });
-        
-        res.json(requestsWithInfo);
+
+        res.json(requests.map(buildPickingRequestSummary));
     } catch (error) {
         console.error('Error fetching request numbers:', error);
         res.status(500).json({ error: 'Failed to fetch request numbers' });
