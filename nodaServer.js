@@ -1801,15 +1801,17 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
             console.log(`⚠️ Line item ${lineNumber} was already completed by another process.`);
             return { allCompleted: true, request: request, alreadyCompleted: true };
         }
+
+        const fullPickAction = `Picking (-${actualDeductQuantity})`;
         
         console.log(`🟢 [SUFFICIENT PATH] Calling createInventoryTransaction with ${actualDeductQuantity} quantity for ${lineItem.背番号}`);
-        console.log(`   Action: 'Picking' (Full)`);
+        console.log(`   Action: '${fullPickAction}' (Full)`);
         console.log(`   This is INSERT #${Date.now()}`);
         await createInventoryTransaction({
             背番号: lineItem.背番号,
             品番: lineItem.品番,
             pickedQuantity: actualDeductQuantity,
-            action: 'Picking',
+            action: fullPickAction,
             source: `IoT Device ${lineItem.背番号} - ${request.startedBy || completedBy}`,
             requestNumber: requestNumber,
             lineNumber: lineNumber,
@@ -2063,7 +2065,8 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         console.log(`\n💾💾💾 [INVENTORY INSERT] Creating inventory transaction...`);
         console.log(`   INSERT TYPE: Partial Pick`);
         console.log(`   Quantity: ${actualDeductQuantity}`);
-        console.log(`   Action: 'Picking (Partial)'`);
+        const partialPickAction = `Picking (Partial) (-${actualDeductQuantity})`;
+        console.log(`   Action: '${partialPickAction}'`);
         console.log(`   Background: ${previouslyPicked} already picked, ${newRemaining} still remaining`);
         console.log(`   This is INSERT #${Date.now()}`);
         
@@ -2071,7 +2074,7 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
             背番号: lineItem.背番号,
             品番: lineItem.品番,
             pickedQuantity: actualDeductQuantity,
-            action: 'Picking (Partial)',
+            action: partialPickAction,
             source: `IoT Device ${lineItem.背番号} - ${request.startedBy || completedBy}`,
             requestNumber: requestNumber,
             lineNumber: lineNumber,
