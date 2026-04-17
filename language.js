@@ -20,6 +20,7 @@ const translations = {
 
         // Picking Request List Screen
         'picking-requests': 'ピッキング依頼',
+        'filter-today': '本日',
         'refresh-button': '更新',
         'filter-all': '全て',
         'filter-pending': '待機中',
@@ -245,6 +246,7 @@ const translations = {
 
         // Picking Request List Screen
         'picking-requests': 'Picking Requests',
+        'filter-today': 'Today',
         'refresh-button': 'Refresh',
         'filter-all': 'All',
         'filter-pending': 'Pending',

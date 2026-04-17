@@ -186,19 +186,22 @@
                 <!-- Status Filter -->
                 <div class="mb-4">
                     <div class="flex flex-wrap gap-2">
-                        <button onclick="filterByStatus('all')" class="status-filter active px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-i18n="filter-all">
+                        <button onclick="filterByStatus('today')" class="status-filter active px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-filter-status="today" data-i18n="filter-today">
+                            本日
+                        </button>
+                        <button onclick="filterByStatus('all')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-filter-status="all" data-i18n="filter-all">
                             全て
                         </button>
-                        <button onclick="filterByStatus('pending')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-i18n="filter-pending">
+                        <button onclick="filterByStatus('pending')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-filter-status="pending" data-i18n="filter-pending">
                             待機中
                         </button>
-                        <button onclick="filterByStatus('in-progress')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-i18n="filter-in-progress">
+                        <button onclick="filterByStatus('in-progress')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-filter-status="in-progress" data-i18n="filter-in-progress">
                             進行中
                         </button>
-                        <button onclick="filterByStatus('paused')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-i18n="filter-paused">
+                        <button onclick="filterByStatus('paused')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-filter-status="paused" data-i18n="filter-paused">
                             一時停止
                         </button>
-                        <button onclick="filterByStatus('completed')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-i18n="filter-completed">
+                        <button onclick="filterByStatus('completed')" class="status-filter px-3 py-2 rounded-lg text-sm font-medium transition-colors" data-filter-status="completed" data-i18n="filter-completed">
                             完了
                         </button>
                     </div>

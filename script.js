@@ -4,7 +4,7 @@ let currentScreen = 'login';
 let pickingRequests = [];
 let currentRequest = null;
 let currentRequestNumber = null;
-let currentFilter = 'all';
+let currentFilter = 'today';
 let currentDateFilter = null; // Date filter for picking requests
 let currentWorker = null;
 let socket = null;
@@ -733,6 +733,9 @@ function openPickingSystem() {
     if (window.audioManager) {
         audioManager.activateForMode('picking');
     }
+
+    currentFilter = 'today';
+    updatePickingFilterButtons();
     
     // Set date picker to today's date
     const today = new Date();
@@ -1598,6 +1601,8 @@ async function loadPickingRequests() {
 
 function displayPickingRequests() {
     const container = document.getElementById('pickingRequestsList');
+
+    updatePickingFilterButtons();
     
     if (!pickingRequests || pickingRequests.length === 0) {
         displayNoRequests();
@@ -1608,7 +1613,9 @@ function displayPickingRequests() {
     let filteredRequests = pickingRequests;
     
     // Apply status filter
-    if (currentFilter === 'all') {
+    if (currentFilter === 'today') {
+        filteredRequests = filteredRequests.filter(isWithinTodayPickingWindow);
+    } else if (currentFilter === 'all') {
         // Show pending, in-progress, paused, completed, partial-inventory, and waiting-for-inventory
         filteredRequests = filteredRequests.filter(req => 
             req.status === 'pending' || req.status === 'in-progress' || req.status === 'paused' || req.status === 'completed' || req.status === 'partial-inventory' || req.status === 'waiting-for-inventory'
@@ -1635,6 +1642,52 @@ function displayPickingRequests() {
         const requestCard = createPickingRequestCard(request);
         container.appendChild(requestCard);
     });
+}
+
+function updatePickingFilterButtons() {
+    document.querySelectorAll('.status-filter').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.filterStatus === currentFilter);
+    });
+}
+
+function getRequestDateFromRequestNumber(requestNumber) {
+    const requestParts = String(requestNumber || '').split('-');
+    const datePart = requestParts[1] || '';
+
+    if (!/^\d{8}$/.test(datePart)) {
+        return null;
+    }
+
+    const year = Number(datePart.slice(0, 4));
+    const monthIndex = Number(datePart.slice(4, 6)) - 1;
+    const day = Number(datePart.slice(6, 8));
+    const parsedDate = new Date(year, monthIndex, day);
+
+    if (
+        parsedDate.getFullYear() !== year ||
+        parsedDate.getMonth() !== monthIndex ||
+        parsedDate.getDate() !== day
+    ) {
+        return null;
+    }
+
+    parsedDate.setHours(0, 0, 0, 0);
+    return parsedDate;
+}
+
+function isWithinTodayPickingWindow(request) {
+    const requestDate = getRequestDateFromRequestNumber(request?.requestNumber);
+    if (!requestDate) {
+        return false;
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const rangeStart = new Date(today);
+    rangeStart.setDate(rangeStart.getDate() - 5);
+
+    return requestDate >= rangeStart;
 }
 
 function createPickingRequestCard(request) {
@@ -2764,13 +2817,7 @@ function displayNoRequests() {
 // Filter functions
 function filterByStatus(status) {
     currentFilter = status;
-    
-    // Update filter buttons
-    document.querySelectorAll('.status-filter').forEach(btn => {
-        btn.classList.remove('active');
-    });
-    event.target.classList.add('active');
-    
+    updatePickingFilterButtons();
     displayPickingRequests();
 }
 
