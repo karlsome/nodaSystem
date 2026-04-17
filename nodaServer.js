@@ -599,6 +599,27 @@ function buildInventoryTimestampExpression() {
     };
 }
 
+async function getLatestInventoryRecordByProductNumber(productNumber) {
+    if (!productNumber) {
+        return null;
+    }
+
+    const submittedDb = client.db("submittedDB");
+    const inventoryCollection = submittedDb.collection('nodaInventoryDB');
+    const inventoryResults = await inventoryCollection.aggregate([
+        { $match: { 品番: productNumber } },
+        {
+            $addFields: {
+                timeStampDate: buildInventoryTimestampExpression()
+            }
+        },
+        { $sort: { timeStampDate: -1, _id: -1 } },
+        { $limit: 1 }
+    ]).toArray();
+
+    return inventoryResults[0] || null;
+}
+
 async function getLatestInventoryMapByBackNumbers(backNumbers) {
     if (!backNumbers || backNumbers.length === 0) {
         return new Map();
@@ -4153,34 +4174,21 @@ app.get('/api/nyuko/:productNumber', async (req, res) => {
             return res.status(404).json({ error: 'Product not found in master database' });
         }
 
-        // Fetch current inventory data (if exists)
-        const db = client.db("submittedDB");
-        const inventoryCollection = db.collection("nodaInventoryDB");
-        
         console.log(`🔍 [NYUKO API] Getting latest inventory record for 品番: ${productNumber}`);
-        
-        // Get the latest inventory record for this product
-        // Use aggregation to properly handle timeStamp conversion and sorting
-        const currentInventory = await inventoryCollection.aggregate([
-            { $match: { 品番: productNumber } },
-            {
-                $addFields: {
-                    timeStampDate: {
-                        $cond: {
-                            if: { $eq: [{ $type: "$timeStamp" }, "string"] },
-                            then: { $dateFromString: { dateString: "$timeStamp" } },
-                            else: { $toDate: "$timeStamp" }
-                        }
-                    }
-                }
-            },
-            { $sort: { timeStampDate: -1 } },
-            { $limit: 1 }
-        ]).toArray();
-
-        // Check if product exists in inventory
-        const inventoryExists = currentInventory.length > 0;
-        const latestRecord = inventoryExists ? currentInventory[0] : null;
+        const latestRecord = await getLatestInventoryRecordByProductNumber(productNumber);
+        const inventoryExists = !!latestRecord;
+        const currentPhysicalQuantity = inventoryExists
+            ? (latestRecord.physicalQuantity ?? latestRecord.runningQuantity ?? 0)
+            : 0;
+        const currentReservedQuantity = inventoryExists
+            ? (latestRecord.reservedQuantity ?? 0)
+            : 0;
+        const currentAvailableQuantity = inventoryExists
+            ? (latestRecord.availableQuantity ?? Math.max(currentPhysicalQuantity - currentReservedQuantity, 0))
+            : 0;
+        const currentRunningQuantity = inventoryExists
+            ? (latestRecord.runningQuantity ?? currentPhysicalQuantity)
+            : 0;
         
         console.log(`📊 [NYUKO API] Latest inventory:`, latestRecord ? {
             timeStamp: latestRecord.timeStamp,
@@ -4201,10 +4209,10 @@ app.get('/api/nyuko/:productNumber', async (req, res) => {
             
             // Current inventory data (if exists)
             inventoryExists: inventoryExists,
-            currentPhysicalQuantity: inventoryExists ? (latestRecord.physicalQuantity || 0) : 0,
-            currentReservedQuantity: inventoryExists ? (latestRecord.reservedQuantity || 0) : 0,
-            currentAvailableQuantity: inventoryExists ? (latestRecord.availableQuantity || 0) : 0,
-            currentRunningQuantity: inventoryExists ? (latestRecord.runningQuantity || 0) : 0
+            currentPhysicalQuantity,
+            currentReservedQuantity,
+            currentAvailableQuantity,
+            currentRunningQuantity
         };
         
         console.log(`📤 [NYUKO API] Sending response for ${productNumber}:`, {
@@ -4248,12 +4256,29 @@ app.post('/api/nyuko/submit', async (req, res) => {
 
         for (const product of inputProducts) {
             try {
-                const { 品番, 背番号, inputQuantity, inventoryExists, oldPhysicalQuantity, oldReservedQuantity } = product;
+                const { 品番, 背番号, inputQuantity } = product;
+                const quantityToAdd = Number(inputQuantity);
 
-                if (!品番 || !背番号 || inputQuantity === undefined) {
+                if (!品番 || !背番号 || inputQuantity === undefined || !Number.isFinite(quantityToAdd)) {
                     errors.push({ 品番, error: 'Missing required fields' });
                     continue;
                 }
+
+                const latestRecord = await getLatestInventoryRecordByProductNumber(品番);
+                const inventoryExists = !!latestRecord;
+                const currentPhysicalQuantity = inventoryExists
+                    ? (latestRecord.physicalQuantity ?? latestRecord.runningQuantity ?? 0)
+                    : 0;
+                const currentReservedQuantity = inventoryExists
+                    ? (latestRecord.reservedQuantity ?? 0)
+                    : 0;
+
+                console.log(`📊 [NYUKO] Latest DB state for ${品番}:`, {
+                    inventoryExists,
+                    currentPhysicalQuantity,
+                    currentReservedQuantity,
+                    latestAction: latestRecord?.action || 'NONE'
+                });
 
                 let transactionRecord;
 
@@ -4265,13 +4290,13 @@ app.post('/api/nyuko/submit', async (req, res) => {
                         timeStamp: submissionTimestamp,
                         Date: submissionTimestamp.toISOString().split('T')[0],
                         
-                        physicalQuantity: inputQuantity,
+                        physicalQuantity: quantityToAdd,
                         reservedQuantity: 0,
-                        availableQuantity: inputQuantity,
-                        runningQuantity: inputQuantity,
+                        availableQuantity: quantityToAdd,
+                        runningQuantity: quantityToAdd,
                         lastQuantity: 0,
                         
-                        action: `Warehouse Input (+${inputQuantity})`,
+                        action: `Warehouse Input (+${quantityToAdd})`,
                         source: `tablet 入庫 - ${submittedBy}`,
                         工場: factory
                     };
@@ -4280,49 +4305,18 @@ app.post('/api/nyuko/submit', async (req, res) => {
                         品番: 品番,
                         背番号: 背番号,
                         oldQuantity: 0,
-                        newQuantity: inputQuantity,
-                        inputQuantity: inputQuantity,
+                        newQuantity: quantityToAdd,
+                        inputQuantity: quantityToAdd,
                         isNew: true
                     });
 
                 } else {
-                    // EXISTING PRODUCT: Add to current inventory
-                    const newPhysicalQuantity = oldPhysicalQuantity + inputQuantity;
-                    const newAvailableQuantity = newPhysicalQuantity - oldReservedQuantity;
-                    
-                    console.log(`🔍 [NYUKO] Getting latest record for 品番: ${品番}`);
-                    
-                    // Get previous running quantity
-                    // Use aggregation to properly handle timeStamp conversion and sorting
-                    const previousRecord = await inventoryCollection.aggregate([
-                        { $match: { 品番: 品番 } },
-                        {
-                            $addFields: {
-                                timeStampDate: {
-                                    $cond: {
-                                        if: { $eq: [{ $type: "$timeStamp" }, "string"] },
-                                        then: { $dateFromString: { dateString: "$timeStamp" } },
-                                        else: { $toDate: "$timeStamp" }
-                                    }
-                                }
-                            }
-                        },
-                        { $sort: { timeStampDate: -1 } },
-                        { $limit: 1 }
-                    ]).toArray();
-                    
-                    console.log(`📊 [NYUKO] Latest record:`, previousRecord[0] ? {
-                        timeStamp: previousRecord[0].timeStamp,
-                        physicalQuantity: previousRecord[0].physicalQuantity,
-                        lastQuantity: previousRecord[0].lastQuantity,
-                        action: previousRecord[0].action
-                    } : 'NO RECORD FOUND');
-                    
-                    const previousRunningQuantity = previousRecord.length > 0 ? previousRecord[0].runningQuantity : 0;
-                    const previousPhysicalQuantity = previousRecord.length > 0 ? previousRecord[0].physicalQuantity : 0;
-                    const newRunningQuantity = previousRunningQuantity + inputQuantity;
-                    
-                    console.log(`📊 [NYUKO] Previous: ${previousPhysicalQuantity}, Adding: ${inputQuantity}, New: ${newPhysicalQuantity}`);
+                    // EXISTING PRODUCT: Add to the latest inventory state from DB, not stale client values
+                    const newPhysicalQuantity = currentPhysicalQuantity + quantityToAdd;
+                    const newAvailableQuantity = newPhysicalQuantity - currentReservedQuantity;
+                    const newRunningQuantity = newPhysicalQuantity;
+
+                    console.log(`📊 [NYUKO] Previous: ${currentPhysicalQuantity}, Adding: ${quantityToAdd}, New: ${newPhysicalQuantity}`);
 
                     transactionRecord = {
                         背番号: 背番号,
@@ -4331,12 +4325,12 @@ app.post('/api/nyuko/submit', async (req, res) => {
                         Date: submissionTimestamp.toISOString().split('T')[0],
                         
                         physicalQuantity: newPhysicalQuantity,
-                        reservedQuantity: oldReservedQuantity,
+                        reservedQuantity: currentReservedQuantity,
                         availableQuantity: newAvailableQuantity,
                         runningQuantity: newRunningQuantity,
-                        lastQuantity: previousPhysicalQuantity, // Use previous physical quantity, not new
+                        lastQuantity: currentPhysicalQuantity,
                         
-                        action: `Warehouse Input (+${inputQuantity})`,
+                        action: `Warehouse Input (+${quantityToAdd})`,
                         source: `tablet 入庫 - ${submittedBy}`,
                         工場: factory
                     };
@@ -4344,9 +4338,9 @@ app.post('/api/nyuko/submit', async (req, res) => {
                     processedItems.push({
                         品番: 品番,
                         背番号: 背番号,
-                        oldQuantity: oldPhysicalQuantity,
+                        oldQuantity: currentPhysicalQuantity,
                         newQuantity: newPhysicalQuantity,
-                        inputQuantity: inputQuantity,
+                        inputQuantity: quantityToAdd,
                         isNew: false
                     });
                 }
@@ -4354,7 +4348,7 @@ app.post('/api/nyuko/submit', async (req, res) => {
                 // Insert the new record
                 await inventoryCollection.insertOne(transactionRecord);
 
-                console.log(`✅ Nyuko processed for ${品番}: ${inventoryExists ? `${oldPhysicalQuantity} → ${oldPhysicalQuantity + inputQuantity}` : `NEW → ${inputQuantity}`} (+${inputQuantity})`);
+                console.log(`✅ Nyuko processed for ${品番}: ${inventoryExists ? `${currentPhysicalQuantity} → ${currentPhysicalQuantity + quantityToAdd}` : `NEW → ${quantityToAdd}`} (+${quantityToAdd})`);
 
             } catch (itemError) {
                 console.error(`Error processing item ${product.品番}:`, itemError);
