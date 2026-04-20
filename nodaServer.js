@@ -88,6 +88,93 @@ const ACTIVE_PICKING_LINE_STATUSES = ['pending', 'in-progress'];
 const LINE_ITEM_STATUS_VALUES = ['pending', 'in-progress', 'paused', 'completed', 'cancelled'];
 const REQUEST_STATUS_VALUES = ['pending', 'in-progress', 'paused', 'completed', 'cancelled', 'partial-inventory', 'waiting-for-inventory'];
 
+function getRequestLineItems(request) {
+    return Array.isArray(request?.lineItems) ? request.lineItems : [];
+}
+
+function areAllRequestLineItemsCompleted(request) {
+    const lineItems = getRequestLineItems(request);
+    return lineItems.length > 0 && lineItems.every(item => item.status === 'completed');
+}
+
+function getRequestCompletionTimestamp(request) {
+    const completedTimes = getRequestLineItems(request)
+        .map(item => item?.completedAt ? new Date(item.completedAt) : null)
+        .filter(date => date instanceof Date && !Number.isNaN(date.getTime()))
+        .map(date => date.getTime());
+
+    if (completedTimes.length === 0) {
+        return request?.completedAt ? new Date(request.completedAt) : new Date();
+    }
+
+    return new Date(Math.max(...completedTimes));
+}
+
+function requestHasAnyShortfall(request, helperRecords = []) {
+    const lineItems = getRequestLineItems(request);
+    return lineItems.some(item => {
+        const shortfallQuantity = Number(item?.shortfallQuantity || 0);
+        return shortfallQuantity > 0 || item?.inventoryStatus === 'insufficient' || item?.inventoryStatus === 'none';
+    }) || helperRecords.some(record => Number(record?.shortfallQuantity || 0) > 0);
+}
+
+function getEffectiveRequestStatus(request) {
+    return areAllRequestLineItemsCompleted(request) ? 'completed' : request.status;
+}
+
+async function reconcileCompletedRequestIfNeeded(requestOrRequestNumber, reason = 'system') {
+    const collection = db.collection(process.env.COLLECTION_NAME);
+    const request = typeof requestOrRequestNumber === 'string'
+        ? await collection.findOne({ requestNumber: requestOrRequestNumber })
+        : requestOrRequestNumber;
+
+    if (!request) {
+        return null;
+    }
+
+    if (request.status === 'completed' || request.status === 'cancelled' || !areAllRequestLineItemsCompleted(request)) {
+        return request;
+    }
+
+    const now = new Date();
+    const completedAt = getRequestCompletionTimestamp(request);
+    const hasShortfall = requestHasAnyShortfall(request);
+
+    await collection.updateOne(
+        { _id: request._id },
+        {
+            $set: {
+                status: 'completed',
+                completedAt,
+                updatedAt: now,
+                hasShortfall
+            }
+        }
+    );
+
+    const updatedRequest = {
+        ...request,
+        status: 'completed',
+        completedAt,
+        updatedAt: now,
+        hasShortfall
+    };
+
+    console.log(`✅ Reconciled stale completed request ${updatedRequest.requestNumber} during ${reason}`);
+
+    if (globalPickingLock.activeRequestNumber === updatedRequest.requestNumber) {
+        globalPickingLock = {
+            isLocked: false,
+            activeRequestNumber: null,
+            startedBy: null,
+            startedAt: null
+        };
+        broadcastLockStatus();
+    }
+
+    return updatedRequest;
+}
+
 // 🔐 MUTEX: Prevent concurrent inventory transactions for the same item
 const inventoryTransactionLocks = new Map(); // key: "背番号" -> { locked: boolean, queue: [] }
 
@@ -95,10 +182,19 @@ const inventoryTransactionLocks = new Map(); // key: "背番号" -> { locked: bo
 async function checkGlobalPickingLock() {
     // Check database for any in-progress orders
     const collection = db.collection(process.env.COLLECTION_NAME);
-    const inProgressOrder = await collection.findOne(
+    let inProgressOrder = await collection.findOne(
         { status: 'in-progress' },
         { sort: { updatedAt: -1, startedAt: -1, createdAt: -1 } }
     );
+
+    while (inProgressOrder && areAllRequestLineItemsCompleted(inProgressOrder)) {
+        await reconcileCompletedRequestIfNeeded(inProgressOrder, 'lock status check');
+        inProgressOrder = await collection.findOne(
+            { status: 'in-progress' },
+            { sort: { updatedAt: -1, startedAt: -1, createdAt: -1 } }
+        );
+    }
+
     const previousRequestNumber = globalPickingLock.activeRequestNumber;
     const nextLockState = inProgressOrder
         ? {
@@ -648,7 +744,8 @@ async function getLatestInventoryMapByBackNumbers(backNumbers) {
 
 async function buildPickingRequestDetail(requestNumber) {
     const collection = db.collection(process.env.COLLECTION_NAME);
-    const request = await collection.findOne({ requestNumber });
+    const baseRequest = await collection.findOne({ requestNumber });
+    const request = await reconcileCompletedRequestIfNeeded(baseRequest, 'picking detail build');
 
     if (!request) {
         return null;
@@ -1303,7 +1400,8 @@ app.get('/api/picking-requests/:requestNumber', async (req, res) => {
     try {
         const { requestNumber } = req.params;
         const collection = db.collection(process.env.COLLECTION_NAME);
-        const request = await collection.findOne({ requestNumber });
+        const baseRequest = await collection.findOne({ requestNumber });
+        const request = await reconcileCompletedRequestIfNeeded(baseRequest, 'request detail fetch');
         
         if (!request) {
             return res.status(404).json({ error: 'Picking request not found' });
@@ -1342,7 +1440,7 @@ function buildPickingRequestSummary(request) {
     return {
         requestNumber: request.requestNumber,
         totalQuantity,
-        status: request.status,
+        status: getEffectiveRequestStatus(request),
         createdAt: request.createdAt,
         itemCount: totalItems,
         completedItems,
@@ -1867,15 +1965,19 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
             console.warn(`   ✅ Corrected back to: picked=${lineItem.quantity}, remaining=0, shortfall=0, complete=true`);
         }
         
-        // Check if all line items are completed based on HELPER COLLECTION
+        // Check if all line items are completed based on HELPER COLLECTION,
+        // but fall back to the main request document if helper records are stale or incomplete.
         const allHelperRecords = await helperCollection.find({ requestNumber }).toArray();
+        const refreshedRequest = await collection.findOne({ requestNumber });
         const totalLineItemsInRequest = request.lineItems ? request.lineItems.length : 0;
         const allHelperRecordsComplete = allHelperRecords.every(h => h.pickingComplete);
-        const anyWithShortfall = allHelperRecords.some(h => h.shortfallQuantity > 0);
+        const allRequestLineItemsCompleted = areAllRequestLineItemsCompleted(refreshedRequest || request);
+        const anyWithShortfall = requestHasAnyShortfall(refreshedRequest || request, allHelperRecords);
         
         // CRITICAL: Also check that we have helper records for ALL line items in the request
         const allLineItemsHaveHelperRecords = allHelperRecords.length >= totalLineItemsInRequest;
-        const allCompleted = allHelperRecordsComplete && allLineItemsHaveHelperRecords;
+        const allCompletedFromHelpers = allHelperRecordsComplete && allLineItemsHaveHelperRecords;
+        const allCompleted = allCompletedFromHelpers || allRequestLineItemsCompleted;
         
         console.log(`🔍 Completion check using HELPER COLLECTION:`);
         console.log(`   Total line items in request: ${totalLineItemsInRequest}`);
@@ -1883,6 +1985,7 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         console.log(`   Completed helper records: ${allHelperRecords.filter(h => h.pickingComplete).length}`);
         console.log(`   All helper records complete: ${allHelperRecordsComplete}`);
         console.log(`   All line items have helper records: ${allLineItemsHaveHelperRecords}`);
+        console.log(`   All request line items completed: ${allRequestLineItemsCompleted}`);
         
         console.log(`🔍 Request completion check:`);
         console.log(`   All items completed: ${allCompleted}`);
@@ -1892,13 +1995,14 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
             // Complete request when ALL line items are done - regardless of shortfalls
             const completionStatus = anyWithShortfall ? 'completed-with-shortfall' : 'completed';
             console.log(`✅ All items completed - marking request as '${completionStatus}'`);
+            const completionTimestamp = getRequestCompletionTimestamp(refreshedRequest || request);
             
             await collection.updateOne(
                 { requestNumber },
                 {
                     $set: {
                         status: 'completed',
-                        completedAt: now,
+                        completedAt: completionTimestamp,
                         updatedAt: now,
                         hasShortfall: anyWithShortfall
                     }
@@ -1927,7 +2031,7 @@ async function completeLineItem(requestNumber, lineNumber, completedBy) {
         
         return { 
             allCompleted, 
-            request: request,
+            request: refreshedRequest || request,
             fullyCompleted: true,
             deducted: actualDeductQuantity
         };
