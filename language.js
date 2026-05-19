@@ -36,6 +36,11 @@ const translations = {
         'paused-reminder-title': '一時停止中の依頼があります',
         'paused-reminder-desc': '再開待ちの依頼です。タップすると詳細を開けます。',
         'close-button': '閉じる',
+        'help-title': 'ヘルプ',
+        'help-select-problem': '問題を選択して解決方法を表示します。',
+        'help-problem-label': '問題',
+        'help-translating': '翻訳中...',
+        'done-button': '完了',
 
         // Picking Detail Screen
         'picking-detail': 'ピッキング詳細',
@@ -265,6 +270,11 @@ const translations = {
         'paused-reminder-title': 'Paused Requests Need Attention',
         'paused-reminder-desc': 'These requests are waiting to be resumed. Tap one to open its details.',
         'close-button': 'Close',
+        'help-title': 'Help',
+        'help-select-problem': 'Select a problem to view the fix.',
+        'help-problem-label': 'Problem',
+        'help-translating': 'Translating...',
+        'done-button': 'Done.',
 
         // Picking Detail Screen
         'picking-detail': 'Picking Details',
@@ -465,6 +475,15 @@ const translations = {
 // Current language state (default: Japanese)
 let currentLanguage = 'ja';
 
+function syncLanguageState() {
+    if (typeof window !== 'undefined') {
+        window.currentLanguage = currentLanguage;
+        window.dispatchEvent(new CustomEvent('languagechange', {
+            detail: { language: currentLanguage }
+        }));
+    }
+}
+
 // Initialize language from localStorage or default
 function initializeLanguage() {
     const savedLanguage = localStorage.getItem('preferredLanguage');
@@ -473,6 +492,7 @@ function initializeLanguage() {
     }
     applyLanguage();
     updateLanguageDropdown();
+    syncLanguageState();
 }
 
 // Apply language to all elements with data-i18n attribute
@@ -499,6 +519,7 @@ function switchLanguage(lang) {
         localStorage.setItem('preferredLanguage', lang);
         applyLanguage();
         updateLanguageDropdown();
+        syncLanguageState();
     }
 }
 

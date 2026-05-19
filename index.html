@@ -674,6 +674,56 @@
             </div>
         </footer>
     </div>
+    <button
+        id="helpFloatingButton"
+        type="button"
+        onclick="openHelpMenu()"
+        class="fixed bottom-6 right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-blue-600 text-white shadow-lg transition-colors hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-200"
+        title="Help"
+        aria-label="Open help">
+        <i class="fas fa-circle-question text-2xl"></i>
+    </button>
+
+    <div id="helpTopicsModal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4" onclick="closeHelpMenu()">
+        <div class="w-full max-w-xl rounded-2xl bg-white shadow-2xl overflow-hidden" onclick="event.stopPropagation()">
+            <div class="flex items-start justify-between border-b border-gray-200 px-6 py-5">
+                <div>
+                    <h3 class="text-xl font-bold text-gray-900" data-i18n="help-title">Help</h3>
+                    <p class="mt-1 text-sm text-gray-600" data-i18n="help-select-problem">Select a problem to view the fix.</p>
+                </div>
+                <button type="button" onclick="closeHelpMenu()" class="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-gray-500 transition-colors hover:bg-gray-200 hover:text-gray-700" aria-label="Close help list">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div id="helpTopicsList" class="space-y-3 px-6 py-5">
+            </div>
+        </div>
+    </div>
+
+    <div id="helpDetailModal" class="hidden fixed inset-0 bg-black bg-opacity-60 z-50 flex items-center justify-center p-4" onclick="closeHelpDetail()">
+        <div class="w-full max-w-3xl rounded-2xl bg-white shadow-2xl overflow-hidden" onclick="event.stopPropagation()">
+            <div class="flex items-start justify-between border-b border-gray-200 px-6 py-5">
+                <div>
+                    <p class="text-sm font-semibold uppercase tracking-wide text-blue-600" data-i18n="help-title">Help</p>
+                    <h3 id="helpDetailTitle" class="mt-1 text-2xl font-bold text-gray-900"></h3>
+                </div>
+                <button type="button" onclick="closeHelpDetail()" class="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-gray-500 transition-colors hover:bg-gray-200 hover:text-gray-700" aria-label="Close help detail">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="space-y-5 px-6 py-6">
+                <p id="helpDetailDescription" class="text-base leading-7 text-gray-700"></p>
+                <div class="overflow-hidden rounded-2xl border border-gray-200 bg-gray-50 p-3">
+                    <img id="helpDetailImage" src="" alt="" class="max-h-[60vh] w-full rounded-xl object-contain bg-white">
+                </div>
+            </div>
+            <div class="flex justify-end border-t border-gray-200 bg-gray-50 px-6 py-4">
+                <button type="button" onclick="closeHelpDetail()" class="rounded-lg bg-blue-600 px-5 py-3 font-medium text-white transition-colors hover:bg-blue-700" data-i18n="done-button">
+                    Done.
+                </button>
+            </div>
+        </div>
+    </div>
 
     <!-- Toast Notification -->
     <div id="toast" class="hidden fixed top-4 right-4 text-white px-6 py-3 rounded-lg shadow-lg z-50 transform transition-all duration-300">

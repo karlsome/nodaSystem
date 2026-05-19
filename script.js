@@ -30,6 +30,22 @@ let allRequestsPagination = {
 };
 let pausedReminderIntervalId = null;
 const PAUSED_REQUEST_REMINDER_INTERVAL_MS = 30000;
+const HELP_TOPICS = [
+    {
+        id: 'barcode-scanner-not-connecting',
+        sourceLanguage: 'en',
+        title: 'Barcode scanner not connecting to tablet',
+        description: 'How to fix: scan this barcode using the barcode scanner.',
+        imageUrl: 'https://firebasestorage.googleapis.com/v0/b/imagestorage-e7ed3.firebasestorage.app/o/helpFiles%2F%E9%87%8E%E7%94%B0%2FnodaScanner.jpg?alt=media&token=96dd037e-760f-48de-80b7-4f06249a80a6'
+    }
+];
+const HELP_TRANSLATION_STORAGE_KEY = 'nodaSystem_helpTranslationCache_v1';
+const HELP_TRANSLATION_TARGET_LANGUAGES = ['ja', 'en'];
+const helpTranslationCache = new Map();
+let activeHelpTopicId = null;
+let helpListRenderToken = 0;
+let helpDetailRenderToken = 0;
+let isPausedReminderSuppressedForHelp = false;
 
 // API base URL - change this to your server URL
 //const API_BASE_URL = 'http://localhost:3001/api';
@@ -59,6 +75,8 @@ function initializeApp() {
         initializeLanguage();
     }
 
+    initializeHelpTranslationCache();
+
     updateCurrentTime();
     setInterval(updateCurrentTime, 1000); // Update time every second
 
@@ -80,6 +98,364 @@ function initializeApp() {
 
     startPausedRequestsReminderTimer();
 }
+
+function syncHelpModalBodyScroll() {
+    const helpTopicsModal = document.getElementById('helpTopicsModal');
+    const helpDetailModal = document.getElementById('helpDetailModal');
+    const isHelpModalOpen = Boolean(helpTopicsModal && !helpTopicsModal.classList.contains('hidden')) ||
+        Boolean(helpDetailModal && !helpDetailModal.classList.contains('hidden'));
+
+    if (!isHelpModalOpen) {
+        document.body.style.overflow = '';
+    } else {
+        document.body.style.overflow = 'hidden';
+    }
+}
+
+function setPausedReminderSuppressedForHelp(isSuppressed) {
+    isPausedReminderSuppressedForHelp = isSuppressed;
+
+    if (isSuppressed) {
+        closePausedRequestsReminderModal();
+    }
+}
+
+function resumePausedReminderAfterHelpIfNeeded() {
+    const helpTopicsModal = document.getElementById('helpTopicsModal');
+    const helpDetailModal = document.getElementById('helpDetailModal');
+    const isAnyHelpModalOpen = Boolean(helpTopicsModal && !helpTopicsModal.classList.contains('hidden')) ||
+        Boolean(helpDetailModal && !helpDetailModal.classList.contains('hidden'));
+
+    if (isAnyHelpModalOpen) {
+        return;
+    }
+
+    setPausedReminderSuppressedForHelp(false);
+    void maybeShowPausedRequestsReminder();
+}
+
+function getCurrentAppLanguage() {
+    return window.currentLanguage || document.getElementById('languageSelect')?.value || 'ja';
+}
+
+function getHelpText(key) {
+    const translate = window.t || ((translationKey) => translationKey);
+    return translate(key);
+}
+
+function buildHelpTranslationCacheKey(text, fromLang, toLang) {
+    return `${fromLang}|${toLang}|${text}`;
+}
+
+function getExpectedHelpTranslationCacheKeys() {
+    const validKeys = new Set();
+
+    HELP_TOPICS.forEach(topic => {
+        const sourceLanguage = topic.sourceLanguage || 'en';
+
+        HELP_TRANSLATION_TARGET_LANGUAGES.forEach(targetLanguage => {
+            if (targetLanguage === sourceLanguage) {
+                return;
+            }
+
+            validKeys.add(buildHelpTranslationCacheKey(topic.title, sourceLanguage, targetLanguage));
+            validKeys.add(buildHelpTranslationCacheKey(topic.description, sourceLanguage, targetLanguage));
+        });
+    });
+
+    return validKeys;
+}
+
+function persistHelpTranslationCache() {
+    if (typeof(Storage) === 'undefined') {
+        return;
+    }
+
+    try {
+        const persistedTranslations = {};
+
+        helpTranslationCache.forEach((value, key) => {
+            if (typeof value === 'string') {
+                persistedTranslations[key] = value;
+            }
+        });
+
+        localStorage.setItem(HELP_TRANSLATION_STORAGE_KEY, JSON.stringify({
+            translations: persistedTranslations
+        }));
+    } catch (error) {
+        console.error('Error persisting help translation cache:', error);
+    }
+}
+
+function pruneHelpTranslationCache() {
+    const validKeys = getExpectedHelpTranslationCacheKeys();
+    let cacheChanged = false;
+
+    helpTranslationCache.forEach((value, key) => {
+        if (typeof value !== 'string') {
+            return;
+        }
+
+        if (!validKeys.has(key)) {
+            helpTranslationCache.delete(key);
+            cacheChanged = true;
+        }
+    });
+
+    if (cacheChanged) {
+        persistHelpTranslationCache();
+    }
+}
+
+function initializeHelpTranslationCache() {
+    if (typeof(Storage) === 'undefined') {
+        return;
+    }
+
+    try {
+        const rawCache = localStorage.getItem(HELP_TRANSLATION_STORAGE_KEY);
+        if (!rawCache) {
+            return;
+        }
+
+        const parsedCache = JSON.parse(rawCache);
+        const translations = parsedCache?.translations;
+
+        if (!translations || typeof translations !== 'object') {
+            return;
+        }
+
+        Object.entries(translations).forEach(([key, value]) => {
+            if (typeof value === 'string') {
+                helpTranslationCache.set(key, value);
+            }
+        });
+
+        pruneHelpTranslationCache();
+    } catch (error) {
+        console.error('Error loading help translation cache:', error);
+    }
+}
+
+async function translateHelpText(text, fromLang, toLang) {
+    if (!text || !fromLang || !toLang || fromLang === toLang) {
+        return text;
+    }
+
+    const cacheKey = buildHelpTranslationCacheKey(text, fromLang, toLang);
+    if (helpTranslationCache.has(cacheKey)) {
+        return await helpTranslationCache.get(cacheKey);
+    }
+
+    const requestPromise = (async () => {
+        try {
+            const response = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${fromLang}|${toLang}`);
+            if (!response.ok) {
+                throw new Error(`Translation request failed with status ${response.status}`);
+            }
+
+            const result = await response.json();
+            const translatedText = result?.responseData?.translatedText;
+            if (!translatedText) {
+                throw new Error('Translation response missing translated text');
+            }
+
+            helpTranslationCache.set(cacheKey, translatedText);
+            persistHelpTranslationCache();
+            return translatedText;
+        } catch (error) {
+            helpTranslationCache.delete(cacheKey);
+            console.error('Error translating help text:', error);
+            return text;
+        }
+    })();
+
+    helpTranslationCache.set(cacheKey, requestPromise);
+    return await requestPromise;
+}
+
+async function getLocalizedHelpTopic(topic, targetLanguage) {
+    const sourceLanguage = topic.sourceLanguage || 'en';
+    const [localizedTitle, localizedDescription] = await Promise.all([
+        translateHelpText(topic.title, sourceLanguage, targetLanguage),
+        translateHelpText(topic.description, sourceLanguage, targetLanguage)
+    ]);
+
+    return {
+        ...topic,
+        localizedTitle,
+        localizedDescription
+    };
+}
+
+function renderHelpTopicsLoading() {
+    const listContainer = document.getElementById('helpTopicsList');
+    if (!listContainer) {
+        return;
+    }
+
+    listContainer.innerHTML = `
+        <div class="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-5 text-center text-sm text-gray-600">
+            ${getHelpText('loading')}
+        </div>
+    `;
+}
+
+async function renderHelpTopics() {
+    const listContainer = document.getElementById('helpTopicsList');
+    if (!listContainer) {
+        return;
+    }
+
+    const renderToken = ++helpListRenderToken;
+    renderHelpTopicsLoading();
+
+    const currentLanguage = getCurrentAppLanguage();
+    const localizedTopics = await Promise.all(HELP_TOPICS.map(topic => getLocalizedHelpTopic(topic, currentLanguage)));
+
+    if (renderToken !== helpListRenderToken) {
+        return;
+    }
+
+    listContainer.innerHTML = '';
+
+    localizedTopics.forEach(topic => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'w-full rounded-2xl border border-blue-100 bg-blue-50 px-4 py-4 text-left transition-colors hover:border-blue-300 hover:bg-blue-100';
+        button.onclick = () => openHelpDetail(topic.id);
+        button.innerHTML = `
+            <div class="flex items-start justify-between gap-4">
+                <div>
+                    <p class="text-sm font-semibold uppercase tracking-wide text-blue-600">${getHelpText('help-problem-label')}</p>
+                    <h4 class="mt-1 text-lg font-semibold text-gray-900">${topic.localizedTitle}</h4>
+                </div>
+                <i class="fas fa-chevron-right pt-1 text-blue-500"></i>
+            </div>
+        `;
+
+        listContainer.appendChild(button);
+    });
+}
+
+function openHelpMenu() {
+    const modal = document.getElementById('helpTopicsModal');
+    if (!modal) {
+        return;
+    }
+
+    activeHelpTopicId = null;
+    setPausedReminderSuppressedForHelp(true);
+    modal.classList.remove('hidden');
+    syncHelpModalBodyScroll();
+    void renderHelpTopics();
+}
+
+function closeHelpMenu(options = {}) {
+    const { resumePausedReminder = true } = options;
+    const modal = document.getElementById('helpTopicsModal');
+    if (!modal) {
+        return;
+    }
+
+    helpListRenderToken += 1;
+    modal.classList.add('hidden');
+    syncHelpModalBodyScroll();
+
+    if (resumePausedReminder) {
+        resumePausedReminderAfterHelpIfNeeded();
+    }
+}
+
+function renderHelpDetailLoading(topic) {
+    const titleElement = document.getElementById('helpDetailTitle');
+    const descriptionElement = document.getElementById('helpDetailDescription');
+    const imageElement = document.getElementById('helpDetailImage');
+
+    if (!titleElement || !descriptionElement || !imageElement || !topic) {
+        return;
+    }
+
+    titleElement.textContent = topic.title;
+    descriptionElement.textContent = getHelpText('help-translating');
+    imageElement.src = topic.imageUrl;
+    imageElement.alt = topic.title;
+}
+
+async function renderHelpDetail(topicId) {
+    const topic = HELP_TOPICS.find(item => item.id === topicId);
+    const titleElement = document.getElementById('helpDetailTitle');
+    const descriptionElement = document.getElementById('helpDetailDescription');
+    const imageElement = document.getElementById('helpDetailImage');
+
+    if (!topic || !titleElement || !descriptionElement || !imageElement) {
+        return;
+    }
+
+    const renderToken = ++helpDetailRenderToken;
+    const currentLanguage = getCurrentAppLanguage();
+    activeHelpTopicId = topicId;
+
+    renderHelpDetailLoading(topic);
+
+    const localizedTopic = await getLocalizedHelpTopic(topic, currentLanguage);
+    if (renderToken !== helpDetailRenderToken || activeHelpTopicId !== topicId) {
+        return;
+    }
+
+    titleElement.textContent = localizedTopic.localizedTitle;
+    descriptionElement.textContent = localizedTopic.localizedDescription;
+    imageElement.alt = localizedTopic.localizedTitle;
+}
+
+function openHelpDetail(topicId) {
+    const modal = document.getElementById('helpDetailModal');
+    if (!modal) {
+        return;
+    }
+
+    setPausedReminderSuppressedForHelp(true);
+    closeHelpMenu({ resumePausedReminder: false });
+    modal.classList.remove('hidden');
+    syncHelpModalBodyScroll();
+    void renderHelpDetail(topicId);
+}
+
+function closeHelpDetail() {
+    const modal = document.getElementById('helpDetailModal');
+    const imageElement = document.getElementById('helpDetailImage');
+    if (!modal) {
+        return;
+    }
+
+    activeHelpTopicId = null;
+    helpDetailRenderToken += 1;
+    modal.classList.add('hidden');
+
+    if (imageElement) {
+        imageElement.src = '';
+        imageElement.alt = '';
+    }
+
+    syncHelpModalBodyScroll();
+    resumePausedReminderAfterHelpIfNeeded();
+}
+
+function handleHelpLanguageChange() {
+    const helpTopicsModal = document.getElementById('helpTopicsModal');
+    const helpDetailModal = document.getElementById('helpDetailModal');
+
+    if (helpTopicsModal && !helpTopicsModal.classList.contains('hidden')) {
+        void renderHelpTopics();
+    }
+
+    if (helpDetailModal && !helpDetailModal.classList.contains('hidden') && activeHelpTopicId) {
+        void renderHelpDetail(activeHelpTopicId);
+    }
+}
+
+window.addEventListener('languagechange', handleHelpLanguageChange);
 
 // Extract factory location from URL parameter
 function extractFactoryFromURL() {
@@ -600,6 +976,10 @@ function hasBlockingModalOpen() {
 
 function isPausedReminderEligible() {
     if (!currentWorker) {
+        return false;
+    }
+
+    if (isPausedReminderSuppressedForHelp) {
         return false;
     }
 
@@ -3522,6 +3902,10 @@ window.refreshPickingDetail = refreshPickingDetail;
 window.switchPickingDetailView = switchPickingDetailView;
 window.closePausedRequestsReminderModal = closePausedRequestsReminderModal;
 window.openPausedReminderRequest = openPausedReminderRequest;
+window.openHelpMenu = openHelpMenu;
+window.closeHelpMenu = closeHelpMenu;
+window.openHelpDetail = openHelpDetail;
+window.closeHelpDetail = closeHelpDetail;
 window.completeAndBackToList = completeAndBackToList;
 window.clearInventoryList = clearInventoryList;
 window.submitInventoryCount = submitInventoryCount;
