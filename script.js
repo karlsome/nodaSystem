@@ -4403,12 +4403,6 @@ function scheduleScanAssistCameraFrame(delayMs = 0, beforeResume = null) {
 }
 
 function triggerScanAssistCameraSuccessFeedback() {
-    const successSound = document.getElementById('scanAssistSuccessSound');
-    if (successSound) {
-        successSound.currentTime = 0;
-        successSound.play().catch(error => console.log('Scan assist audio play failed:', error));
-    }
-
     if (scanAssistState.cameraSuccessFlashTimeoutId) {
         clearTimeout(scanAssistState.cameraSuccessFlashTimeoutId);
         scanAssistState.cameraSuccessFlashTimeoutId = null;
