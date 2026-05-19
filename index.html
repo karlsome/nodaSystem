@@ -322,6 +322,10 @@
                             <i class="fas fa-camera text-base"></i>
                             <span data-i18n="scan-shortcut-button">Scan</span>
                         </button>
+                        <button id="inventoryManualShortcutBtn" onclick="openScanAssistManualMode('inventory')" class="hidden inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700">
+                            <i class="fas fa-list text-base"></i>
+                            <span data-i18n="manual-shortcut-button">List</span>
+                        </button>
                         <button onclick="openScanAssistChoice('inventory')" class="inline-flex items-center gap-2 rounded-xl border border-blue-200 bg-white px-4 py-3 text-sm font-semibold text-blue-700 shadow-sm transition-colors hover:bg-blue-50">
                             <i class="fas fa-route text-base"></i>
                             <span data-i18n="scan-fallback-button">代替入力</span>
@@ -560,6 +564,10 @@
                             <i class="fas fa-camera text-base"></i>
                             <span data-i18n="scan-shortcut-button">Scan</span>
                         </button>
+                        <button id="nyukoManualShortcutBtn" onclick="openScanAssistManualMode('nyuko')" class="hidden inline-flex items-center gap-2 rounded-xl bg-purple-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-purple-700">
+                            <i class="fas fa-list text-base"></i>
+                            <span data-i18n="manual-shortcut-button">List</span>
+                        </button>
                         <button onclick="openScanAssistChoice('nyuko')" class="inline-flex items-center gap-2 rounded-xl border border-purple-200 bg-white px-4 py-3 text-sm font-semibold text-purple-700 shadow-sm transition-colors hover:bg-purple-50">
                             <i class="fas fa-route text-base"></i>
                             <span data-i18n="scan-fallback-button">代替入力</span>
@@ -791,7 +799,7 @@
                         <button type="button" onclick="closeScanAssistSession()" class="rounded-xl bg-gray-100 px-5 py-3 text-sm font-semibold text-gray-700 transition-colors hover:bg-gray-200">
                             <span data-i18n="cancel-button">キャンセル</span>
                         </button>
-                        <button id="scanAssistManualReviewBtn" type="button" onclick="openScanAssistSummary()" class="rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300">
+                        <button id="scanAssistManualReviewBtn" type="button" onclick="applyScanAssistManualChanges()" class="rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300">
                             <span id="scanAssistManualReviewText"></span>
                         </button>
                     </div>

@@ -49,8 +49,8 @@ let isPausedReminderSuppressedForHelp = false;
 
 // API base URL - change this to your server URL
 //const API_BASE_URL = 'http://localhost:3001/api';
-//const API_BASE_URL = 'http://192.168.0.186:3001/api';
-const API_BASE_URL = 'https://nodasystem.onrender.com/api';
+const API_BASE_URL = 'http://192.168.0.186:3001/api';
+//const API_BASE_URL = 'https://nodasystem.onrender.com/api';
 
 // Debug localStorage on page load
 console.log('🔄 Page loaded, checking localStorage availability...');
@@ -4007,12 +4007,12 @@ function getScanAssistText(key, values = []) {
             en: 'Manual Entry'
         },
         manualOptionDescriptionNyuko: {
-            ja: 'masterDB一覧から背番号を検索し、箱数をまとめて入力します。',
-            en: 'Search the masterDB list by back number and enter box counts in bulk.'
+            ja: 'masterDB一覧から背番号を検索し、必要な箱数を現在の一覧へ追加します。',
+            en: 'Search the masterDB list by back number and add the required box counts into the current list.'
         },
         manualOptionDescriptionInventory: {
-            ja: '現在庫一覧をもとに箱数を調整し、変更内容をまとめて送信します。',
-            en: 'Adjust box counts from the current inventory list and submit the changes in one batch.'
+            ja: '現在庫一覧をもとに箱数を調整し、変更内容を現在の一覧へ追加します。',
+            en: 'Adjust box counts from the current inventory list and add the changes into the current list.'
         },
         cameraDescription: {
             ja: 'QRコードをカメラ中央に合わせると自動で読み取ります。',
@@ -4035,12 +4035,12 @@ function getScanAssistText(key, values = []) {
             en: 'Unable to start the camera. Check the browser camera permission.'
         },
         manualDescriptionNyuko: {
-            ja: 'masterDB一覧を背番号順で表示します。必要な行だけ箱数を増減して内容を確認してください。',
-            en: 'The masterDB list is shown in back-number order. Adjust only the required rows, then review before sending.'
+            ja: 'masterDB一覧を背番号順で表示します。必要な行だけ箱数を増減して、現在の一覧へ追加してください。',
+            en: 'The masterDB list is shown in back-number order. Adjust only the required rows, then add them into the current list.'
         },
         manualDescriptionInventory: {
-            ja: '現在庫一覧を背番号順で表示します。初期値は現在の箱数です。変更内容を確認して送信してください。',
-            en: 'The current inventory list is shown in back-number order. Rows start from the current box count. Review the changes before sending.'
+            ja: '現在庫一覧を背番号順で表示します。初期値は現在の箱数です。変更内容を現在の一覧へ追加してください。',
+            en: 'The current inventory list is shown in back-number order. Rows start from the current box count. Add the changes into the current list.'
         },
         manualLoading: {
             ja: '一覧を読み込んでいます...',
@@ -4055,8 +4055,20 @@ function getScanAssistText(key, values = []) {
             en: 'No items available to display.'
         },
         reviewButton: {
-            ja: '内容確認 ({0})',
-            en: 'Review ({0})'
+            ja: '一覧へ追加 ({0})',
+            en: 'Add to List ({0})'
+        },
+        noNyukoChanges: {
+            ja: '一覧へ追加する入庫変更がありません。',
+            en: 'There are no receiving changes to add to the list.'
+        },
+        noInventoryChanges: {
+            ja: '一覧へ追加する棚卸し変更がありません。',
+            en: 'There are no inventory changes to add to the list.'
+        },
+        addedToListToast: {
+            ja: '{0}件を一覧に追加しました。',
+            en: 'Added {0} item(s) to the list.'
         },
         noNyukoSummary: {
             ja: '入力された箱数がありません。',
@@ -4144,13 +4156,19 @@ function getScanAssistContext(contextId = currentScreen) {
     return null;
 }
 
-function getScanAssistShortcutButtonId(contextId) {
+function getScanAssistShortcutButtonIds(contextId) {
     if (contextId === 'inventory') {
-        return 'inventoryScanShortcutBtn';
+        return {
+            camera: 'inventoryScanShortcutBtn',
+            manual: 'inventoryManualShortcutBtn'
+        };
     }
 
     if (contextId === 'nyuko') {
-        return 'nyukoScanShortcutBtn';
+        return {
+            camera: 'nyukoScanShortcutBtn',
+            manual: 'nyukoManualShortcutBtn'
+        };
     }
 
     return null;
@@ -4158,15 +4176,20 @@ function getScanAssistShortcutButtonId(contextId) {
 
 function updateScanAssistShortcutButtons() {
     ['inventory', 'nyuko'].forEach(contextId => {
-        const buttonId = getScanAssistShortcutButtonId(contextId);
-        const button = buttonId ? document.getElementById(buttonId) : null;
-        if (!button) {
-            return;
-        }
+        const buttonIds = getScanAssistShortcutButtonIds(contextId);
+        const selectedMode = scanAssistModeByContext[contextId];
 
-        const shouldShow = scanAssistModeByContext[contextId] === 'camera';
-        button.classList.toggle('hidden', !shouldShow);
-        button.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
+        ['camera', 'manual'].forEach(mode => {
+            const buttonId = buttonIds?.[mode];
+            const button = buttonId ? document.getElementById(buttonId) : null;
+            if (!button) {
+                return;
+            }
+
+            const shouldShow = selectedMode === mode;
+            button.classList.toggle('hidden', !shouldShow);
+            button.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
+        });
     });
 }
 
@@ -4270,8 +4293,8 @@ async function openScanAssistCameraMode(contextId = scanAssistState.context) {
     await startScanAssistCamera();
 }
 
-async function openScanAssistManualMode() {
-    const context = getScanAssistContext(scanAssistState.context);
+async function openScanAssistManualMode(contextId = scanAssistState.context) {
+    const context = getScanAssistContext(contextId);
     if (!context) {
         return;
     }
@@ -4586,6 +4609,14 @@ function getScanAssistDraftBoxCount(productNumber, fallbackValue = 0) {
     return Math.max(0, Number(scanAssistState.draftBoxCounts[productNumber]) || 0);
 }
 
+function getScanAssistInitialBoxCount(productNumber, fallbackValue = 0) {
+    if (scanAssistState.initialBoxCounts[productNumber] === undefined) {
+        return Math.max(0, Number(fallbackValue) || 0);
+    }
+
+    return Math.max(0, Number(scanAssistState.initialBoxCounts[productNumber]) || 0);
+}
+
 function handleScanAssistSearchInput(value) {
     scanAssistState.searchTerm = String(value || '').trim().toLowerCase();
     renderScanAssistManualList();
@@ -4731,6 +4762,55 @@ function adjustScanAssistManualCount(encodedProductNumber, delta) {
     renderScanAssistManualList();
 }
 
+function buildNyukoManualPendingItems() {
+    return scanAssistState.manualItems.map(item => {
+        const initialBoxes = getScanAssistInitialBoxCount(item.品番, 0);
+        const targetBoxes = getScanAssistDraftBoxCount(item.品番, initialBoxes);
+
+        if (targetBoxes === initialBoxes) {
+            return null;
+        }
+
+        return {
+            ...item,
+            initialBoxes,
+            targetBoxes,
+            inputQuantity: targetBoxes * item.収容数
+        };
+    }).filter(Boolean);
+}
+
+function buildTanaoroshiManualPendingItems() {
+    return scanAssistState.manualItems.map(item => {
+        const initialBoxes = getScanAssistInitialBoxCount(item.品番, item.currentBoxQuantity);
+        const targetBoxes = getScanAssistDraftBoxCount(item.品番, initialBoxes);
+
+        if (targetBoxes === initialBoxes) {
+            return null;
+        }
+
+        return {
+            ...item,
+            initialBoxes,
+            targetBoxes,
+            newPhysicalQuantity: targetBoxes * item.収容数,
+            difference: (targetBoxes * item.収容数) - (Math.max(0, Number(item.currentPhysicalQuantity) || 0))
+        };
+    }).filter(Boolean);
+}
+
+function getScanAssistManualPendingItems() {
+    if (scanAssistState.context === 'nyuko') {
+        return buildNyukoManualPendingItems();
+    }
+
+    if (scanAssistState.context === 'inventory') {
+        return buildTanaoroshiManualPendingItems();
+    }
+
+    return [];
+}
+
 function buildNyukoManualSummaryItems() {
     return scanAssistState.manualItems.map(item => {
         const inputBoxes = getScanAssistDraftBoxCount(item.品番, 0);
@@ -4818,10 +4898,173 @@ function getScanAssistSummaryItems() {
 function updateScanAssistReviewButton() {
     const reviewButton = document.getElementById('scanAssistManualReviewBtn');
     const reviewText = document.getElementById('scanAssistManualReviewText');
-    const summaryItems = getScanAssistSummaryItems();
+    const pendingItems = getScanAssistManualPendingItems();
 
-    reviewButton.disabled = summaryItems.length === 0;
-    reviewText.textContent = getScanAssistText('reviewButton', [summaryItems.length]);
+    reviewButton.disabled = pendingItems.length === 0;
+    reviewText.textContent = getScanAssistText('reviewButton', [pendingItems.length]);
+}
+
+function buildNyukoManualAppliedProductData(item) {
+    const cachedProductData = getNyukoCachedProductData(item.品番);
+
+    return {
+        品番: item.品番,
+        品名: cachedProductData?.品名 || item.品名 || '',
+        背番号: cachedProductData?.背番号 || item.背番号 || '',
+        収容数: item.収容数 || cachedProductData?.収容数 || 0,
+        imageURL: cachedProductData?.imageURL || item.imageURL || '',
+        inventoryExists: Boolean(cachedProductData?.inventoryExists),
+        currentPhysicalQuantity: Math.max(0, Number(cachedProductData?.currentPhysicalQuantity) || 0),
+        currentReservedQuantity: Math.max(0, Number(cachedProductData?.currentReservedQuantity) || 0)
+    };
+}
+
+function applyNyukoManualChanges(pendingItems) {
+    let lastChangedProductNumber = null;
+
+    pendingItems.forEach(item => {
+        const existingIndex = nyukoInputProducts.findIndex(product => product.品番 === item.品番);
+
+        if (item.targetBoxes <= 0) {
+            if (existingIndex !== -1) {
+                nyukoInputProducts.splice(existingIndex, 1);
+                lastChangedProductNumber = item.品番;
+            }
+            return;
+        }
+
+        const productData = buildNyukoManualAppliedProductData(item);
+        const nextProduct = {
+            品番: productData.品番,
+            品名: productData.品名,
+            背番号: productData.背番号,
+            収容数: productData.収容数,
+            imageURL: productData.imageURL,
+            inventoryExists: productData.inventoryExists,
+            oldPhysicalQuantity: productData.currentPhysicalQuantity,
+            oldReservedQuantity: productData.currentReservedQuantity,
+            inputQuantity: item.targetBoxes * productData.収容数,
+            inputBoxes: item.targetBoxes
+        };
+
+        if (existingIndex !== -1) {
+            nyukoInputProducts[existingIndex] = {
+                ...nyukoInputProducts[existingIndex],
+                ...nextProduct
+            };
+        } else {
+            nyukoInputProducts.push(nextProduct);
+        }
+
+        setNyukoCachedProductData(item.品番, productData, Date.now());
+        lastChangedProductNumber = item.品番;
+    });
+
+    saveNyukoToStorage();
+    updateNyukoSummaryList();
+
+    if (nyukoInputProducts.length === 0) {
+        currentDisplayedProduct = null;
+        document.getElementById('nyukoInitialState').classList.remove('hidden');
+        document.getElementById('nyukoActiveProduct').classList.add('hidden');
+        return null;
+    }
+
+    const nextDisplayProductNumber = lastChangedProductNumber && nyukoInputProducts.some(product => product.品番 === lastChangedProductNumber)
+        ? lastChangedProductNumber
+        : nyukoInputProducts[0].品番;
+
+    showProductInDisplay(nextDisplayProductNumber);
+    flashCounterArea('success');
+    return nextDisplayProductNumber;
+}
+
+function applyTanaoroshiManualChanges(pendingItems) {
+    let clearedCurrentProduct = false;
+
+    pendingItems.forEach(item => {
+        const existingIndex = tanaoroshiCountedProducts.findIndex(product => product.品番 === item.品番);
+        if (existingIndex !== -1) {
+            tanaoroshiCountedProducts.splice(existingIndex, 1);
+        }
+
+        if (currentTanaoroshiProduct?.品番 === item.品番) {
+            currentTanaoroshiProduct = null;
+            clearedCurrentProduct = true;
+        }
+
+        tanaoroshiProductCache[item.品番] = {
+            data: {
+                品番: item.品番,
+                品名: item.品名 || '',
+                背番号: item.背番号 || '',
+                収容数: item.収容数,
+                imageURL: item.imageURL || '',
+                inventoryExists: true,
+                isNewProduct: false,
+                currentPhysicalQuantity: Math.max(0, Number(item.currentPhysicalQuantity) || 0),
+                currentReservedQuantity: Math.max(0, Number(item.currentReservedQuantity) || 0)
+            },
+            timestamp: Date.now()
+        };
+
+        if (item.targetBoxes === Math.max(0, Number(item.currentBoxQuantity) || 0)) {
+            return;
+        }
+
+        tanaoroshiCountedProducts.push({
+            品番: item.品番,
+            品名: item.品名,
+            背番号: item.背番号,
+            収容数: item.収容数,
+            imageURL: item.imageURL,
+            isNewProduct: false,
+            oldPhysicalQuantity: Math.max(0, Number(item.currentPhysicalQuantity) || 0),
+            newPhysicalQuantity: item.targetBoxes * item.収容数,
+            oldReservedQuantity: Math.max(0, Number(item.currentReservedQuantity) || 0),
+            countedBoxes: item.targetBoxes,
+            difference: (item.targetBoxes * item.収容数) - (Math.max(0, Number(item.currentPhysicalQuantity) || 0))
+        });
+    });
+
+    saveTanaoroshiToStorage();
+    updateTanaoroshiSummaryList();
+
+    if (clearedCurrentProduct) {
+        document.getElementById('tanaoroshiInitialState').classList.remove('hidden');
+        document.getElementById('tanaoroshiActiveProduct').classList.add('hidden');
+    }
+}
+
+async function applyScanAssistManualChanges() {
+    const pendingItems = getScanAssistManualPendingItems();
+    if (pendingItems.length === 0) {
+        showToast(`❌ ${scanAssistState.context === 'nyuko' ? getScanAssistText('noNyukoChanges') : getScanAssistText('noInventoryChanges')}`, 'error');
+        return;
+    }
+
+    const actionButton = document.getElementById('scanAssistManualReviewBtn');
+    const actionLabel = document.getElementById('scanAssistManualReviewText');
+    const originalLabel = actionLabel.textContent;
+
+    actionButton.disabled = true;
+
+    try {
+        if (scanAssistState.context === 'nyuko') {
+            applyNyukoManualChanges(pendingItems);
+        } else {
+            applyTanaoroshiManualChanges(pendingItems);
+        }
+
+        closeScanAssistSession();
+        showToast(`✅ ${getScanAssistText('addedToListToast', [pendingItems.length])}`, 'success');
+    } catch (error) {
+        console.error('Error applying manual scan assist changes:', error);
+        showToast(`❌ ${t('error-occurred')}`, 'error');
+    } finally {
+        actionButton.disabled = false;
+        actionLabel.textContent = originalLabel;
+    }
 }
 
 function createScanAssistSummaryRow(item) {
