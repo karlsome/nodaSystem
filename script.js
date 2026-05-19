@@ -6702,6 +6702,102 @@ let nyukoScanBuffer = ''; // Buffer for QR scan input
 const NYUKO_STORAGE_KEY = 'nodaSystem_nyukoInputProducts';
 const NYUKO_CACHE_KEY = 'nodaSystem_nyukoProductCache';
 
+function getNyukoStoredProduct(productNumber) {
+    return nyukoInputProducts.find(product => product.品番 === productNumber) || null;
+}
+
+function buildNyukoCachedProductDataFromStoredProduct(product) {
+    if (!product) {
+        return null;
+    }
+
+    return {
+        品番: product.品番,
+        品名: product.品名 || '',
+        背番号: product.背番号 || '',
+        収容数: product.収容数 || 0,
+        imageURL: product.imageURL || '',
+        inventoryExists: Boolean(product.inventoryExists),
+        currentPhysicalQuantity: product.oldPhysicalQuantity || 0,
+        currentReservedQuantity: product.oldReservedQuantity || 0
+    };
+}
+
+function normalizeNyukoProductCacheEntry(productNumber, cacheEntry) {
+    if (!cacheEntry || typeof cacheEntry !== 'object') {
+        return null;
+    }
+
+    const storedProductData = buildNyukoCachedProductDataFromStoredProduct(getNyukoStoredProduct(productNumber)) || {};
+    const rawData = cacheEntry.data && typeof cacheEntry.data === 'object'
+        ? cacheEntry.data
+        : cacheEntry;
+
+    return {
+        data: {
+            ...storedProductData,
+            ...rawData
+        },
+        timestamp: typeof cacheEntry.timestamp === 'number' ? cacheEntry.timestamp : Date.now()
+    };
+}
+
+function normalizeNyukoProductCache() {
+    const normalizedCache = {};
+
+    Object.entries(nyukoProductCache).forEach(([productNumber, cacheEntry]) => {
+        const normalizedEntry = normalizeNyukoProductCacheEntry(productNumber, cacheEntry);
+        if (normalizedEntry) {
+            normalizedCache[productNumber] = normalizedEntry;
+        }
+    });
+
+    nyukoInputProducts.forEach(product => {
+        if (!normalizedCache[product.品番]) {
+            const storedProductData = buildNyukoCachedProductDataFromStoredProduct(product);
+            if (storedProductData) {
+                normalizedCache[product.品番] = {
+                    data: storedProductData,
+                    timestamp: Date.now()
+                };
+            }
+        }
+    });
+
+    nyukoProductCache = normalizedCache;
+}
+
+function getNyukoCachedProductData(productNumber) {
+    const normalizedEntry = normalizeNyukoProductCacheEntry(productNumber, nyukoProductCache[productNumber]);
+    if (normalizedEntry) {
+        nyukoProductCache[productNumber] = normalizedEntry;
+        return normalizedEntry.data;
+    }
+
+    const storedProductData = buildNyukoCachedProductDataFromStoredProduct(getNyukoStoredProduct(productNumber));
+    if (!storedProductData) {
+        return null;
+    }
+
+    nyukoProductCache[productNumber] = {
+        data: storedProductData,
+        timestamp: Date.now()
+    };
+
+    return storedProductData;
+}
+
+function setNyukoCachedProductData(productNumber, productData, timestamp = Date.now()) {
+    const storedProductData = buildNyukoCachedProductDataFromStoredProduct(getNyukoStoredProduct(productNumber)) || {};
+    nyukoProductCache[productNumber] = {
+        data: {
+            ...storedProductData,
+            ...productData
+        },
+        timestamp
+    };
+}
+
 // Initialize nyuko when screen is shown
 function openNyukoSystem() {
     // Activate audio for nyuko mode (beep + alert sounds)
@@ -6733,8 +6829,9 @@ function initializeNyuko() {
     if (nyukoInputProducts.length > 0) {
         // Show the first product in the list
         const firstProduct = nyukoInputProducts[0];
-        if (nyukoProductCache[firstProduct.品番]) {
-            updateProductDisplay(firstProduct.品番, nyukoProductCache[firstProduct.品番]);
+        const firstProductData = getNyukoCachedProductData(firstProduct.品番);
+        if (firstProductData) {
+            updateProductDisplay(firstProduct.品番, firstProductData);
         } else {
             document.getElementById('nyukoInitialState').classList.remove('hidden');
             document.getElementById('nyukoActiveProduct').classList.add('hidden');
@@ -6772,6 +6869,8 @@ function loadNyukoFromStorage() {
         } else {
             nyukoProductCache = {};
         }
+
+        normalizeNyukoProductCache();
     } catch (error) {
         console.error('Error loading nyuko from storage:', error);
         nyukoInputProducts = [];
@@ -6782,6 +6881,7 @@ function loadNyukoFromStorage() {
 // Save nyuko data to localStorage
 function saveNyukoToStorage() {
     try {
+        normalizeNyukoProductCache();
         localStorage.setItem(NYUKO_STORAGE_KEY, JSON.stringify(nyukoInputProducts));
         localStorage.setItem(NYUKO_CACHE_KEY, JSON.stringify(nyukoProductCache));
         console.log('💾 Saved', nyukoInputProducts.length, 'products to storage');
@@ -6868,10 +6968,11 @@ async function processNyukoProductScan(productNumber, boxQuantity) {
         
         // Check if we have cached data for this product (with expiration check)
         const cachedEntry = nyukoProductCache[productNumber];
+        const cachedProductData = getNyukoCachedProductData(productNumber);
         const now = Date.now();
         
         if (cachedEntry && cachedEntry.timestamp && (now - cachedEntry.timestamp) < NYUKO_CACHE_EXPIRATION) {
-            productData = cachedEntry.data;
+            productData = cachedProductData;
             console.log('📋 Using cached product data:', productNumber);
             console.log('📦 Cache age:', Math.floor((now - cachedEntry.timestamp) / 1000), 'seconds');
             console.log('📦 Cached data details:', {
@@ -6920,10 +7021,7 @@ async function processNyukoProductScan(productNumber, boxQuantity) {
             });
             
             // Cache the product data with timestamp
-            nyukoProductCache[productNumber] = {
-                data: productData,
-                timestamp: Date.now()
-            };
+            setNyukoCachedProductData(productNumber, productData, Date.now());
             console.log('💾 Cached product data for:', productNumber, 'at', new Date().toLocaleString());
         }
         
@@ -7230,7 +7328,7 @@ function createNyukoSummaryRow(product, index) {
 
 // Show a product in the display area (when clicking on list item)
 function showProductInDisplay(productNumber) {
-    const productData = nyukoProductCache[productNumber];
+    const productData = getNyukoCachedProductData(productNumber);
     if (productData) {
         updateProductDisplay(productNumber, productData);
         updateNyukoSummaryList(); // Refresh to update active indicator
