@@ -3939,6 +3939,7 @@ window.showProductInDisplay = showProductInDisplay;
 window.resetAllNyukoProducts = resetAllNyukoProducts;
 window.openScanAssistChoice = openScanAssistChoice;
 window.openScanAssistCameraMode = openScanAssistCameraMode;
+window.toggleScanAssistTorch = toggleScanAssistTorch;
 window.openScanAssistManualMode = openScanAssistManualMode;
 window.closeScanAssistSession = closeScanAssistSession;
 window.handleScanAssistSearchInput = handleScanAssistSearchInput;
@@ -3967,9 +3968,13 @@ const scanAssistState = {
     initialBoxCounts: {},
     searchTerm: '',
     cameraStream: null,
+    cameraTrack: null,
     cameraFrameRequestId: null,
     cameraResumeTimeoutId: null,
     cameraSuccessFlashTimeoutId: null,
+    cameraTorchSupported: null,
+    cameraTorchEnabled: false,
+    cameraTorchPending: false,
     lastScanValue: '',
     lastScanTimestamp: 0
 };
@@ -4033,6 +4038,22 @@ function getScanAssistText(key, values = []) {
         cameraUnavailable: {
             ja: 'カメラを起動できませんでした。権限設定を確認してください。',
             en: 'Unable to start the camera. Check the browser camera permission.'
+        },
+        flashlightChecking: {
+            ja: 'ライト確認中',
+            en: 'Checking light'
+        },
+        flashlightTurnOn: {
+            ja: 'ライトを点灯',
+            en: 'Turn Light On'
+        },
+        flashlightTurnOff: {
+            ja: 'ライトを消灯',
+            en: 'Turn Light Off'
+        },
+        flashlightUnavailable: {
+            ja: 'ライト非対応',
+            en: 'No Flash'
         },
         manualDescriptionNyuko: {
             ja: 'masterDB一覧を背番号順で表示します。必要な行だけ箱数を増減して、現在の一覧へ追加してください。',
@@ -4213,6 +4234,7 @@ function resetScanAssistState() {
     scanAssistState.draftBoxCounts = {};
     scanAssistState.initialBoxCounts = {};
     scanAssistState.searchTerm = '';
+    resetScanAssistTorchState();
     scanAssistState.lastScanValue = '';
     scanAssistState.lastScanTimestamp = 0;
 }
@@ -4281,12 +4303,14 @@ async function openScanAssistCameraMode(contextId = scanAssistState.context) {
 
     scanAssistState.context = context.id;
     setScanAssistMode(context.id, 'camera');
+    resetScanAssistTorchState();
 
     document.getElementById('scanAssistChoiceModal').classList.add('hidden');
     document.getElementById('scanAssistCameraLabel').textContent = context.label;
     document.getElementById('scanAssistCameraTitle').textContent = `${context.label} / ${getScanAssistText('cameraOptionTitle')}`;
     document.getElementById('scanAssistCameraDescription').textContent = getScanAssistText('cameraDescription');
     document.getElementById('scanAssistCameraStatus').textContent = getScanAssistText('cameraStarting');
+    updateScanAssistTorchButton();
     document.getElementById('scanAssistCameraModal').classList.remove('hidden');
     syncBlockingModalBodyScroll();
 
@@ -4319,6 +4343,140 @@ async function openScanAssistManualMode(contextId = scanAssistState.context) {
     await loadScanAssistManualItems();
 }
 
+function resetScanAssistTorchState() {
+    scanAssistState.cameraTrack = null;
+    scanAssistState.cameraTorchSupported = null;
+    scanAssistState.cameraTorchEnabled = false;
+    scanAssistState.cameraTorchPending = false;
+}
+
+function getScanAssistCameraTrack() {
+    if (scanAssistState.cameraTrack && scanAssistState.cameraTrack.readyState === 'live') {
+        return scanAssistState.cameraTrack;
+    }
+
+    const activeTrack = scanAssistState.cameraStream?.getVideoTracks?.()[0] || null;
+    scanAssistState.cameraTrack = activeTrack;
+    return activeTrack;
+}
+
+function isScanAssistTorchSupported(track = getScanAssistCameraTrack()) {
+    if (!track || typeof track.applyConstraints !== 'function') {
+        return false;
+    }
+
+    const capabilities = typeof track.getCapabilities === 'function' ? track.getCapabilities() : null;
+    if (typeof capabilities?.torch === 'boolean') {
+        return capabilities.torch;
+    }
+
+    const settings = typeof track.getSettings === 'function' ? track.getSettings() : null;
+    return typeof settings?.torch === 'boolean';
+}
+
+function updateScanAssistTorchButton() {
+    const button = document.getElementById('scanAssistTorchToggleBtn');
+    const textElement = document.getElementById('scanAssistTorchToggleText');
+    const iconElement = document.getElementById('scanAssistTorchToggleIcon');
+    if (!button || !textElement || !iconElement) {
+        return;
+    }
+
+    const isChecking = scanAssistState.cameraTorchSupported === null;
+    const isSupported = scanAssistState.cameraTorchSupported === true;
+    const isEnabled = scanAssistState.cameraTorchEnabled === true;
+    const isPending = scanAssistState.cameraTorchPending === true;
+
+    let buttonText = getScanAssistText('flashlightChecking');
+    let buttonClass = 'absolute right-4 top-4 inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold shadow-lg backdrop-blur transition-colors';
+
+    if (isChecking) {
+        buttonClass += ' border-slate-700 bg-slate-950/75 text-slate-400';
+    } else if (!isSupported) {
+        buttonText = getScanAssistText('flashlightUnavailable');
+        buttonClass += ' border-slate-800 bg-slate-950/80 text-slate-500';
+    } else if (isEnabled) {
+        buttonText = getScanAssistText('flashlightTurnOff');
+        buttonClass += ' border-amber-200 bg-amber-300/95 text-slate-950 hover:bg-amber-200';
+    } else {
+        buttonText = getScanAssistText('flashlightTurnOn');
+        buttonClass += ' border-slate-600 bg-slate-900/85 text-white hover:bg-slate-800';
+    }
+
+    if (isPending) {
+        buttonClass += ' cursor-wait opacity-80';
+    } else if (!isSupported || isChecking) {
+        buttonClass += ' cursor-not-allowed opacity-65';
+    }
+
+    button.className = buttonClass;
+    button.disabled = isPending || !isSupported;
+    button.setAttribute('aria-pressed', isEnabled ? 'true' : 'false');
+    button.title = buttonText;
+    textElement.textContent = buttonText;
+    iconElement.className = 'fas fa-bolt';
+    iconElement.classList.toggle('animate-pulse', isEnabled && !isPending);
+}
+
+async function setScanAssistTorchState(nextEnabled) {
+    const track = getScanAssistCameraTrack();
+    if (!track || !isScanAssistTorchSupported(track)) {
+        scanAssistState.cameraTorchSupported = false;
+        scanAssistState.cameraTorchEnabled = false;
+        updateScanAssistTorchButton();
+        return false;
+    }
+
+    scanAssistState.cameraTorchPending = true;
+    updateScanAssistTorchButton();
+
+    try {
+        await track.applyConstraints({
+            advanced: [{ torch: !!nextEnabled }]
+        });
+
+        scanAssistState.cameraTorchSupported = true;
+        scanAssistState.cameraTorchEnabled = !!nextEnabled;
+
+        const settings = typeof track.getSettings === 'function' ? track.getSettings() : null;
+        if (typeof settings?.torch === 'boolean') {
+            scanAssistState.cameraTorchEnabled = settings.torch;
+        }
+
+        return true;
+    } catch (error) {
+        console.warn('Unable to update scan assist torch state:', error);
+        scanAssistState.cameraTorchSupported = false;
+        scanAssistState.cameraTorchEnabled = false;
+        return false;
+    } finally {
+        scanAssistState.cameraTorchPending = false;
+        updateScanAssistTorchButton();
+    }
+}
+
+async function initializeScanAssistTorch() {
+    const track = getScanAssistCameraTrack();
+    scanAssistState.cameraTorchSupported = isScanAssistTorchSupported(track);
+    scanAssistState.cameraTorchEnabled = false;
+    scanAssistState.cameraTorchPending = false;
+    updateScanAssistTorchButton();
+
+    if (!scanAssistState.cameraTorchSupported) {
+        return;
+    }
+
+    await setScanAssistTorchState(true);
+}
+
+async function toggleScanAssistTorch() {
+    if (scanAssistState.cameraTorchPending || scanAssistState.cameraTorchSupported !== true) {
+        return;
+    }
+
+    await setScanAssistTorchState(!scanAssistState.cameraTorchEnabled);
+}
+
 async function startScanAssistCamera() {
     const statusElement = document.getElementById('scanAssistCameraStatus');
     const videoElement = document.getElementById('scanAssistCameraVideo');
@@ -4332,6 +4490,7 @@ async function startScanAssistCamera() {
     }
 
     stopScanAssistCamera();
+    updateScanAssistTorchButton();
 
     try {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -4342,8 +4501,10 @@ async function startScanAssistCamera() {
         });
 
         scanAssistState.cameraStream = stream;
+        scanAssistState.cameraTrack = stream.getVideoTracks()[0] || null;
         videoElement.srcObject = stream;
         await videoElement.play();
+        await initializeScanAssistTorch();
 
         if (statusElement) {
             statusElement.textContent = getScanAssistText('cameraReady');
@@ -4352,6 +4513,10 @@ async function startScanAssistCamera() {
         scheduleScanAssistCameraFrame();
     } catch (error) {
         console.error('Error starting scan assist camera:', error);
+        scanAssistState.cameraTorchSupported = false;
+        scanAssistState.cameraTorchEnabled = false;
+        scanAssistState.cameraTorchPending = false;
+        updateScanAssistTorchButton();
         if (statusElement) {
             statusElement.textContent = getScanAssistText('cameraUnavailable');
         }
@@ -4380,6 +4545,8 @@ function stopScanAssistCamera() {
         scanAssistState.cameraStream = null;
     }
 
+    resetScanAssistTorchState();
+
     const videoElement = document.getElementById('scanAssistCameraVideo');
     if (videoElement) {
         videoElement.srcObject = null;
@@ -4389,6 +4556,8 @@ function stopScanAssistCamera() {
     if (successFlash) {
         successFlash.style.opacity = '0';
     }
+
+    updateScanAssistTorchButton();
 }
 
 function scheduleScanAssistCameraFrame(delayMs = 0, beforeResume = null) {

@@ -748,6 +748,10 @@
                         <div id="scanAssistCameraPreview" class="relative overflow-hidden rounded-2xl border border-slate-800 bg-black">
                             <video id="scanAssistCameraVideo" class="h-[52vh] w-full object-cover" autoplay playsinline muted></video>
                             <div id="scanAssistCameraSuccessFlash" class="pointer-events-none absolute inset-0 bg-emerald-400" style="opacity: 0; transition: opacity 160ms ease;"></div>
+                            <button id="scanAssistTorchToggleBtn" type="button" onclick="toggleScanAssistTorch()" class="absolute right-4 top-4 inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-950/75 px-3 py-2 text-xs font-semibold text-slate-400 shadow-lg backdrop-blur transition-colors" disabled aria-pressed="false">
+                                <i id="scanAssistTorchToggleIcon" class="fas fa-bolt"></i>
+                                <span id="scanAssistTorchToggleText">ライト確認中</span>
+                            </button>
                         </div>
                         <canvas id="scanAssistCameraCanvas" class="hidden"></canvas>
                         <div class="mt-4 flex items-center justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3">
