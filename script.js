@@ -49,6 +49,7 @@ let isPausedReminderSuppressedForHelp = false;
 
 // API base URL - change this to your server URL
 //const API_BASE_URL = 'http://localhost:3001/api';
+//const API_BASE_URL = 'http://192.168.0.186:3001/api';
 const API_BASE_URL = 'https://nodasystem.onrender.com/api';
 
 // Debug localStorage on page load
@@ -66,6 +67,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
 function initializeApp() {
     console.log('🔄 Initializing app...');
+
+    updateScanAssistShortcutButtons();
 
     // Extract factory from URL parameter
     extractFactoryFromURL();
@@ -3934,6 +3937,16 @@ window.deleteNyukoProduct = deleteNyukoProduct;
 window.submitNyukoInput = submitNyukoInput;
 window.showProductInDisplay = showProductInDisplay;
 window.resetAllNyukoProducts = resetAllNyukoProducts;
+window.openScanAssistChoice = openScanAssistChoice;
+window.openScanAssistCameraMode = openScanAssistCameraMode;
+window.toggleScanAssistTorch = toggleScanAssistTorch;
+window.openScanAssistManualMode = openScanAssistManualMode;
+window.closeScanAssistSession = closeScanAssistSession;
+window.handleScanAssistSearchInput = handleScanAssistSearchInput;
+window.adjustScanAssistManualCount = adjustScanAssistManualCount;
+window.openScanAssistSummary = openScanAssistSummary;
+window.closeScanAssistSummary = closeScanAssistSummary;
+window.confirmScanAssistSummary = confirmScanAssistSummary;
 
 // Gentan (原単) system functions
 window.handleGentanImageCapture = handleGentanImageCapture;
@@ -3943,6 +3956,1450 @@ window.submitGentanData = submitGentanData;
 
 // Note: Language translations are defined in language.js which is loaded first in index.html
 // The translations object is already available globally from language.js
+
+const SCAN_ASSIST_SCAN_COOLDOWN_MS = 1000;
+const SCAN_ASSIST_SUCCESS_FLASH_MS = 180;
+
+const scanAssistState = {
+    context: null,
+    manualItems: [],
+    invalidItems: [],
+    draftBoxCounts: {},
+    initialBoxCounts: {},
+    searchTerm: '',
+    cameraStream: null,
+    cameraTrack: null,
+    cameraFrameRequestId: null,
+    cameraResumeTimeoutId: null,
+    cameraSuccessFlashTimeoutId: null,
+    cameraTorchSupported: null,
+    cameraTorchEnabled: false,
+    cameraTorchPending: false,
+    lastScanValue: '',
+    lastScanTimestamp: 0
+};
+
+const scanAssistModeByContext = {
+    inventory: null,
+    nyuko: null
+};
+
+function getScanAssistLocale() {
+    return getCurrentAppLanguage() === 'en' ? 'en' : 'ja';
+}
+
+function getScanAssistText(key, values = []) {
+    const locale = getScanAssistLocale();
+    const textMap = {
+        choiceTitle: {
+            ja: 'スキャン代替手段',
+            en: 'Scan Alternatives'
+        },
+        choiceDescription: {
+            ja: '物理スキャナーが使えない場合は、カメラ読取または手動入力を利用してください。',
+            en: 'Use camera scan or manual entry when the physical scanner is unavailable.'
+        },
+        cameraOptionTitle: {
+            ja: 'カメラスキャン',
+            en: 'Camera Scan'
+        },
+        cameraOptionDescription: {
+            ja: 'タブレットのカメラでQRコードを読み取り、通常スキャンと同じ処理を行います。',
+            en: 'Use the tablet camera to read the QR code and process it exactly like the hardware scanner.'
+        },
+        manualOptionTitle: {
+            ja: '手動入力',
+            en: 'Manual Entry'
+        },
+        manualOptionDescriptionNyuko: {
+            ja: 'masterDB一覧から背番号を検索し、必要な箱数を現在の一覧へ追加します。',
+            en: 'Search the masterDB list by back number and add the required box counts into the current list.'
+        },
+        manualOptionDescriptionInventory: {
+            ja: '現在庫一覧をもとに箱数を調整し、変更内容を現在の一覧へ追加します。',
+            en: 'Adjust box counts from the current inventory list and add the changes into the current list.'
+        },
+        cameraDescription: {
+            ja: 'QRコードをカメラ中央に合わせると自動で読み取ります。',
+            en: 'Align the QR code inside the camera view and it will scan automatically.'
+        },
+        cameraStarting: {
+            ja: 'カメラを起動しています...',
+            en: 'Starting camera...'
+        },
+        cameraReady: {
+            ja: 'QRコードをカメラにかざしてください',
+            en: 'Point the QR code at the camera'
+        },
+        cameraUnsupported: {
+            ja: 'このブラウザではカメラスキャンを利用できません。',
+            en: 'Camera scanning is not supported in this browser.'
+        },
+        cameraUnavailable: {
+            ja: 'カメラを起動できませんでした。権限設定を確認してください。',
+            en: 'Unable to start the camera. Check the browser camera permission.'
+        },
+        flashlightChecking: {
+            ja: 'ライト確認中',
+            en: 'Checking light'
+        },
+        flashlightTurnOn: {
+            ja: 'ライトを点灯',
+            en: 'Turn Light On'
+        },
+        flashlightTurnOff: {
+            ja: 'ライトを消灯',
+            en: 'Turn Light Off'
+        },
+        flashlightUnavailable: {
+            ja: 'ライト非対応',
+            en: 'No Flash'
+        },
+        manualDescriptionNyuko: {
+            ja: 'masterDB一覧を背番号順で表示します。必要な行だけ箱数を増減して、現在の一覧へ追加してください。',
+            en: 'The masterDB list is shown in back-number order. Adjust only the required rows, then add them into the current list.'
+        },
+        manualDescriptionInventory: {
+            ja: '現在庫一覧を背番号順で表示します。初期値は現在の箱数です。変更内容を現在の一覧へ追加してください。',
+            en: 'The current inventory list is shown in back-number order. Rows start from the current box count. Add the changes into the current list.'
+        },
+        manualLoading: {
+            ja: '一覧を読み込んでいます...',
+            en: 'Loading list...'
+        },
+        manualSearchPlaceholder: {
+            ja: '背番号・品番・品名で検索',
+            en: 'Search by back number, product number, or product name'
+        },
+        manualEmpty: {
+            ja: '表示できる項目がありません。',
+            en: 'No items available to display.'
+        },
+        reviewButton: {
+            ja: '一覧へ追加 ({0})',
+            en: 'Add to List ({0})'
+        },
+        noNyukoChanges: {
+            ja: '一覧へ追加する入庫変更がありません。',
+            en: 'There are no receiving changes to add to the list.'
+        },
+        noInventoryChanges: {
+            ja: '一覧へ追加する棚卸し変更がありません。',
+            en: 'There are no inventory changes to add to the list.'
+        },
+        addedToListToast: {
+            ja: '{0}件を一覧に追加しました。',
+            en: 'Added {0} item(s) to the list.'
+        },
+        noNyukoSummary: {
+            ja: '入力された箱数がありません。',
+            en: 'There are no entered box counts.'
+        },
+        noInventorySummary: {
+            ja: '在庫変更がありません。',
+            en: 'There are no inventory changes.'
+        },
+        summaryTitleNyuko: {
+            ja: '入庫内容の確認',
+            en: 'Review Receiving Entries'
+        },
+        summaryTitleInventory: {
+            ja: '棚卸し変更の確認',
+            en: 'Review Inventory Changes'
+        },
+        summaryDescriptionNyuko: {
+            ja: '送信前に、入庫する背番号と箱数を確認してください。',
+            en: 'Confirm the back numbers and box counts to receive before sending.'
+        },
+        summaryDescriptionInventory: {
+            ja: '送信前に、背番号ごとの変更内容を確認してください。',
+            en: 'Confirm the per-back-number inventory changes before sending.'
+        },
+        summaryBack: {
+            ja: '一覧に戻る',
+            en: 'Back to List'
+        },
+        summaryConfirm: {
+            ja: '確定送信',
+            en: 'Confirm Submit'
+        },
+        invalidMasterNotice: {
+            ja: '{0} のmasterDBが無効です。管理者へ連絡してください。',
+            en: '{0} has invalid masterDB data. Please contact the administrator.'
+        },
+        inventoryCurrent: {
+            ja: '現在在庫',
+            en: 'Current Inventory'
+        },
+        piecesLabel: {
+            ja: '個',
+            en: 'pcs'
+        },
+        boxesLabel: {
+            ja: '箱',
+            en: 'boxes'
+        },
+        perBoxLabel: {
+            ja: '1箱 = {0}個',
+            en: '1 box = {0} pcs'
+        },
+        skippedInvalidToast: {
+            ja: '無効なmasterDBの背番号は一覧に表示していません。管理者へ連絡してください。',
+            en: 'Items with invalid masterDB data are excluded from the list. Please contact the administrator.'
+        }
+    };
+
+    let output = textMap[key]?.[locale] || textMap[key]?.ja || key;
+    values.forEach((value, index) => {
+        output = output.split(`{${index}}`).join(String(value));
+    });
+
+    return output;
+}
+
+function getScanAssistContext(contextId = currentScreen) {
+    if (contextId === 'inventory') {
+        return {
+            id: 'inventory',
+            label: t('tanaoroshi-system'),
+            manualEndpoint: '/manual-entry/tanaoroshi-items'
+        };
+    }
+
+    if (contextId === 'nyuko') {
+        return {
+            id: 'nyuko',
+            label: t('nyuko-system'),
+            manualEndpoint: '/manual-entry/nyuko-items'
+        };
+    }
+
+    return null;
+}
+
+function getScanAssistShortcutButtonIds(contextId) {
+    if (contextId === 'inventory') {
+        return {
+            camera: 'inventoryScanShortcutBtn',
+            manual: 'inventoryManualShortcutBtn'
+        };
+    }
+
+    if (contextId === 'nyuko') {
+        return {
+            camera: 'nyukoScanShortcutBtn',
+            manual: 'nyukoManualShortcutBtn'
+        };
+    }
+
+    return null;
+}
+
+function updateScanAssistShortcutButtons() {
+    ['inventory', 'nyuko'].forEach(contextId => {
+        const buttonIds = getScanAssistShortcutButtonIds(contextId);
+        const selectedMode = scanAssistModeByContext[contextId];
+
+        ['camera', 'manual'].forEach(mode => {
+            const buttonId = buttonIds?.[mode];
+            const button = buttonId ? document.getElementById(buttonId) : null;
+            if (!button) {
+                return;
+            }
+
+            const shouldShow = selectedMode === mode;
+            button.classList.toggle('hidden', !shouldShow);
+            button.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
+        });
+    });
+}
+
+function setScanAssistMode(contextId, mode) {
+    if (!contextId || !Object.prototype.hasOwnProperty.call(scanAssistModeByContext, contextId)) {
+        return;
+    }
+
+    scanAssistModeByContext[contextId] = mode;
+    updateScanAssistShortcutButtons();
+}
+
+function syncBlockingModalBodyScroll() {
+    document.body.style.overflow = hasBlockingModalOpen() ? 'hidden' : '';
+}
+
+function resetScanAssistState() {
+    scanAssistState.context = null;
+    scanAssistState.manualItems = [];
+    scanAssistState.invalidItems = [];
+    scanAssistState.draftBoxCounts = {};
+    scanAssistState.initialBoxCounts = {};
+    scanAssistState.searchTerm = '';
+    resetScanAssistTorchState();
+    scanAssistState.lastScanValue = '';
+    scanAssistState.lastScanTimestamp = 0;
+}
+
+function closeScanAssistCameraModal() {
+    stopScanAssistCamera();
+    const modal = document.getElementById('scanAssistCameraModal');
+    if (modal) {
+        modal.classList.add('hidden');
+    }
+}
+
+function closeScanAssistSummary(backToManual = false) {
+    const summaryModal = document.getElementById('scanAssistSummaryModal');
+    if (summaryModal) {
+        summaryModal.classList.add('hidden');
+    }
+
+    if (backToManual) {
+        document.getElementById('scanAssistManualModal').classList.remove('hidden');
+    }
+
+    syncBlockingModalBodyScroll();
+}
+
+function closeScanAssistSession() {
+    closeScanAssistCameraModal();
+
+    ['scanAssistChoiceModal', 'scanAssistManualModal', 'scanAssistSummaryModal'].forEach(modalId => {
+        const modal = document.getElementById(modalId);
+        if (modal) {
+            modal.classList.add('hidden');
+        }
+    });
+
+    resetScanAssistState();
+    syncBlockingModalBodyScroll();
+}
+
+function openScanAssistChoice(contextId = currentScreen) {
+    const context = getScanAssistContext(contextId);
+    if (!context) {
+        return;
+    }
+
+    scanAssistState.context = context.id;
+    document.getElementById('scanAssistChoiceLabel').textContent = context.label;
+    document.getElementById('scanAssistChoiceTitle').textContent = getScanAssistText('choiceTitle');
+    document.getElementById('scanAssistChoiceDescription').textContent = getScanAssistText('choiceDescription');
+    document.getElementById('scanAssistCameraOptionTitle').textContent = getScanAssistText('cameraOptionTitle');
+    document.getElementById('scanAssistCameraOptionDescription').textContent = getScanAssistText('cameraOptionDescription');
+    document.getElementById('scanAssistManualOptionTitle').textContent = getScanAssistText('manualOptionTitle');
+    document.getElementById('scanAssistManualOptionDescription').textContent = context.id === 'nyuko'
+        ? getScanAssistText('manualOptionDescriptionNyuko')
+        : getScanAssistText('manualOptionDescriptionInventory');
+
+    document.getElementById('scanAssistChoiceModal').classList.remove('hidden');
+    syncBlockingModalBodyScroll();
+}
+
+async function openScanAssistCameraMode(contextId = scanAssistState.context) {
+    const context = getScanAssistContext(contextId);
+    if (!context) {
+        return;
+    }
+
+    scanAssistState.context = context.id;
+    setScanAssistMode(context.id, 'camera');
+    resetScanAssistTorchState();
+
+    document.getElementById('scanAssistChoiceModal').classList.add('hidden');
+    document.getElementById('scanAssistCameraLabel').textContent = context.label;
+    document.getElementById('scanAssistCameraTitle').textContent = `${context.label} / ${getScanAssistText('cameraOptionTitle')}`;
+    document.getElementById('scanAssistCameraDescription').textContent = getScanAssistText('cameraDescription');
+    document.getElementById('scanAssistCameraStatus').textContent = getScanAssistText('cameraStarting');
+    updateScanAssistTorchButton();
+    document.getElementById('scanAssistCameraModal').classList.remove('hidden');
+    syncBlockingModalBodyScroll();
+
+    await startScanAssistCamera();
+}
+
+async function openScanAssistManualMode(contextId = scanAssistState.context) {
+    const context = getScanAssistContext(contextId);
+    if (!context) {
+        return;
+    }
+
+    scanAssistState.context = context.id;
+    setScanAssistMode(context.id, 'manual');
+
+    document.getElementById('scanAssistChoiceModal').classList.add('hidden');
+    document.getElementById('scanAssistSummaryModal').classList.add('hidden');
+    document.getElementById('scanAssistManualLabel').textContent = context.label;
+    document.getElementById('scanAssistManualTitle').textContent = `${context.label} / ${getScanAssistText('manualOptionTitle')}`;
+    document.getElementById('scanAssistManualDescription').textContent = context.id === 'nyuko'
+        ? getScanAssistText('manualDescriptionNyuko')
+        : getScanAssistText('manualDescriptionInventory');
+    document.getElementById('scanAssistManualLoadingText').textContent = getScanAssistText('manualLoading');
+    document.getElementById('scanAssistManualEmptyText').textContent = getScanAssistText('manualEmpty');
+    document.getElementById('scanAssistSearchInput').value = '';
+    document.getElementById('scanAssistSearchInput').placeholder = getScanAssistText('manualSearchPlaceholder');
+    document.getElementById('scanAssistManualModal').classList.remove('hidden');
+    syncBlockingModalBodyScroll();
+
+    await loadScanAssistManualItems();
+}
+
+function resetScanAssistTorchState() {
+    scanAssistState.cameraTrack = null;
+    scanAssistState.cameraTorchSupported = null;
+    scanAssistState.cameraTorchEnabled = false;
+    scanAssistState.cameraTorchPending = false;
+}
+
+function getScanAssistCameraTrack() {
+    if (scanAssistState.cameraTrack && scanAssistState.cameraTrack.readyState === 'live') {
+        return scanAssistState.cameraTrack;
+    }
+
+    const activeTrack = scanAssistState.cameraStream?.getVideoTracks?.()[0] || null;
+    scanAssistState.cameraTrack = activeTrack;
+    return activeTrack;
+}
+
+function isScanAssistTorchSupported(track = getScanAssistCameraTrack()) {
+    if (!track || typeof track.applyConstraints !== 'function') {
+        return false;
+    }
+
+    const capabilities = typeof track.getCapabilities === 'function' ? track.getCapabilities() : null;
+    if (typeof capabilities?.torch === 'boolean') {
+        return capabilities.torch;
+    }
+
+    const settings = typeof track.getSettings === 'function' ? track.getSettings() : null;
+    return typeof settings?.torch === 'boolean';
+}
+
+function updateScanAssistTorchButton() {
+    const button = document.getElementById('scanAssistTorchToggleBtn');
+    const textElement = document.getElementById('scanAssistTorchToggleText');
+    const iconElement = document.getElementById('scanAssistTorchToggleIcon');
+    if (!button || !textElement || !iconElement) {
+        return;
+    }
+
+    const isChecking = scanAssistState.cameraTorchSupported === null;
+    const isSupported = scanAssistState.cameraTorchSupported === true;
+    const isEnabled = scanAssistState.cameraTorchEnabled === true;
+    const isPending = scanAssistState.cameraTorchPending === true;
+
+    let buttonText = getScanAssistText('flashlightChecking');
+    let buttonClass = 'absolute right-4 top-4 inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold shadow-lg backdrop-blur transition-colors';
+
+    if (isChecking) {
+        buttonClass += ' border-slate-700 bg-slate-950/75 text-slate-400';
+    } else if (!isSupported) {
+        buttonText = getScanAssistText('flashlightUnavailable');
+        buttonClass += ' border-slate-800 bg-slate-950/80 text-slate-500';
+    } else if (isEnabled) {
+        buttonText = getScanAssistText('flashlightTurnOff');
+        buttonClass += ' border-amber-200 bg-amber-300/95 text-slate-950 hover:bg-amber-200';
+    } else {
+        buttonText = getScanAssistText('flashlightTurnOn');
+        buttonClass += ' border-slate-600 bg-slate-900/85 text-white hover:bg-slate-800';
+    }
+
+    if (isPending) {
+        buttonClass += ' cursor-wait opacity-80';
+    } else if (!isSupported || isChecking) {
+        buttonClass += ' cursor-not-allowed opacity-65';
+    }
+
+    button.className = buttonClass;
+    button.disabled = isPending || !isSupported;
+    button.setAttribute('aria-pressed', isEnabled ? 'true' : 'false');
+    button.title = buttonText;
+    textElement.textContent = buttonText;
+    iconElement.className = 'fas fa-bolt';
+    iconElement.classList.toggle('animate-pulse', isEnabled && !isPending);
+}
+
+async function setScanAssistTorchState(nextEnabled) {
+    const track = getScanAssistCameraTrack();
+    if (!track || !isScanAssistTorchSupported(track)) {
+        scanAssistState.cameraTorchSupported = false;
+        scanAssistState.cameraTorchEnabled = false;
+        updateScanAssistTorchButton();
+        return false;
+    }
+
+    scanAssistState.cameraTorchPending = true;
+    updateScanAssistTorchButton();
+
+    try {
+        await track.applyConstraints({
+            advanced: [{ torch: !!nextEnabled }]
+        });
+
+        scanAssistState.cameraTorchSupported = true;
+        scanAssistState.cameraTorchEnabled = !!nextEnabled;
+
+        const settings = typeof track.getSettings === 'function' ? track.getSettings() : null;
+        if (typeof settings?.torch === 'boolean') {
+            scanAssistState.cameraTorchEnabled = settings.torch;
+        }
+
+        return true;
+    } catch (error) {
+        console.warn('Unable to update scan assist torch state:', error);
+        scanAssistState.cameraTorchSupported = false;
+        scanAssistState.cameraTorchEnabled = false;
+        return false;
+    } finally {
+        scanAssistState.cameraTorchPending = false;
+        updateScanAssistTorchButton();
+    }
+}
+
+async function initializeScanAssistTorch() {
+    const track = getScanAssistCameraTrack();
+    scanAssistState.cameraTorchSupported = isScanAssistTorchSupported(track);
+    scanAssistState.cameraTorchEnabled = false;
+    scanAssistState.cameraTorchPending = false;
+    updateScanAssistTorchButton();
+
+    if (!scanAssistState.cameraTorchSupported) {
+        return;
+    }
+
+    await setScanAssistTorchState(true);
+}
+
+async function toggleScanAssistTorch() {
+    if (scanAssistState.cameraTorchPending || scanAssistState.cameraTorchSupported !== true) {
+        return;
+    }
+
+    await setScanAssistTorchState(!scanAssistState.cameraTorchEnabled);
+}
+
+async function startScanAssistCamera() {
+    const statusElement = document.getElementById('scanAssistCameraStatus');
+    const videoElement = document.getElementById('scanAssistCameraVideo');
+
+    if (!navigator.mediaDevices?.getUserMedia || typeof window.jsQR !== 'function') {
+        if (statusElement) {
+            statusElement.textContent = getScanAssistText('cameraUnsupported');
+        }
+        showToast(`❌ ${getScanAssistText('cameraUnsupported')}`, 'error');
+        return;
+    }
+
+    stopScanAssistCamera();
+    updateScanAssistTorchButton();
+
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                facingMode: { ideal: 'environment' }
+            },
+            audio: false
+        });
+
+        scanAssistState.cameraStream = stream;
+        scanAssistState.cameraTrack = stream.getVideoTracks()[0] || null;
+        videoElement.srcObject = stream;
+        await videoElement.play();
+        await initializeScanAssistTorch();
+
+        if (statusElement) {
+            statusElement.textContent = getScanAssistText('cameraReady');
+        }
+
+        scheduleScanAssistCameraFrame();
+    } catch (error) {
+        console.error('Error starting scan assist camera:', error);
+        scanAssistState.cameraTorchSupported = false;
+        scanAssistState.cameraTorchEnabled = false;
+        scanAssistState.cameraTorchPending = false;
+        updateScanAssistTorchButton();
+        if (statusElement) {
+            statusElement.textContent = getScanAssistText('cameraUnavailable');
+        }
+        showToast(`❌ ${getScanAssistText('cameraUnavailable')}`, 'error');
+    }
+}
+
+function stopScanAssistCamera() {
+    if (scanAssistState.cameraFrameRequestId) {
+        cancelAnimationFrame(scanAssistState.cameraFrameRequestId);
+        scanAssistState.cameraFrameRequestId = null;
+    }
+
+    if (scanAssistState.cameraResumeTimeoutId) {
+        clearTimeout(scanAssistState.cameraResumeTimeoutId);
+        scanAssistState.cameraResumeTimeoutId = null;
+    }
+
+    if (scanAssistState.cameraSuccessFlashTimeoutId) {
+        clearTimeout(scanAssistState.cameraSuccessFlashTimeoutId);
+        scanAssistState.cameraSuccessFlashTimeoutId = null;
+    }
+
+    if (scanAssistState.cameraStream) {
+        scanAssistState.cameraStream.getTracks().forEach(track => track.stop());
+        scanAssistState.cameraStream = null;
+    }
+
+    resetScanAssistTorchState();
+
+    const videoElement = document.getElementById('scanAssistCameraVideo');
+    if (videoElement) {
+        videoElement.srcObject = null;
+    }
+
+    const successFlash = document.getElementById('scanAssistCameraSuccessFlash');
+    if (successFlash) {
+        successFlash.style.opacity = '0';
+    }
+
+    updateScanAssistTorchButton();
+}
+
+function scheduleScanAssistCameraFrame(delayMs = 0, beforeResume = null) {
+    if (scanAssistState.cameraFrameRequestId) {
+        cancelAnimationFrame(scanAssistState.cameraFrameRequestId);
+        scanAssistState.cameraFrameRequestId = null;
+    }
+
+    if (scanAssistState.cameraResumeTimeoutId) {
+        clearTimeout(scanAssistState.cameraResumeTimeoutId);
+        scanAssistState.cameraResumeTimeoutId = null;
+    }
+
+    const resumeFrameLoop = () => {
+        if (typeof beforeResume === 'function') {
+            beforeResume();
+        }
+
+        if (!scanAssistState.cameraStream) {
+            return;
+        }
+
+        scanAssistState.cameraFrameRequestId = requestAnimationFrame(scanAssistCameraFrame);
+    };
+
+    if (delayMs > 0) {
+        scanAssistState.cameraResumeTimeoutId = setTimeout(() => {
+            scanAssistState.cameraResumeTimeoutId = null;
+            resumeFrameLoop();
+        }, delayMs);
+        return;
+    }
+
+    resumeFrameLoop();
+}
+
+function triggerScanAssistCameraSuccessFeedback() {
+    if (scanAssistState.cameraSuccessFlashTimeoutId) {
+        clearTimeout(scanAssistState.cameraSuccessFlashTimeoutId);
+        scanAssistState.cameraSuccessFlashTimeoutId = null;
+    }
+
+    const successFlash = document.getElementById('scanAssistCameraSuccessFlash');
+    if (!successFlash) {
+        return;
+    }
+
+    successFlash.style.opacity = '0.35';
+    scanAssistState.cameraSuccessFlashTimeoutId = setTimeout(() => {
+        successFlash.style.opacity = '0';
+        scanAssistState.cameraSuccessFlashTimeoutId = null;
+    }, SCAN_ASSIST_SUCCESS_FLASH_MS);
+}
+
+function scanAssistCameraFrame() {
+    const videoElement = document.getElementById('scanAssistCameraVideo');
+    const canvasElement = document.getElementById('scanAssistCameraCanvas');
+    if (!videoElement || !canvasElement || !scanAssistState.cameraStream) {
+        return;
+    }
+
+    if (!videoElement.videoWidth || !videoElement.videoHeight) {
+        scheduleScanAssistCameraFrame();
+        return;
+    }
+
+    canvasElement.width = videoElement.videoWidth;
+    canvasElement.height = videoElement.videoHeight;
+
+    const canvasContext = canvasElement.getContext('2d', { willReadFrequently: true });
+    canvasContext.drawImage(videoElement, 0, 0, canvasElement.width, canvasElement.height);
+
+    const imageData = canvasContext.getImageData(0, 0, canvasElement.width, canvasElement.height);
+    const result = window.jsQR(imageData.data, imageData.width, imageData.height, {
+        inversionAttempts: 'attemptBoth'
+    });
+
+    if (result?.data) {
+        const now = Date.now();
+        if (scanAssistState.lastScanValue === result.data && (now - scanAssistState.lastScanTimestamp) < SCAN_ASSIST_SCAN_COOLDOWN_MS) {
+            scheduleScanAssistCameraFrame();
+            return;
+        }
+
+        scanAssistState.lastScanValue = result.data;
+        scanAssistState.lastScanTimestamp = now;
+        void handleScanAssistCameraResult(result.data);
+        return;
+    }
+
+    scheduleScanAssistCameraFrame();
+}
+
+async function handleScanAssistCameraResult(scanValue) {
+    const statusElement = document.getElementById('scanAssistCameraStatus');
+    if (statusElement) {
+        statusElement.textContent = scanValue;
+    }
+
+    let wasProcessed = false;
+    if (scanAssistState.context === 'nyuko') {
+        wasProcessed = await processNyukoScan(scanValue);
+    } else if (scanAssistState.context === 'inventory') {
+        wasProcessed = await processTanaoroshiScan(scanValue);
+    }
+
+    if (wasProcessed) {
+        triggerScanAssistCameraSuccessFeedback();
+        scheduleScanAssistCameraFrame(SCAN_ASSIST_SCAN_COOLDOWN_MS, () => {
+            if (statusElement && scanAssistState.cameraStream) {
+                statusElement.textContent = getScanAssistText('cameraReady');
+            }
+        });
+        return;
+    }
+
+    if (statusElement) {
+        statusElement.textContent = getScanAssistText('cameraReady');
+    }
+    scheduleScanAssistCameraFrame();
+}
+
+async function loadScanAssistManualItems() {
+    const context = getScanAssistContext(scanAssistState.context);
+    if (!context) {
+        return;
+    }
+
+    const loadingState = document.getElementById('scanAssistManualLoadingState');
+    const emptyState = document.getElementById('scanAssistManualEmptyState');
+    const listContainer = document.getElementById('scanAssistManualList');
+    const invalidNotice = document.getElementById('scanAssistInvalidNotice');
+
+    loadingState.classList.remove('hidden');
+    emptyState.classList.add('hidden');
+    listContainer.innerHTML = '';
+    invalidNotice.classList.add('hidden');
+    invalidNotice.textContent = '';
+
+    try {
+        const response = await fetch(`${API_BASE_URL}${context.manualEndpoint}`);
+        if (!response.ok) {
+            throw new Error('Failed to fetch scan assist manual items');
+        }
+
+        const responseData = await response.json();
+        scanAssistState.manualItems = Array.isArray(responseData.items) ? responseData.items : [];
+        scanAssistState.invalidItems = Array.isArray(responseData.invalidItems) ? responseData.invalidItems : [];
+        scanAssistState.searchTerm = '';
+        initializeScanAssistDraftBoxCounts();
+        renderScanAssistInvalidNotice();
+        renderScanAssistManualList();
+
+        if (scanAssistState.invalidItems.length > 0) {
+            showToast(`⚠️ ${getScanAssistText('skippedInvalidToast')}`, 'error');
+        }
+    } catch (error) {
+        console.error('Error loading scan assist manual items:', error);
+        loadingState.classList.add('hidden');
+        emptyState.classList.remove('hidden');
+        listContainer.innerHTML = '';
+        updateScanAssistReviewButton();
+        showToast(`❌ ${t('load-failed')} manual-entry list`, 'error');
+    }
+}
+
+function buildNyukoManualBaselineBoxMap() {
+    return nyukoInputProducts.reduce((result, item) => {
+        result[item.品番] = Math.max(0, Number(item.inputBoxes) || 0);
+        return result;
+    }, {});
+}
+
+function buildTanaoroshiManualBaselineBoxMap() {
+    const baseline = tanaoroshiCountedProducts.reduce((result, item) => {
+        result[item.品番] = Math.max(0, Number(item.countedBoxes) || 0);
+        return result;
+    }, {});
+
+    if (currentTanaoroshiProduct?.品番) {
+        baseline[currentTanaoroshiProduct.品番] = Math.max(0, Number(currentTanaoroshiProduct.countedBoxes) || 0);
+    }
+
+    return baseline;
+}
+
+function initializeScanAssistDraftBoxCounts() {
+    const context = getScanAssistContext(scanAssistState.context);
+    if (!context) {
+        return;
+    }
+
+    const baselineBoxMap = context.id === 'nyuko'
+        ? buildNyukoManualBaselineBoxMap()
+        : buildTanaoroshiManualBaselineBoxMap();
+
+    scanAssistState.initialBoxCounts = {};
+    scanAssistState.draftBoxCounts = {};
+
+    scanAssistState.manualItems.forEach(item => {
+        const fallbackBoxes = context.id === 'nyuko'
+            ? 0
+            : Math.max(0, Number(item.currentBoxQuantity) || 0);
+        const initialBoxes = baselineBoxMap[item.品番] !== undefined
+            ? Math.max(0, Number(baselineBoxMap[item.品番]) || 0)
+            : fallbackBoxes;
+
+        scanAssistState.initialBoxCounts[item.品番] = initialBoxes;
+        scanAssistState.draftBoxCounts[item.品番] = initialBoxes;
+    });
+}
+
+function getScanAssistDraftBoxCount(productNumber, fallbackValue = 0) {
+    if (scanAssistState.draftBoxCounts[productNumber] === undefined) {
+        return Math.max(0, Number(fallbackValue) || 0);
+    }
+
+    return Math.max(0, Number(scanAssistState.draftBoxCounts[productNumber]) || 0);
+}
+
+function getScanAssistInitialBoxCount(productNumber, fallbackValue = 0) {
+    if (scanAssistState.initialBoxCounts[productNumber] === undefined) {
+        return Math.max(0, Number(fallbackValue) || 0);
+    }
+
+    return Math.max(0, Number(scanAssistState.initialBoxCounts[productNumber]) || 0);
+}
+
+function handleScanAssistSearchInput(value) {
+    scanAssistState.searchTerm = String(value || '').trim().toLowerCase();
+    renderScanAssistManualList();
+}
+
+function buildInvalidMasterNoticeText() {
+    if (scanAssistState.invalidItems.length === 0) {
+        return '';
+    }
+
+    const labels = scanAssistState.invalidItems
+        .slice(0, 5)
+        .map(item => item.背番号 || item.品番)
+        .filter(Boolean)
+        .join('、');
+    const hiddenCount = Math.max(0, scanAssistState.invalidItems.length - 5);
+    const displayLabel = hiddenCount > 0
+        ? `${labels}${getScanAssistLocale() === 'en' ? ` and ${hiddenCount} more` : ` ほか${hiddenCount}件`}`
+        : labels;
+
+    return getScanAssistText('invalidMasterNotice', [displayLabel]);
+}
+
+function renderScanAssistInvalidNotice() {
+    const invalidNotice = document.getElementById('scanAssistInvalidNotice');
+    const noticeText = buildInvalidMasterNoticeText();
+
+    if (!noticeText) {
+        invalidNotice.classList.add('hidden');
+        invalidNotice.textContent = '';
+        return;
+    }
+
+    invalidNotice.textContent = noticeText;
+    invalidNotice.classList.remove('hidden');
+}
+
+function getFilteredScanAssistItems() {
+    if (!scanAssistState.searchTerm) {
+        return scanAssistState.manualItems;
+    }
+
+    return scanAssistState.manualItems.filter(item => {
+        return [item.背番号, item.品番, item.品名]
+            .map(value => String(value || '').toLowerCase())
+            .some(value => value.includes(scanAssistState.searchTerm));
+    });
+}
+
+function createScanAssistManualRow(item) {
+    const context = getScanAssistContext(scanAssistState.context);
+    const encodedProductNumber = encodeURIComponent(item.品番);
+    const draftBoxes = getScanAssistDraftBoxCount(item.品番, 0);
+    const totalPieces = draftBoxes * item.収容数;
+
+    if (context?.id === 'nyuko') {
+        return `
+            <div class='rounded-2xl border border-gray-200 bg-white p-4 shadow-sm'>
+                <div class='flex items-center justify-between gap-4'>
+                    <div class='min-w-0'>
+                        <div class='flex flex-wrap items-center gap-2'>
+                            <span class='rounded-full bg-purple-100 px-3 py-1 text-sm font-bold text-purple-700'>${item.背番号 || '-'}</span>
+                            <span class='text-sm font-semibold text-gray-900'>${item.品番}</span>
+                        </div>
+                        <p class='mt-2 text-sm text-gray-700'>${item.品名 || '-'}</p>
+                        <p class='mt-2 text-xs text-gray-500'>${getScanAssistText('perBoxLabel', [item.収容数])}</p>
+                    </div>
+                    <div class='flex items-center gap-3'>
+                        <button type='button' onclick='adjustScanAssistManualCount("${encodedProductNumber}", -1)' class='flex h-11 w-11 items-center justify-center rounded-xl border border-gray-300 bg-white text-xl font-bold text-gray-700 transition-colors hover:bg-gray-100'>−</button>
+                        <div class='min-w-[84px] text-center'>
+                            <p class='text-2xl font-bold text-purple-700'>${draftBoxes}</p>
+                            <p class='text-xs text-gray-500'>${totalPieces}${getScanAssistText('piecesLabel')}</p>
+                        </div>
+                        <button type='button' onclick='adjustScanAssistManualCount("${encodedProductNumber}", 1)' class='flex h-11 w-11 items-center justify-center rounded-xl border border-purple-300 bg-purple-50 text-xl font-bold text-purple-700 transition-colors hover:bg-purple-100'>+</button>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    const currentBoxes = Math.max(0, Number(item.currentBoxQuantity) || 0);
+    const currentPieces = Math.max(0, Number(item.currentPhysicalQuantity) || 0);
+    const diffBoxes = draftBoxes - currentBoxes;
+    const diffClass = diffBoxes > 0
+        ? 'text-green-600'
+        : diffBoxes < 0
+            ? 'text-red-600'
+            : 'text-gray-500';
+    const diffLabel = diffBoxes === 0 ? '±0' : `${diffBoxes > 0 ? '+' : ''}${diffBoxes}${getScanAssistText('boxesLabel')}`;
+
+    return `
+        <div class='rounded-2xl border border-gray-200 bg-white p-4 shadow-sm'>
+            <div class='flex items-center justify-between gap-4'>
+                <div class='min-w-0'>
+                    <div class='flex flex-wrap items-center gap-2'>
+                        <span class='rounded-full bg-blue-100 px-3 py-1 text-sm font-bold text-blue-700'>${item.背番号 || '-'}</span>
+                        <span class='text-sm font-semibold text-gray-900'>${item.品番}</span>
+                    </div>
+                    <p class='mt-2 text-sm text-gray-700'>${item.品名 || '-'}</p>
+                    <div class='mt-2 flex flex-wrap items-center gap-3 text-xs'>
+                        <span class='text-gray-500'>${getScanAssistText('inventoryCurrent')}: ${currentBoxes}${getScanAssistText('boxesLabel')} (${currentPieces}${getScanAssistText('piecesLabel')})</span>
+                        <span class='${diffClass} font-semibold'>${diffLabel}</span>
+                        <span class='text-gray-500'>${getScanAssistText('perBoxLabel', [item.収容数])}</span>
+                    </div>
+                </div>
+                <div class='flex items-center gap-3'>
+                    <button type='button' onclick='adjustScanAssistManualCount("${encodedProductNumber}", -1)' class='flex h-11 w-11 items-center justify-center rounded-xl border border-gray-300 bg-white text-xl font-bold text-gray-700 transition-colors hover:bg-gray-100'>−</button>
+                    <div class='min-w-[84px] text-center'>
+                        <p class='text-2xl font-bold text-blue-700'>${draftBoxes}</p>
+                        <p class='text-xs text-gray-500'>${totalPieces}${getScanAssistText('piecesLabel')}</p>
+                    </div>
+                    <button type='button' onclick='adjustScanAssistManualCount("${encodedProductNumber}", 1)' class='flex h-11 w-11 items-center justify-center rounded-xl border border-blue-300 bg-blue-50 text-xl font-bold text-blue-700 transition-colors hover:bg-blue-100'>+</button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function renderScanAssistManualList() {
+    const loadingState = document.getElementById('scanAssistManualLoadingState');
+    const emptyState = document.getElementById('scanAssistManualEmptyState');
+    const listContainer = document.getElementById('scanAssistManualList');
+    const filteredItems = getFilteredScanAssistItems();
+
+    loadingState.classList.add('hidden');
+
+    if (filteredItems.length === 0) {
+        listContainer.innerHTML = '';
+        emptyState.classList.remove('hidden');
+        updateScanAssistReviewButton();
+        return;
+    }
+
+    emptyState.classList.add('hidden');
+    listContainer.innerHTML = filteredItems.map(createScanAssistManualRow).join('');
+    updateScanAssistReviewButton();
+}
+
+function adjustScanAssistManualCount(encodedProductNumber, delta) {
+    const productNumber = decodeURIComponent(encodedProductNumber);
+    const currentBoxes = getScanAssistDraftBoxCount(productNumber, 0);
+    scanAssistState.draftBoxCounts[productNumber] = Math.max(0, currentBoxes + delta);
+    renderScanAssistManualList();
+}
+
+function buildNyukoManualPendingItems() {
+    return scanAssistState.manualItems.map(item => {
+        const initialBoxes = getScanAssistInitialBoxCount(item.品番, 0);
+        const targetBoxes = getScanAssistDraftBoxCount(item.品番, initialBoxes);
+
+        if (targetBoxes === initialBoxes) {
+            return null;
+        }
+
+        return {
+            ...item,
+            initialBoxes,
+            targetBoxes,
+            inputQuantity: targetBoxes * item.収容数
+        };
+    }).filter(Boolean);
+}
+
+function buildTanaoroshiManualPendingItems() {
+    return scanAssistState.manualItems.map(item => {
+        const initialBoxes = getScanAssistInitialBoxCount(item.品番, item.currentBoxQuantity);
+        const targetBoxes = getScanAssistDraftBoxCount(item.品番, initialBoxes);
+
+        if (targetBoxes === initialBoxes) {
+            return null;
+        }
+
+        return {
+            ...item,
+            initialBoxes,
+            targetBoxes,
+            newPhysicalQuantity: targetBoxes * item.収容数,
+            difference: (targetBoxes * item.収容数) - (Math.max(0, Number(item.currentPhysicalQuantity) || 0))
+        };
+    }).filter(Boolean);
+}
+
+function getScanAssistManualPendingItems() {
+    if (scanAssistState.context === 'nyuko') {
+        return buildNyukoManualPendingItems();
+    }
+
+    if (scanAssistState.context === 'inventory') {
+        return buildTanaoroshiManualPendingItems();
+    }
+
+    return [];
+}
+
+function buildNyukoManualSummaryItems() {
+    return scanAssistState.manualItems.map(item => {
+        const inputBoxes = getScanAssistDraftBoxCount(item.品番, 0);
+        if (inputBoxes <= 0) {
+            return null;
+        }
+
+        return {
+            ...item,
+            inputBoxes,
+            inputQuantity: inputBoxes * item.収容数
+        };
+    }).filter(Boolean);
+}
+
+function buildTanaoroshiManualSummaryItems() {
+    const invalidProductNumbers = new Set(
+        scanAssistState.invalidItems
+            .map(item => item.品番)
+            .filter(Boolean)
+    );
+    const manualProductNumbers = new Set(scanAssistState.manualItems.map(item => item.品番));
+
+    const summaryItems = scanAssistState.manualItems.map(item => {
+        const adjustedBoxes = getScanAssistDraftBoxCount(item.品番, item.currentBoxQuantity);
+        const currentBoxes = Math.max(0, Number(item.currentBoxQuantity) || 0);
+        if (adjustedBoxes === currentBoxes) {
+            return null;
+        }
+
+        const oldPhysicalQuantity = Math.max(0, Number(item.currentPhysicalQuantity) || 0);
+        const newPhysicalQuantity = adjustedBoxes * item.収容数;
+        return {
+            ...item,
+            currentBoxQuantity: currentBoxes,
+            countedBoxes: adjustedBoxes,
+            oldPhysicalQuantity,
+            newPhysicalQuantity,
+            oldReservedQuantity: Math.max(0, Number(item.currentReservedQuantity) || 0),
+            difference: newPhysicalQuantity - oldPhysicalQuantity,
+            isNewProduct: false
+        };
+    }).filter(Boolean);
+
+    tanaoroshiCountedProducts.forEach(item => {
+        if (!item?.品番 || manualProductNumbers.has(item.品番) || invalidProductNumbers.has(item.品番)) {
+            return;
+        }
+
+        if (item.isNewProduct) {
+            summaryItems.push({ ...item });
+        }
+    });
+
+    if (
+        currentTanaoroshiProduct?.品番 &&
+        !manualProductNumbers.has(currentTanaoroshiProduct.品番) &&
+        !invalidProductNumbers.has(currentTanaoroshiProduct.品番) &&
+        currentTanaoroshiProduct.isNewProduct
+    ) {
+        summaryItems.push({
+            品番: currentTanaoroshiProduct.品番,
+            品名: currentTanaoroshiProduct.品名,
+            背番号: currentTanaoroshiProduct.背番号,
+            収容数: currentTanaoroshiProduct.収容数,
+            imageURL: currentTanaoroshiProduct.imageURL,
+            isNewProduct: true,
+            oldPhysicalQuantity: currentTanaoroshiProduct.currentPhysicalQuantity || 0,
+            newPhysicalQuantity: currentTanaoroshiProduct.countedPieces || 0,
+            oldReservedQuantity: currentTanaoroshiProduct.currentReservedQuantity || 0,
+            countedBoxes: currentTanaoroshiProduct.countedBoxes || 0,
+            difference: (currentTanaoroshiProduct.countedPieces || 0) - (currentTanaoroshiProduct.currentPhysicalQuantity || 0)
+        });
+    }
+
+    return summaryItems;
+}
+
+function getScanAssistSummaryItems() {
+    return scanAssistState.context === 'nyuko'
+        ? buildNyukoManualSummaryItems()
+        : buildTanaoroshiManualSummaryItems();
+}
+
+function updateScanAssistReviewButton() {
+    const reviewButton = document.getElementById('scanAssistManualReviewBtn');
+    const reviewText = document.getElementById('scanAssistManualReviewText');
+    const pendingItems = getScanAssistManualPendingItems();
+
+    reviewButton.disabled = pendingItems.length === 0;
+    reviewText.textContent = getScanAssistText('reviewButton', [pendingItems.length]);
+}
+
+function buildNyukoManualAppliedProductData(item) {
+    const cachedProductData = getNyukoCachedProductData(item.品番);
+
+    return {
+        品番: item.品番,
+        品名: cachedProductData?.品名 || item.品名 || '',
+        背番号: cachedProductData?.背番号 || item.背番号 || '',
+        収容数: item.収容数 || cachedProductData?.収容数 || 0,
+        imageURL: cachedProductData?.imageURL || item.imageURL || '',
+        inventoryExists: Boolean(cachedProductData?.inventoryExists),
+        currentPhysicalQuantity: Math.max(0, Number(cachedProductData?.currentPhysicalQuantity) || 0),
+        currentReservedQuantity: Math.max(0, Number(cachedProductData?.currentReservedQuantity) || 0)
+    };
+}
+
+function applyNyukoManualChanges(pendingItems) {
+    let lastChangedProductNumber = null;
+
+    pendingItems.forEach(item => {
+        const existingIndex = nyukoInputProducts.findIndex(product => product.品番 === item.品番);
+
+        if (item.targetBoxes <= 0) {
+            if (existingIndex !== -1) {
+                nyukoInputProducts.splice(existingIndex, 1);
+                lastChangedProductNumber = item.品番;
+            }
+            return;
+        }
+
+        const productData = buildNyukoManualAppliedProductData(item);
+        const nextProduct = {
+            品番: productData.品番,
+            品名: productData.品名,
+            背番号: productData.背番号,
+            収容数: productData.収容数,
+            imageURL: productData.imageURL,
+            inventoryExists: productData.inventoryExists,
+            oldPhysicalQuantity: productData.currentPhysicalQuantity,
+            oldReservedQuantity: productData.currentReservedQuantity,
+            inputQuantity: item.targetBoxes * productData.収容数,
+            inputBoxes: item.targetBoxes
+        };
+
+        if (existingIndex !== -1) {
+            nyukoInputProducts[existingIndex] = {
+                ...nyukoInputProducts[existingIndex],
+                ...nextProduct
+            };
+        } else {
+            nyukoInputProducts.push(nextProduct);
+        }
+
+        setNyukoCachedProductData(item.品番, productData, Date.now());
+        lastChangedProductNumber = item.品番;
+    });
+
+    saveNyukoToStorage();
+    updateNyukoSummaryList();
+
+    if (nyukoInputProducts.length === 0) {
+        currentDisplayedProduct = null;
+        document.getElementById('nyukoInitialState').classList.remove('hidden');
+        document.getElementById('nyukoActiveProduct').classList.add('hidden');
+        return null;
+    }
+
+    const nextDisplayProductNumber = lastChangedProductNumber && nyukoInputProducts.some(product => product.品番 === lastChangedProductNumber)
+        ? lastChangedProductNumber
+        : nyukoInputProducts[0].品番;
+
+    showProductInDisplay(nextDisplayProductNumber);
+    flashCounterArea('success');
+    return nextDisplayProductNumber;
+}
+
+function applyTanaoroshiManualChanges(pendingItems) {
+    let clearedCurrentProduct = false;
+
+    pendingItems.forEach(item => {
+        const existingIndex = tanaoroshiCountedProducts.findIndex(product => product.品番 === item.品番);
+        if (existingIndex !== -1) {
+            tanaoroshiCountedProducts.splice(existingIndex, 1);
+        }
+
+        if (currentTanaoroshiProduct?.品番 === item.品番) {
+            currentTanaoroshiProduct = null;
+            clearedCurrentProduct = true;
+        }
+
+        tanaoroshiProductCache[item.品番] = {
+            data: {
+                品番: item.品番,
+                品名: item.品名 || '',
+                背番号: item.背番号 || '',
+                収容数: item.収容数,
+                imageURL: item.imageURL || '',
+                inventoryExists: true,
+                isNewProduct: false,
+                currentPhysicalQuantity: Math.max(0, Number(item.currentPhysicalQuantity) || 0),
+                currentReservedQuantity: Math.max(0, Number(item.currentReservedQuantity) || 0)
+            },
+            timestamp: Date.now()
+        };
+
+        if (item.targetBoxes === Math.max(0, Number(item.currentBoxQuantity) || 0)) {
+            return;
+        }
+
+        tanaoroshiCountedProducts.push({
+            品番: item.品番,
+            品名: item.品名,
+            背番号: item.背番号,
+            収容数: item.収容数,
+            imageURL: item.imageURL,
+            isNewProduct: false,
+            oldPhysicalQuantity: Math.max(0, Number(item.currentPhysicalQuantity) || 0),
+            newPhysicalQuantity: item.targetBoxes * item.収容数,
+            oldReservedQuantity: Math.max(0, Number(item.currentReservedQuantity) || 0),
+            countedBoxes: item.targetBoxes,
+            difference: (item.targetBoxes * item.収容数) - (Math.max(0, Number(item.currentPhysicalQuantity) || 0))
+        });
+    });
+
+    saveTanaoroshiToStorage();
+    updateTanaoroshiSummaryList();
+
+    if (clearedCurrentProduct) {
+        document.getElementById('tanaoroshiInitialState').classList.remove('hidden');
+        document.getElementById('tanaoroshiActiveProduct').classList.add('hidden');
+    }
+}
+
+async function applyScanAssistManualChanges() {
+    const pendingItems = getScanAssistManualPendingItems();
+    if (pendingItems.length === 0) {
+        showToast(`❌ ${scanAssistState.context === 'nyuko' ? getScanAssistText('noNyukoChanges') : getScanAssistText('noInventoryChanges')}`, 'error');
+        return;
+    }
+
+    const actionButton = document.getElementById('scanAssistManualReviewBtn');
+    const actionLabel = document.getElementById('scanAssistManualReviewText');
+    const originalLabel = actionLabel.textContent;
+
+    actionButton.disabled = true;
+
+    try {
+        if (scanAssistState.context === 'nyuko') {
+            applyNyukoManualChanges(pendingItems);
+        } else {
+            applyTanaoroshiManualChanges(pendingItems);
+        }
+
+        closeScanAssistSession();
+        showToast(`✅ ${getScanAssistText('addedToListToast', [pendingItems.length])}`, 'success');
+    } catch (error) {
+        console.error('Error applying manual scan assist changes:', error);
+        showToast(`❌ ${t('error-occurred')}`, 'error');
+    } finally {
+        actionButton.disabled = false;
+        actionLabel.textContent = originalLabel;
+    }
+}
+
+function createScanAssistSummaryRow(item) {
+    if (scanAssistState.context === 'nyuko') {
+        return `
+            <div class='rounded-2xl border border-gray-200 bg-white p-4 shadow-sm'>
+                <div class='flex items-start justify-between gap-4'>
+                    <div>
+                        <div class='flex flex-wrap items-center gap-2'>
+                            <span class='rounded-full bg-purple-100 px-3 py-1 text-sm font-bold text-purple-700'>${item.背番号 || '-'}</span>
+                            <span class='text-sm font-semibold text-gray-900'>${item.品番}</span>
+                        </div>
+                        <p class='mt-2 text-sm text-gray-700'>${item.品名 || '-'}</p>
+                    </div>
+                    <div class='text-right'>
+                        <p class='text-xl font-bold text-purple-700'>${item.inputBoxes}${getScanAssistText('boxesLabel')}</p>
+                        <p class='text-sm text-gray-500'>${item.inputQuantity}${getScanAssistText('piecesLabel')}</p>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    const diffClass = item.difference > 0 ? 'text-green-600' : item.difference < 0 ? 'text-red-600' : 'text-gray-500';
+    const diffLabel = `${item.difference > 0 ? '+' : ''}${item.difference}${getScanAssistText('piecesLabel')}`;
+
+    return `
+        <div class='rounded-2xl border border-gray-200 bg-white p-4 shadow-sm'>
+            <div class='flex items-start justify-between gap-4'>
+                <div>
+                    <div class='flex flex-wrap items-center gap-2'>
+                        <span class='rounded-full bg-blue-100 px-3 py-1 text-sm font-bold text-blue-700'>${item.背番号 || '-'}</span>
+                        <span class='text-sm font-semibold text-gray-900'>${item.品番}</span>
+                    </div>
+                    <p class='mt-2 text-sm text-gray-700'>${item.品名 || '-'}</p>
+                    <p class='mt-2 text-sm text-gray-500'>${item.currentBoxQuantity}${getScanAssistText('boxesLabel')} (${item.oldPhysicalQuantity}${getScanAssistText('piecesLabel')}) → ${item.countedBoxes}${getScanAssistText('boxesLabel')} (${item.newPhysicalQuantity}${getScanAssistText('piecesLabel')})</p>
+                </div>
+                <div class='text-right'>
+                    <p class='text-sm font-semibold ${diffClass}'>${diffLabel}</p>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function openScanAssistSummary() {
+    const summaryItems = getScanAssistSummaryItems();
+    if (summaryItems.length === 0) {
+        showToast(`❌ ${scanAssistState.context === 'nyuko' ? getScanAssistText('noNyukoSummary') : getScanAssistText('noInventorySummary')}`, 'error');
+        return;
+    }
+
+    const context = getScanAssistContext(scanAssistState.context);
+    document.getElementById('scanAssistSummaryLabel').textContent = context.label;
+    document.getElementById('scanAssistSummaryTitle').textContent = scanAssistState.context === 'nyuko'
+        ? getScanAssistText('summaryTitleNyuko')
+        : getScanAssistText('summaryTitleInventory');
+    document.getElementById('scanAssistSummaryDescription').textContent = scanAssistState.context === 'nyuko'
+        ? getScanAssistText('summaryDescriptionNyuko')
+        : getScanAssistText('summaryDescriptionInventory');
+    document.getElementById('scanAssistSummaryBackText').textContent = getScanAssistText('summaryBack');
+    document.getElementById('scanAssistSummaryConfirmText').textContent = getScanAssistText('summaryConfirm');
+    document.getElementById('scanAssistSummaryList').innerHTML = summaryItems.map(createScanAssistSummaryRow).join('');
+    document.getElementById('scanAssistManualModal').classList.add('hidden');
+    document.getElementById('scanAssistSummaryModal').classList.remove('hidden');
+    syncBlockingModalBodyScroll();
+}
+
+function resetTanaoroshiStateAfterSuccessfulSubmission() {
+    localStorage.removeItem(TANAOROSHI_STORAGE_KEY);
+    localStorage.removeItem(TANAOROSHI_CACHE_KEY);
+    tanaoroshiCountedProducts = [];
+    tanaoroshiProductCache = {};
+    currentTanaoroshiProduct = null;
+    document.getElementById('tanaoroshiInitialState').classList.remove('hidden');
+    document.getElementById('tanaoroshiActiveProduct').classList.add('hidden');
+    updateTanaoroshiSummaryList();
+}
+
+function resetNyukoStateAfterSuccessfulSubmission() {
+    localStorage.removeItem(NYUKO_STORAGE_KEY);
+    localStorage.removeItem(NYUKO_CACHE_KEY);
+    nyukoInputProducts = [];
+    nyukoProductCache = {};
+    currentDisplayedProduct = null;
+    document.getElementById('nyukoInitialState').classList.remove('hidden');
+    document.getElementById('nyukoActiveProduct').classList.add('hidden');
+    updateNyukoSummaryList();
+}
+
+async function submitTanaoroshiProductsPayload(countedProducts) {
+    const response = await fetch(`${API_BASE_URL}/tanaoroshi/submit`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            countedProducts,
+            submittedBy: currentWorker || 'Tablet User',
+            factory
+        })
+    });
+
+    if (!response.ok) {
+        throw new Error('Submission failed');
+    }
+
+    return response.json();
+}
+
+async function submitNyukoProductsPayload(inputProducts) {
+    const response = await fetch(`${API_BASE_URL}/nyuko/submit`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            inputProducts,
+            submittedBy: currentWorker || 'Tablet User',
+            factory
+        })
+    });
+
+    if (!response.ok) {
+        throw new Error('Submission failed');
+    }
+
+    return response.json();
+}
+
+async function confirmScanAssistSummary() {
+    const summaryItems = getScanAssistSummaryItems();
+    if (summaryItems.length === 0) {
+        return;
+    }
+
+    const confirmButton = document.getElementById('scanAssistSummaryConfirmBtn');
+    const confirmLabel = document.getElementById('scanAssistSummaryConfirmText');
+    const originalLabel = confirmLabel.textContent;
+    const overlayId = scanAssistState.context === 'nyuko' ? 'nyukoUploadOverlay' : 'tanaoroshiUploadOverlay';
+
+    confirmButton.disabled = true;
+    confirmLabel.textContent = t('submitting');
+    document.getElementById(overlayId).classList.remove('hidden');
+
+    try {
+        if (scanAssistState.context === 'nyuko') {
+            const result = await submitNyukoProductsPayload(summaryItems);
+            resetNyukoStateAfterSuccessfulSubmission();
+            closeScanAssistSession();
+            showToast(`✅ ${result.processedCount}${t('products-received')}`, 'success');
+        } else {
+            const result = await submitTanaoroshiProductsPayload(summaryItems);
+            resetTanaoroshiStateAfterSuccessfulSubmission();
+            closeScanAssistSession();
+            showToast(`✅ ${result.processedCount}${t('products-updated')}`, 'success');
+        }
+    } catch (error) {
+        console.error('Error submitting scan assist summary:', error);
+        showToast(`❌ ${t('submit-failed')}`, 'error');
+    } finally {
+        document.getElementById(overlayId).classList.add('hidden');
+        confirmButton.disabled = false;
+        confirmLabel.textContent = originalLabel;
+    }
+}
 
 // Available tasks data
 let availableTasks = [
@@ -4965,6 +6422,10 @@ function tanaoroshiKeyHandler(event) {
     if (currentScreen !== 'inventory') {
         return;
     }
+
+    if (hasBlockingModalOpen()) {
+        return;
+    }
     
     // Ignore if user is typing in an input field
     if (event.target.tagName === 'INPUT' || event.target.tagName === 'TEXTAREA') {
@@ -5000,7 +6461,7 @@ async function processTanaoroshiScan(scanData) {
     const parts = scanData.split(',');
     if (parts.length !== 2) {
         showToast('❌ ' + t('qr-format-invalid'), 'error');
-        return;
+        return false;
     }
 
     const scannedProductNumber = parts[0].trim();
@@ -5008,7 +6469,7 @@ async function processTanaoroshiScan(scanData) {
 
     if (!scannedProductNumber || isNaN(scannedBoxQuantity)) {
         showToast('❌ ' + t('qr-data-invalid'), 'error');
-        return;
+        return false;
     }
     
     // STRICT MODE: If a product is already being counted, only allow same product
@@ -5028,7 +6489,7 @@ async function processTanaoroshiScan(scanData) {
             // Flash red on counter area
             flashTanaoroshiCounterArea('error');
             
-            return;
+            return false;
         }
         
         // Validate box quantity matches 収容数
@@ -5043,7 +6504,7 @@ async function processTanaoroshiScan(scanData) {
                 }, 2000);
             }
             
-            return;
+            return false;
         }
         
         // Increment count for same product
@@ -5062,9 +6523,10 @@ async function processTanaoroshiScan(scanData) {
         flashTanaoroshiCounterArea('success');
         
         console.log(`✅ Box scanned: ${currentTanaoroshiProduct.countedBoxes} boxes (${currentTanaoroshiProduct.countedPieces} pieces)`);
+        return true;
     } else {
         // No product locked - start counting a new product
-        await startCountingProduct(scannedProductNumber, scannedBoxQuantity);
+        return startCountingProduct(scannedProductNumber, scannedBoxQuantity);
     }
 }
 
@@ -5105,7 +6567,7 @@ async function startCountingProduct(productNumber, boxQuantity) {
                 } else {
                     showToast('❌ ' + t('product-fetch-failed'), 'error');
                 }
-                return;
+                return false;
             }
             
             productData = await response.json();
@@ -5138,7 +6600,7 @@ async function startCountingProduct(productNumber, boxQuantity) {
                 }, 2000);
             }
             
-            return;
+            return false;
         }
         
         // Check if this product already exists in the counted list
@@ -5157,7 +6619,7 @@ async function startCountingProduct(productNumber, boxQuantity) {
             
             if (!confirmOverwrite) {
                 showToast('キャンセルしました', 'info');
-                return;
+                return false;
             }
             
             // Remove existing entry
@@ -5181,7 +6643,7 @@ async function startCountingProduct(productNumber, boxQuantity) {
 
             if (!confirmAdd) {
                 showToast(t('cancelled'), 'info');
-                return;
+                return false;
             }
 
             showToast('📦 ' + t('adding-new-product'), 'info');
@@ -5213,10 +6675,12 @@ async function startCountingProduct(productNumber, boxQuantity) {
         flashTanaoroshiCounterArea('success');
 
         showToast('✅ ' + t('count-start'), 'success');
+        return true;
 
     } catch (error) {
         console.error('Error starting product count:', error);
         showToast('❌ ' + t('error-occurred'), 'error');
+        return false;
     }
 }
 
@@ -5609,50 +7073,12 @@ async function submitTanaoroshiCount() {
     }
 
     try {
-        // Prepare data
-        const submissionData = {
-            countedProducts: tanaoroshiCountedProducts,
-            submittedBy: currentWorker || 'Tablet User',
-            factory: factory // Include factory location
-        };
-        
-        console.log('📤 Submitting tanaoroshi:', submissionData);
-        console.log('🏭 Factory location:', factory);
-        
-        // Submit to API
-        const response = await fetch(`${API_BASE_URL}/tanaoroshi/submit`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(submissionData)
-        });
-        
-        if (!response.ok) {
-            throw new Error('Submission failed');
-        }
-        
-        const result = await response.json();
+        const result = await submitTanaoroshiProductsPayload(tanaoroshiCountedProducts);
         console.log('✅ Submission result:', result);
 
         // Hide overlay
         uploadOverlay.classList.add('hidden');
-        
-        // Clear localStorage after successful submission
-        localStorage.removeItem(TANAOROSHI_STORAGE_KEY);
-        localStorage.removeItem(TANAOROSHI_CACHE_KEY);
-        
-        // Reset state
-        tanaoroshiCountedProducts = [];
-        tanaoroshiProductCache = {};
-        currentTanaoroshiProduct = null;
-        
-        console.log('🗑️ Cleared tanaoroshi cache after successful submission');
-
-        // Reset UI immediately
-        document.getElementById('tanaoroshiInitialState').classList.remove('hidden');
-        document.getElementById('tanaoroshiActiveProduct').classList.add('hidden');
-        updateTanaoroshiSummaryList();
+        resetTanaoroshiStateAfterSuccessfulSubmission();
         
         showToast(`✅ ${result.processedCount}${t('products-updated')}`, 'success');
 
@@ -5688,6 +7114,102 @@ let nyukoScanBuffer = ''; // Buffer for QR scan input
 const NYUKO_STORAGE_KEY = 'nodaSystem_nyukoInputProducts';
 const NYUKO_CACHE_KEY = 'nodaSystem_nyukoProductCache';
 
+function getNyukoStoredProduct(productNumber) {
+    return nyukoInputProducts.find(product => product.品番 === productNumber) || null;
+}
+
+function buildNyukoCachedProductDataFromStoredProduct(product) {
+    if (!product) {
+        return null;
+    }
+
+    return {
+        品番: product.品番,
+        品名: product.品名 || '',
+        背番号: product.背番号 || '',
+        収容数: product.収容数 || 0,
+        imageURL: product.imageURL || '',
+        inventoryExists: Boolean(product.inventoryExists),
+        currentPhysicalQuantity: product.oldPhysicalQuantity || 0,
+        currentReservedQuantity: product.oldReservedQuantity || 0
+    };
+}
+
+function normalizeNyukoProductCacheEntry(productNumber, cacheEntry) {
+    if (!cacheEntry || typeof cacheEntry !== 'object') {
+        return null;
+    }
+
+    const storedProductData = buildNyukoCachedProductDataFromStoredProduct(getNyukoStoredProduct(productNumber)) || {};
+    const rawData = cacheEntry.data && typeof cacheEntry.data === 'object'
+        ? cacheEntry.data
+        : cacheEntry;
+
+    return {
+        data: {
+            ...storedProductData,
+            ...rawData
+        },
+        timestamp: typeof cacheEntry.timestamp === 'number' ? cacheEntry.timestamp : Date.now()
+    };
+}
+
+function normalizeNyukoProductCache() {
+    const normalizedCache = {};
+
+    Object.entries(nyukoProductCache).forEach(([productNumber, cacheEntry]) => {
+        const normalizedEntry = normalizeNyukoProductCacheEntry(productNumber, cacheEntry);
+        if (normalizedEntry) {
+            normalizedCache[productNumber] = normalizedEntry;
+        }
+    });
+
+    nyukoInputProducts.forEach(product => {
+        if (!normalizedCache[product.品番]) {
+            const storedProductData = buildNyukoCachedProductDataFromStoredProduct(product);
+            if (storedProductData) {
+                normalizedCache[product.品番] = {
+                    data: storedProductData,
+                    timestamp: Date.now()
+                };
+            }
+        }
+    });
+
+    nyukoProductCache = normalizedCache;
+}
+
+function getNyukoCachedProductData(productNumber) {
+    const normalizedEntry = normalizeNyukoProductCacheEntry(productNumber, nyukoProductCache[productNumber]);
+    if (normalizedEntry) {
+        nyukoProductCache[productNumber] = normalizedEntry;
+        return normalizedEntry.data;
+    }
+
+    const storedProductData = buildNyukoCachedProductDataFromStoredProduct(getNyukoStoredProduct(productNumber));
+    if (!storedProductData) {
+        return null;
+    }
+
+    nyukoProductCache[productNumber] = {
+        data: storedProductData,
+        timestamp: Date.now()
+    };
+
+    return storedProductData;
+}
+
+function setNyukoCachedProductData(productNumber, productData, timestamp = Date.now()) {
+    const storedProductData = buildNyukoCachedProductDataFromStoredProduct(getNyukoStoredProduct(productNumber)) || {};
+    nyukoProductCache[productNumber] = {
+        data: {
+            ...storedProductData,
+            ...productData
+        },
+        timestamp
+    };
+}
+
 // Initialize nyuko when screen is shown
 function openNyukoSystem() {
     // Activate audio for nyuko mode (beep + alert sounds)
@@ -5719,8 +7241,9 @@ function initializeNyuko() {
     if (nyukoInputProducts.length > 0) {
         // Show the first product in the list
         const firstProduct = nyukoInputProducts[0];
-        if (nyukoProductCache[firstProduct.品番]) {
-            updateProductDisplay(firstProduct.品番, nyukoProductCache[firstProduct.品番]);
+        const firstProductData = getNyukoCachedProductData(firstProduct.品番);
+        if (firstProductData) {
+            updateProductDisplay(firstProduct.品番, firstProductData);
         } else {
             document.getElementById('nyukoInitialState').classList.remove('hidden');
             document.getElementById('nyukoActiveProduct').classList.add('hidden');
@@ -5758,6 +7281,8 @@ function loadNyukoFromStorage() {
         } else {
             nyukoProductCache = {};
         }
+
+        normalizeNyukoProductCache();
     } catch (error) {
         console.error('Error loading nyuko from storage:', error);
         nyukoInputProducts = [];
@@ -5768,6 +7293,7 @@ function loadNyukoFromStorage() {
 // Save nyuko data to localStorage
 function saveNyukoToStorage() {
     try {
+        normalizeNyukoProductCache();
         localStorage.setItem(NYUKO_STORAGE_KEY, JSON.stringify(nyukoInputProducts));
         localStorage.setItem(NYUKO_CACHE_KEY, JSON.stringify(nyukoProductCache));
         console.log('💾 Saved', nyukoInputProducts.length, 'products to storage');
@@ -5791,6 +7317,10 @@ function setupNyukoKeyboardListener() {
 function nyukoKeyHandler(event) {
     // Only process if on nyuko screen
     if (currentScreen !== 'nyuko') {
+        return;
+    }
+
+    if (hasBlockingModalOpen()) {
         return;
     }
     
@@ -5828,7 +7358,7 @@ async function processNyukoScan(scanData) {
     const parts = scanData.split(',');
     if (parts.length !== 2) {
         showToast('❌ ' + t('qr-format-invalid'), 'error');
-        return;
+        return false;
     }
 
     const scannedProductNumber = parts[0].trim();
@@ -5836,11 +7366,11 @@ async function processNyukoScan(scanData) {
 
     if (!scannedProductNumber || isNaN(scannedBoxQuantity)) {
         showToast('❌ ' + t('qr-data-invalid'), 'error');
-        return;
+        return false;
     }
     
     // Process the scan - fetch product data if needed, then add to list
-    await processNyukoProductScan(scannedProductNumber, scannedBoxQuantity);
+    return processNyukoProductScan(scannedProductNumber, scannedBoxQuantity);
 }
 
 // Process product scan - fetch data and add to list
@@ -5850,10 +7380,11 @@ async function processNyukoProductScan(productNumber, boxQuantity) {
         
         // Check if we have cached data for this product (with expiration check)
         const cachedEntry = nyukoProductCache[productNumber];
+        const cachedProductData = getNyukoCachedProductData(productNumber);
         const now = Date.now();
         
         if (cachedEntry && cachedEntry.timestamp && (now - cachedEntry.timestamp) < NYUKO_CACHE_EXPIRATION) {
-            productData = cachedEntry.data;
+            productData = cachedProductData;
             console.log('📋 Using cached product data:', productNumber);
             console.log('📦 Cache age:', Math.floor((now - cachedEntry.timestamp) / 1000), 'seconds');
             console.log('📦 Cached data details:', {
@@ -5889,7 +7420,7 @@ async function processNyukoProductScan(productNumber, boxQuantity) {
                     }, 2000);
                 }
                 
-                return;
+                return false;
             }
             
             productData = await response.json();
@@ -5902,10 +7433,7 @@ async function processNyukoProductScan(productNumber, boxQuantity) {
             });
             
             // Cache the product data with timestamp
-            nyukoProductCache[productNumber] = {
-                data: productData,
-                timestamp: Date.now()
-            };
+            setNyukoCachedProductData(productNumber, productData, Date.now());
             console.log('💾 Cached product data for:', productNumber, 'at', new Date().toLocaleString());
         }
         
@@ -5926,7 +7454,7 @@ async function processNyukoProductScan(productNumber, boxQuantity) {
                 flashCounterArea('error');
             }
             
-            return;
+            return false;
         }
         
         // Add to list or increment existing entry
@@ -5942,6 +7470,7 @@ async function processNyukoProductScan(productNumber, boxQuantity) {
         
         // Flash success on counter area
         flashCounterArea('success');
+        return true;
         
     } catch (error) {
         console.error('Error processing product scan:', error);
@@ -5954,6 +7483,7 @@ async function processNyukoProductScan(productNumber, boxQuantity) {
                 audioManager.stopAlert();
             }, 2000);
         }
+        return false;
     }
 }
 
@@ -6210,7 +7740,7 @@ function createNyukoSummaryRow(product, index) {
 
 // Show a product in the display area (when clicking on list item)
 function showProductInDisplay(productNumber) {
-    const productData = nyukoProductCache[productNumber];
+    const productData = getNyukoCachedProductData(productNumber);
     if (productData) {
         updateProductDisplay(productNumber, productData);
         updateNyukoSummaryList(); // Refresh to update active indicator
@@ -6349,60 +7879,12 @@ async function submitNyukoInput() {
     }
 
     try {
-        // Prepare data
-        const submissionData = {
-            inputProducts: nyukoInputProducts,
-            submittedBy: currentWorker || 'Tablet User',
-            factory: factory // Include factory location
-        };
-        
-        console.log('📤 Submitting nyuko:', submissionData);
-        console.log('🏭 Factory location:', factory);
-        
-        // Submit to API
-        const response = await fetch(`${API_BASE_URL}/nyuko/submit`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(submissionData)
-        });
-        
-        if (!response.ok) {
-            throw new Error('Submission failed');
-        }
-        
-        const result = await response.json();
+        const result = await submitNyukoProductsPayload(nyukoInputProducts);
         console.log('✅ Submission result:', result);
 
         // Hide overlay
         uploadOverlay.classList.add('hidden');
-        
-        // Clear localStorage after successful submission
-        localStorage.removeItem(NYUKO_STORAGE_KEY);
-        localStorage.removeItem(NYUKO_CACHE_KEY);
-        
-        // Clear in-memory cache to force fresh data fetch on next scan
-        console.log('🗑️ Clearing nyukoProductCache...');
-        console.log('📦 Cache before clear:', Object.keys(nyukoProductCache));
-        nyukoProductCache = {};
-        console.log('✅ Cache cleared, nyukoProductCache is now empty:', Object.keys(nyukoProductCache).length === 0);
-        
-        // Reset state
-        nyukoInputProducts = [];
-        console.log('📦 Cache before clear:', Object.keys(nyukoProductCache));
-        nyukoProductCache = {};
-        console.log('✅ Cache cleared');
-        
-        // Reset state
-        nyukoInputProducts = [];
-        nyukoProductCache = {};
-        currentDisplayedProduct = null;
-
-        // Reset UI immediately
-        document.getElementById('nyukoInitialState').classList.remove('hidden');
-        document.getElementById('nyukoActiveProduct').classList.add('hidden');
-        updateNyukoSummaryList();
+        resetNyukoStateAfterSuccessfulSubmission();
         
         showToast(`✅ ${result.processedCount}${t('products-received')}`, 'success');
 

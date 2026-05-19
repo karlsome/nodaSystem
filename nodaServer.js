@@ -716,6 +716,40 @@ async function getLatestInventoryRecordByProductNumber(productNumber) {
     return inventoryResults[0] || null;
 }
 
+function buildManualEntrySearchRegex(search = '') {
+    const normalizedSearch = String(search || '').trim();
+    if (!normalizedSearch) {
+        return null;
+    }
+
+    return new RegExp(normalizedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+}
+
+function getValidBoxCapacity(value) {
+    const boxCapacity = parseInt(value, 10);
+    return Number.isFinite(boxCapacity) && boxCapacity > 0 ? boxCapacity : null;
+}
+
+function calculateBoxesFromPieces(pieceQuantity, boxCapacity) {
+    const safePieces = Math.max(0, Number(pieceQuantity) || 0);
+    const safeBoxCapacity = getValidBoxCapacity(boxCapacity);
+
+    if (!safeBoxCapacity) {
+        return 0;
+    }
+
+    return safePieces === 0 ? 0 : Math.ceil(safePieces / safeBoxCapacity);
+}
+
+function buildManualEntryInvalidItem(masterData, fallback = {}) {
+    return {
+        品番: masterData?.品番 || fallback.品番 || '',
+        背番号: masterData?.背番号 || fallback.背番号 || '',
+        品名: masterData?.品名 || fallback.品名 || '',
+        reason: 'invalid-master-data'
+    };
+}
+
 async function getLatestInventoryMapByBackNumbers(backNumbers) {
     if (!backNumbers || backNumbers.length === 0) {
         return new Map();
@@ -4523,6 +4557,194 @@ app.post('/api/nyuko/submit', async (req, res) => {
 });
 
 // ==================== END NYUKO API ENDPOINTS ====================
+
+// Get manual-entry candidates for nyuko from masterDB
+app.get('/api/manual-entry/nyuko-items', async (req, res) => {
+    try {
+        const searchRegex = buildManualEntrySearchRegex(req.query.search);
+
+        await client.connect();
+        const masterDb = client.db('Sasaki_Coating_MasterDB');
+        const masterCollection = masterDb.collection('masterDB');
+
+        const query = searchRegex
+            ? {
+                $or: [
+                    { 背番号: searchRegex },
+                    { 品番: searchRegex },
+                    { 品名: searchRegex }
+                ]
+            }
+            : {};
+
+        const masterItems = await masterCollection
+            .find(query, {
+                projection: {
+                    _id: 0,
+                    品番: 1,
+                    背番号: 1,
+                    品名: 1,
+                    収容数: 1,
+                    imageURL: 1
+                }
+            })
+            .sort({ 背番号: 1, 品番: 1 })
+            .toArray();
+
+        const items = [];
+        const invalidItems = [];
+
+        for (const masterItem of masterItems) {
+            const boxCapacity = getValidBoxCapacity(masterItem.収容数);
+
+            if (!boxCapacity) {
+                invalidItems.push(buildManualEntryInvalidItem(masterItem));
+                continue;
+            }
+
+            items.push({
+                品番: masterItem.品番,
+                背番号: masterItem.背番号 || '',
+                品名: masterItem.品名 || '',
+                収容数: boxCapacity,
+                imageURL: masterItem.imageURL || ''
+            });
+        }
+
+        res.json({
+            items,
+            invalidItems
+        });
+    } catch (error) {
+        console.error('Error fetching nyuko manual-entry items:', error);
+        res.status(500).json({ error: 'Failed to fetch nyuko manual-entry items', details: error.message });
+    }
+});
+
+// Get manual-entry candidates for tanaoroshi from latest inventory rows
+app.get('/api/manual-entry/tanaoroshi-items', async (req, res) => {
+    try {
+        const searchRegex = buildManualEntrySearchRegex(req.query.search);
+
+        await client.connect();
+        const submittedDb = client.db('submittedDB');
+        const inventoryCollection = submittedDb.collection('nodaInventoryDB');
+        const masterDb = client.db('Sasaki_Coating_MasterDB');
+        const masterCollection = masterDb.collection('masterDB');
+
+        const latestInventoryItems = await inventoryCollection.aggregate([
+            {
+                $addFields: {
+                    timeStampDate: buildInventoryTimestampExpression()
+                }
+            },
+            {
+                $sort: {
+                    品番: 1,
+                    timeStampDate: -1,
+                    _id: -1
+                }
+            },
+            {
+                $group: {
+                    _id: '$品番',
+                    latestRecord: { $first: '$$ROOT' }
+                }
+            },
+            {
+                $replaceRoot: {
+                    newRoot: '$latestRecord'
+                }
+            }
+        ]).toArray();
+
+        const productNumbers = latestInventoryItems
+            .map(item => item.品番)
+            .filter(Boolean);
+
+        const masterItems = productNumbers.length > 0
+            ? await masterCollection.find(
+                { 品番: { $in: productNumbers } },
+                {
+                    projection: {
+                        _id: 0,
+                        品番: 1,
+                        背番号: 1,
+                        品名: 1,
+                        収容数: 1,
+                        imageURL: 1
+                    }
+                }
+            ).toArray()
+            : [];
+
+        const masterByProductNumber = new Map(masterItems.map(item => [item.品番, item]));
+        const items = [];
+        const invalidItems = [];
+
+        for (const inventoryItem of latestInventoryItems) {
+            const masterItem = masterByProductNumber.get(inventoryItem.品番);
+
+            if (!masterItem) {
+                invalidItems.push(buildManualEntryInvalidItem(null, inventoryItem));
+                continue;
+            }
+
+            const boxCapacity = getValidBoxCapacity(masterItem.収容数);
+            if (!boxCapacity) {
+                invalidItems.push(buildManualEntryInvalidItem(masterItem, inventoryItem));
+                continue;
+            }
+
+            const manualEntryItem = {
+                品番: inventoryItem.品番,
+                背番号: masterItem.背番号 || inventoryItem.背番号 || '',
+                品名: masterItem.品名 || '',
+                収容数: boxCapacity,
+                imageURL: masterItem.imageURL || '',
+                currentPhysicalQuantity: Number(inventoryItem.physicalQuantity ?? inventoryItem.runningQuantity ?? 0) || 0,
+                currentReservedQuantity: Number(inventoryItem.reservedQuantity ?? 0) || 0,
+                currentAvailableQuantity: Number(inventoryItem.availableQuantity ?? 0) || 0
+            };
+
+            manualEntryItem.currentBoxQuantity = calculateBoxesFromPieces(
+                manualEntryItem.currentPhysicalQuantity,
+                boxCapacity
+            );
+
+            if (searchRegex) {
+                const searchableValues = [
+                    manualEntryItem.背番号,
+                    manualEntryItem.品番,
+                    manualEntryItem.品名
+                ];
+
+                if (!searchableValues.some(value => searchRegex.test(String(value || '')))) {
+                    continue;
+                }
+            }
+
+            items.push(manualEntryItem);
+        }
+
+        items.sort((left, right) => {
+            const backNumberCompare = String(left.背番号 || '').localeCompare(String(right.背番号 || ''), 'ja');
+            if (backNumberCompare !== 0) {
+                return backNumberCompare;
+            }
+
+            return String(left.品番 || '').localeCompare(String(right.品番 || ''), 'ja');
+        });
+
+        res.json({
+            items,
+            invalidItems
+        });
+    } catch (error) {
+        console.error('Error fetching tanaoroshi manual-entry items:', error);
+        res.status(500).json({ error: 'Failed to fetch tanaoroshi manual-entry items', details: error.message });
+    }
+});
 
 // ==================== MASTER DATA API ENDPOINT ====================
 
