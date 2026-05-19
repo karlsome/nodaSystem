@@ -1374,7 +1374,7 @@ io.on('connection', (socket) => {
 app.get('/api/picking-requests', async (req, res) => {
     try {
         const collection = db.collection(process.env.COLLECTION_NAME);
-        const requests = await collection.find({}).sort({ createdAt: -1 }).toArray();
+        const requests = await collection.find({ status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).toArray();
         res.json(requests);
     } catch (error) {
         console.error('Error fetching picking requests:', error);
@@ -2737,16 +2737,18 @@ app.get('/api/request-numbers', async (req, res) => {
             'lineItems.status': 1
         };
 
+        const baseQuery = { status: { $ne: 'cancelled' } };
+
         if (shouldPaginate) {
             const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
             const limit = normalizePickingPaginationLimit(req.query.limit);
-            const totalItems = await collection.countDocuments({});
+            const totalItems = await collection.countDocuments(baseQuery);
             const totalPages = totalItems > 0 ? Math.ceil(totalItems / limit) : 0;
             const currentPage = totalPages > 0 ? Math.min(page, totalPages) : 1;
             const skip = totalPages > 0 ? (currentPage - 1) * limit : 0;
 
             const requests = await collection.find(
-                {},
+                baseQuery,
                 { projection }
             ).sort({ createdAt: 1, _id: 1 }).skip(skip).limit(limit).toArray();
 
@@ -2765,7 +2767,7 @@ app.get('/api/request-numbers', async (req, res) => {
         }
 
         const requests = await collection.find(
-            {},
+            baseQuery,
             {
                 projection
             }
