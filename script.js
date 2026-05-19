@@ -49,8 +49,8 @@ let isPausedReminderSuppressedForHelp = false;
 
 // API base URL - change this to your server URL
 //const API_BASE_URL = 'http://localhost:3001/api';
-const API_BASE_URL = 'http://192.168.0.186:3001/api';
-//const API_BASE_URL = 'https://nodasystem.onrender.com/api';
+//const API_BASE_URL = 'http://192.168.0.186:3001/api';
+const API_BASE_URL = 'https://nodasystem.onrender.com/api';
 
 // Debug localStorage on page load
 console.log('🔄 Page loaded, checking localStorage availability...');
